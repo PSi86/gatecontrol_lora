@@ -13,6 +13,7 @@
       <button id="btnDiscover">Discover Devices</button>
       <button id="btnStatusSel">Get Status (Selection)</button>
       <button id="btnStatusAll">Get Status (All)</button>
+      <button id="btnFwUpdate">Firmware Update</button>
       <button id="btnForce">Set all Groups</button>
       <button id="btnSave">Save</button>
       <button id="btnReload">Reload</button>
@@ -103,6 +104,87 @@
       <p id="discoverResult" class="muted"></p>
     </form>
   </dialog>
+
+
+  <dialog id="dlgFwUpdate">
+    <form method="dialog" class="gc-form">
+      <h3>Firmware Update</h3>
+      <p class="muted">
+        Der Updater aktiviert den AP pro Node nacheinander via LoRa, verbindet den RotorHazard-Host per <code>nmcli</code> (NetworkManager) zum Node-AP und prüft die volle MAC per <code>/json/info</code>, bevor das OTA-Update ausgeführt wird.
+      </p>
+
+      <div class="row">
+        <label>Targets:</label>
+        <label><input type="radio" name="fwTarget" value="selected" checked> Selection (<span id="fwSelCount">0</span>)</label>
+        <label><input type="radio" name="fwTarget" value="filtered"> Current Filter (<span id="fwFilterCount">0</span>)</label>
+        <label><input type="radio" name="fwTarget" value="all"> All (<span id="fwAllCount">0</span>)</label>
+      </div>
+
+      <div class="row">
+        <label>WLED base URL:</label>
+        <input id="fwBaseUrl" value="http://4.3.2.1" style="width: 240px;" />
+        <span class="muted">Default AP-IP: 4.3.2.1</span>
+      </div>
+
+
+      
+      <div class="row">
+        <label>Host WiFi (nmcli profile):</label>
+        <input id="fwWifiConnName" value="gatecontrol-wled-ap" style="width: 190px;" />
+        <input id="fwWifiIface" value="wlan0" style="width: 110px;" />
+        <input id="fwWifiSsid" value="WLED-AP" style="width: 160px;" />
+        <span class="muted">Activate a pre-created NetworkManager connection profile</span>
+      </div>
+      <div class="row">
+        <label></label>
+
+        <label class="inline"><input id="fwHostWifiEnable" type="checkbox" checked /> Enable host WiFi during update</label>
+        <label class="inline"><input id="fwHostWifiRestore" type="checkbox" checked /> Restore previous host WiFi state after update</label>
+      </div>
+
+      <div class="row">
+        <label>WiFi timeout (s):</label>
+        <input id="fwWifiTimeoutS" type="number" min="5" max="120" value="35" style="width: 90px;" />
+        <span class="muted">How long the host scans/connects to the node AP</span>
+      </div>
+
+
+      <div class="row">
+        <label>Firmware (.bin):</label>
+        <input id="fwBin" type="file" accept=".bin,application/octet-stream" />
+        <button id="btnFwUpload" type="button">Upload to Host</button>
+        <span id="fwBinInfo" class="muted"></span>
+      </div>
+
+      <div class="row">
+        <label>Retries:</label>
+        <input id="fwRetries" type="number" min="1" max="10" value="3" style="width: 90px;" />
+        <span class="muted">Upload retries per device</span>
+      </div>
+
+      <div class="row">
+        <label><input id="fwDoPresets" type="checkbox" /> Upload presets.json</label>
+        <input id="fwPresets" type="file" accept=".json,application/json" disabled />
+        <button id="btnFwUploadPresets" type="button" disabled>Upload</button>
+        <span id="fwPresetsInfo" class="muted"></span>
+      </div>
+
+      <div class="row">
+        <label><input id="fwDoCfg" type="checkbox" /> Upload cfg.json</label>
+        <input id="fwCfg" type="file" accept=".json,application/json" disabled />
+        <button id="btnFwUploadCfg" type="button" disabled>Upload</button>
+        <span id="fwCfgInfo" class="muted"></span>
+      </div>
+
+      <div class="gc-dialog-actions">
+        <button id="btnFwStart" type="button">Start Update</button>
+        <button value="cancel">Close</button>
+      </div>
+
+      <p id="fwHint" class="muted"></p>
+    </form>
+  </dialog>
+
 
   <script src="/gatecontrol/static/gc.js"></script>
 </body>

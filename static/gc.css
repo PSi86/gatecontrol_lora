@@ -40,3 +40,8 @@ select, input{ background:#1a1a23; color:var(--text); border:1px solid #2a2a32; 
 dialog{ border:none; border-radius:12px; background:#14141a; color:var(--text); width:min(520px, 96vw); }
 dialog::backdrop{ background:rgba(0,0,0,.4); }
 .row{ display:flex; align-items:center; gap:10px; margin:8px 0; flex-wrap:wrap; }
+.inline{ display:inline-flex; align-items:center; gap:6px; }
+/* Firmware Update dialog helpers */
+.gc-dialog-actions{ display:flex; gap:8px; justify-content:flex-end; margin-top:12px; flex-wrap:wrap; }
+.gc-form h3{ margin:0 0 6px 0; }
+.gc-form code{ font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace; font-size: 12px; }

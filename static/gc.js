@@ -22,6 +22,7 @@
     busy: false,
     lastTask: null,
     lastMaster: null,
+    fwUploads: { fwId: null, presetsId: null, cfgId: null },
   };
 
   async function apiGet(url){
@@ -41,6 +42,18 @@
     j.__status = res.status;
     return j;
   }
+  async function apiUpload(url, formData){
+    const res = await fetch(url, {
+      method: "POST",
+      body: formData,
+      credentials: "same-origin"
+    });
+    const j = await res.json().catch(()=>({ok:false,error:"Bad JSON"}));
+    j.__status = res.status;
+    return j;
+  }
+
+
 
   function setBusy(isBusy){
     state.busy = !!isBusy;
@@ -259,6 +272,14 @@ function updateNodeCfgUi(){
       if(meta.targetGroupId!==undefined && meta.targetGroupId!==null) mparts.push(`gid ${meta.targetGroupId}`);
       if(meta.selectionCount) mparts.push(`sel ${meta.selectionCount}`);
       if(meta.groupId!==undefined && meta.groupId!==null) mparts.push(`gid ${meta.groupId}`);
+
+      if(name==="fwupdate"){
+        if(meta.index!==undefined && meta.total!==undefined) mparts.push(`${meta.index}/${meta.total}`);
+        if(meta.stage) mparts.push(String(meta.stage));
+        if(meta.attempt && meta.retries) mparts.push(`try ${meta.attempt}/${meta.retries}`);
+        if(meta.message) mparts.push(String(meta.message));
+      }
+
       const p = [
         `${name}…`,
         mparts.length ? `(${mparts.join(", ")})` : "",
@@ -274,17 +295,201 @@ function updateNodeCfgUi(){
       const res = t.result ? JSON.stringify(t.result) : "";
       const err = t.last_error ? `err: ${t.last_error}` : "";
       el.textContent = [ `${name} ${st}`, tail, err || res ].filter(Boolean).join(" · ");
+    }
 
-      // Discover modal helper
-      if(name==="discover"){
-        const r = t.result || {};
-        if(r && typeof r === "object" && $("#discoverResult")){
-          if(st==="done") $("#discoverResult").textContent = `Found: ${r.found ?? "?"}`;
-          else if(st==="error") $("#discoverResult").textContent = `Error: ${t.last_error||"unknown"}`;
-        }
+  // Discover modal helper
+  if(name==="discover"){
+    const r = t.result || {};
+    if(r && typeof r === "object" && $("#discoverResult")){
+      if(st==="done") $("#discoverResult").textContent = `Found: ${r.found ?? "?"}`;
+      else if(st==="error") $("#discoverResult").textContent = `Error: ${t.last_error||"unknown"}`;
+    }
+  }
+
+  // Firmware update modal helper
+  if(name==="fwupdate"){
+    const r = t.result || {};
+    const hintEl = $("#fwHint");
+    if(hintEl){
+      if(st==="done"){
+        const total = (r.devices && r.devices.length) ? r.devices.length : "";
+        const errs = (r.errors && r.errors.length) ? r.errors.length : 0;
+        hintEl.textContent = `Done. ${total ? `devices ${total}, ` : ""}errors ${errs}`;
+      } else if(st==="error"){
+        hintEl.textContent = `Error: ${t.last_error || "unknown"}`;
       }
     }
   }
+
+  }
+
+  // Firmware Update modal
+  function fwDialogCounts(){
+    $("#fwSelCount").textContent = String(state.selected.size || 0);
+    const filtered = (state.selGroupId === null || state.selGroupId === undefined)
+      ? state.devices.length
+      : state.devices.filter(d => Number(d.groupId) === Number(state.selGroupId)).length;
+    $("#fwFilterCount").textContent = String(filtered || 0);
+    $("#fwAllCount").textContent = String(state.devices.length || 0);
+  }
+
+  function fwGetTargetValue(){
+    const el = document.querySelector('input[name="fwTarget"]:checked');
+    return el ? String(el.value) : "selected";
+  }
+
+  function fwMacsForTarget(){
+    const t = fwGetTargetValue();
+    if(t === "selected"){
+      return Array.from(state.selected);
+    }
+    if(t === "filtered"){
+      if(state.selGroupId === null || state.selGroupId === undefined){
+        return state.devices.map(d => d.addr).filter(Boolean);
+      }
+      return state.devices.filter(d => Number(d.groupId) === Number(state.selGroupId)).map(d => d.addr).filter(Boolean);
+    }
+    return state.devices.map(d => d.addr).filter(Boolean);
+  }
+
+  function fwResetUploadsUi(){
+    state.fwUploads = { fwId: null, presetsId: null, cfgId: null };
+    $("#fwBinInfo").textContent = "";
+    $("#fwPresetsInfo").textContent = "";
+    $("#fwCfgInfo").textContent = "";
+    $("#fwHint").textContent = "";
+    $("#fwBin").value = "";
+    $("#fwPresets").value = "";
+    $("#fwCfg").value = "";
+  }
+
+  async function fwUpload(kind, fileInputEl, infoEl){
+    const f = fileInputEl.files && fileInputEl.files[0];
+    if(!f){
+      alert("Please choose a file first.");
+      return null;
+    }
+    const fd = new FormData();
+    fd.append("file", f);
+    fd.append("kind", kind);
+    const r = await apiUpload("/gatecontrol/api/fw/upload", fd);
+    if(!r.ok){
+      alert(r.error || "Upload failed");
+      return null;
+    }
+    const s = `${r.file.name} (${r.file.size} B) sha256 ${String(r.file.sha256||"").slice(0,8)}…`;
+    infoEl.textContent = s;
+    return r.file.id;
+  }
+
+  $("#btnFwUpdate").addEventListener("click", ()=>{
+    try{
+    fwDialogCounts();
+    fwResetUploadsUi();
+
+    // Enable/disable optional controls based on checkboxes
+    $("#fwPresets").disabled = !$("#fwDoPresets").checked;
+    $("#btnFwUploadPresets").disabled = !$("#fwDoPresets").checked;
+    $("#fwCfg").disabled = !$("#fwDoCfg").checked;
+    $("#btnFwUploadCfg").disabled = !$("#fwDoCfg").checked;
+
+    $("#dlgFwUpdate").showModal();
+    } catch(e){
+      console.error(e);
+      alert("Firmware dialog failed to open. Check console for details.");
+    }
+  });
+
+  $("#fwDoPresets").addEventListener("change", ()=>{
+    const on = $("#fwDoPresets").checked;
+    $("#fwPresets").disabled = !on;
+    $("#btnFwUploadPresets").disabled = !on;
+    if(!on){
+      state.fwUploads.presetsId = null;
+      $("#fwPresetsInfo").textContent = "";
+      $("#fwPresets").value = "";
+    }
+  });
+
+  $("#fwDoCfg").addEventListener("change", ()=>{
+    const on = $("#fwDoCfg").checked;
+    $("#fwCfg").disabled = !on;
+    $("#btnFwUploadCfg").disabled = !on;
+    if(!on){
+      state.fwUploads.cfgId = null;
+      $("#fwCfgInfo").textContent = "";
+      $("#fwCfg").value = "";
+    }
+  });
+
+  $("#btnFwUpload").addEventListener("click", async ()=>{
+    const id = await fwUpload("firmware", $("#fwBin"), $("#fwBinInfo"));
+    if(id) state.fwUploads.fwId = id;
+  });
+
+  $("#btnFwUploadPresets").addEventListener("click", async ()=>{
+    const id = await fwUpload("presets", $("#fwPresets"), $("#fwPresetsInfo"));
+    if(id) state.fwUploads.presetsId = id;
+  });
+
+  $("#btnFwUploadCfg").addEventListener("click", async ()=>{
+    const id = await fwUpload("cfg", $("#fwCfg"), $("#fwCfgInfo"));
+    if(id) state.fwUploads.cfgId = id;
+  });
+
+  $("#btnFwStart").addEventListener("click", async ()=>{
+    const macs = fwMacsForTarget();
+    if(!macs.length){
+      alert("No target devices (selection/filter empty).");
+      return;
+    }
+    if(!state.fwUploads.fwId){
+      alert("Please upload the firmware file to the host first.");
+      return;
+    }
+
+    const baseUrl = ($("#fwBaseUrl").value || "").trim() || "http://4.3.2.1";
+    const retries = Number($("#fwRetries").value || 3) || 3;
+
+    const wifiSsid = ($("#fwWifiSsid")?.value || "WLED-AP").trim();
+        const wifiIface = ($("#fwWifiIface")?.value || "wlan0").trim();
+    const wifiConnName = ($("#fwWifiConnName")?.value || "gatecontrol-wled-ap").trim();
+        const wifiTimeoutS = Number($("#fwWifiTimeoutS")?.value || 35) || 35;
+
+    const hostWifiEnable = !!($("#fwHostWifiEnable")?.checked);
+    const hostWifiRestore = !!($("#fwHostWifiRestore")?.checked);
+
+    const body = { macs, fwId: state.fwUploads.fwId, baseUrl, retries, hostWifiEnable, hostWifiRestore,
+      wifi: { connName: wifiConnName, ssid: wifiSsid, iface: wifiIface, timeoutS: wifiTimeoutS }
+    };
+
+    if($("#fwDoPresets").checked){
+      if(!state.fwUploads.presetsId){
+        alert("Presets enabled but presets.json is not uploaded yet.");
+        return;
+      }
+      body.presetsId = state.fwUploads.presetsId;
+    }
+    if($("#fwDoCfg").checked){
+      if(!state.fwUploads.cfgId){
+        alert("cfg enabled but cfg.json is not uploaded yet.");
+        return;
+      }
+      body.cfgId = state.fwUploads.cfgId;
+    }
+
+    const r = await apiPost("/gatecontrol/api/fw/start", body);
+    if(r.busy){
+      alert(`Busy: ${r.task?.name || "task"} is running`);
+      return;
+    }
+    if(!r.ok){
+      alert(r.error || "Failed to start firmware update.");
+      return;
+    }
+
+    $("#dlgFwUpdate").close();
+  });
 
   // SSE connection
   function connectEvents(){
