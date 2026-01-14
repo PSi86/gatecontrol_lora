@@ -406,17 +406,129 @@ class GateControl_LoRa(GateControlUIMixin):
             brightness=b,
         )
 
-    def sendConfig(self, option, flags, recv3=b"\xFF\xFF\xFF"):
+    def sendConfig(self, option, data0=0, data1=0, data2=0, data3=0, recv3=b"\xFF\xFF\xFF"):
         if not getattr(self, "lora", None):
             logger.warning("sendConfig: communicator not ready")
             return
-        self.lora.send_config(recv3=recv3, option=int(option) & 0xFF, flags=int(flags) & 0xFF)
+        self.lora.send_config(
+            recv3=recv3,
+            option=int(option) & 0xFF,
+            data0=int(data0) & 0xFF,
+            data1=int(data1) & 0xFF,
+            data2=int(data2) & 0xFF,
+            data3=int(data3) & 0xFF,
+        )
 
     def sendSync(self, ts24, brightness, recv3=b"\xFF\xFF\xFF"):
         if not getattr(self, "lora", None):
             logger.warning("sendSync: communicator not ready")
             return
         self.lora.send_sync(recv3=recv3, ts24=int(ts24) & 0xFFFFFF, brightness=int(brightness) & 0xFF)
+
+    @staticmethod
+    def _stream_ctrl(start: bool, stop: bool, packets_left: int) -> int:
+        """Build STREAM ctrl byte: bit7=start, bit6=stop, bits0-5=packets_left (0-63)."""
+        ctrl = (0x80 if start else 0x00) | (0x40 if stop else 0x00)
+        return ctrl | (int(packets_left) & 0x3F)
+
+    def sendStream(
+        self,
+        payload: bytes,
+        groupId: int | None = None,
+        device: GC_Device | None = None,
+        retries: int = 2,
+        timeout_s: float = 8.0,
+    ) -> dict[str, int]:
+        """Send up to 128 bytes as STREAM packets (8B per packet) to a device or group broadcast."""
+        if not getattr(self, "lora", None):
+            logger.warning("sendStream: communicator not ready")
+            return {}
+
+        self._install_transport_hooks()
+
+        data = bytes(payload or b"")
+        if len(data) > 128:
+            raise ValueError("payload too large (max 128 bytes)")
+
+        if device is None and groupId is None:
+            raise ValueError("sendStream requires groupId or device")
+
+        total_packets = max(1, (len(data) + 7) // 8)
+        packets = []
+        for idx in range(total_packets):
+            start = idx == 0
+            stop = idx == total_packets - 1
+            packets_left = (total_packets - idx - 1)
+            if start and stop:
+                packets_left = 0
+            elif start:
+                packets_left = total_packets
+            ctrl = self._stream_ctrl(start, stop, packets_left)
+            chunk = data[idx * 8 : (idx + 1) * 8]
+            if len(chunk) < 8:
+                chunk = chunk + (b"\x00" * (8 - len(chunk)))
+            packets.append((ctrl, chunk, stop))
+
+        if device is None:
+            targets = [
+                dev for dev in gc_devicelist if int(getattr(dev, "groupId", 0) or 0) == int(groupId)
+            ]
+        else:
+            targets = [device]
+
+        target_last3 = {_mac_last3_from_hex(dev.addr) for dev in targets if dev and dev.addr}
+        target_last3.discard(b"\xFF\xFF\xFF")
+        expected = len(target_last3)
+        if expected == 0:
+            return {"expected": 0, "acked": 0}
+
+        recv3 = b"\xFF\xFF\xFF" if device is None else _mac_last3_from_hex(device.addr)
+        if recv3 == b"\xFF\xFF\xFF" and device is not None:
+            return {"expected": expected, "acked": 0}
+
+        try:
+            self.lora.drain_events(0.0)
+        except Exception:
+            pass
+
+        for ctrl, chunk, is_last in packets:
+            if is_last:
+                break
+            self.lora.send_stream(recv3=recv3, ctrl=ctrl, data=chunk)
+            time.sleep(0.02)
+
+        last_ctrl, last_chunk, _ = packets[-1]
+        acked = set()
+
+        def _collect(ev: dict) -> bool:
+            try:
+                if ev.get("opc") != LP.OPC_ACK:
+                    return False
+                if int(ev.get("ack_of", -1)) != int(LP.OPC_STREAM):
+                    return False
+                sender3 = ev.get("sender3")
+                if not isinstance(sender3, (bytes, bytearray)):
+                    return False
+                sender3_b = bytes(sender3)
+                if sender3_b not in target_last3:
+                    return False
+                acked.add(sender3_b)
+                return True
+            except Exception:
+                return False
+
+        for attempt in range(max(0, int(retries)) + 1):
+            self._wait_rx_window(
+                lambda: self.lora.send_stream(recv3=recv3, ctrl=last_ctrl, data=last_chunk),
+                collect_pred=_collect,
+                fail_safe_s=timeout_s,
+            )
+            if len(acked) >= expected:
+                break
+            if attempt < int(retries):
+                time.sleep(0.1)
+
+        return {"expected": expected, "acked": len(acked)}
 
     def _wait_rx_window(self, send_fn, collect_pred=None, fail_safe_s: float = 8.0):
         if not getattr(self, "lora", None):
@@ -596,6 +708,7 @@ class GateControl_LoRa(GateControlUIMixin):
                 if dev:
                     dev.update_from_status(
                         ev.get("flags"),
+                        ev.get("configByte"),
                         ev.get("presetId"),
                         ev.get("brightness"),
                         ev.get("vbat_mV"),

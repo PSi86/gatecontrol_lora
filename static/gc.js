@@ -12,6 +12,39 @@
   const GC_FLAG_ARM_ON_SYNC = 0x02;
   const GC_FLAG_HAS_BRI     = 0x04;
 
+  const CONFIG_SETTINGS = [
+    { bit: 0, label: "MAC filter" },
+    { bit: 1, label: "MAC filter persist" },
+    { bit: 2, label: "WLAN AP open" },
+    { bit: 3, label: "Setting 3" },
+    { bit: 4, label: "Setting 4" },
+    { bit: 5, label: "Setting 5" },
+    { bit: 6, label: "Setting 6" },
+    { bit: 7, label: "Setting 7" },
+  ];
+  const DEFAULT_CONFIG_DISPLAY = [0, 1, 2];
+
+  function loadConfigDisplay(){
+    try{
+      const raw = localStorage.getItem("gcConfigDisplay");
+      if(!raw) return new Set(DEFAULT_CONFIG_DISPLAY);
+      const arr = JSON.parse(raw);
+      if(!Array.isArray(arr)) return new Set(DEFAULT_CONFIG_DISPLAY);
+      const allowed = new Set(CONFIG_SETTINGS.map(s => s.bit));
+      return new Set(arr.filter(v => allowed.has(v)));
+    }catch{
+      return new Set(DEFAULT_CONFIG_DISPLAY);
+    }
+  }
+
+  function saveConfigDisplay(){
+    try{
+      localStorage.setItem("gcConfigDisplay", JSON.stringify(Array.from(state.configDisplay)));
+    }catch{
+      // ignore storage errors
+    }
+  }
+
   let state = {
     groups: [],
     devices: [],
@@ -23,6 +56,7 @@
     lastTask: null,
     lastMaster: null,
     fwUploads: { fwId: null, presetsId: null, cfgId: null },
+    configDisplay: loadConfigDisplay(),
   };
 
   async function apiGet(url){
@@ -83,6 +117,30 @@ function updateNodeCfgUi(){
     hint.textContent = (n === 1) ? "" : "Select exactly one device";
   }
 }
+
+  function renderConfigDisplayOptions(){
+    const holder = $("#configDisplayOptions");
+    if(!holder) return;
+    holder.innerHTML = "";
+    CONFIG_SETTINGS.forEach(setting => {
+      const label = document.createElement("label");
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.checked = state.configDisplay.has(setting.bit);
+      cb.addEventListener("change", () => {
+        if(cb.checked){
+          state.configDisplay.add(setting.bit);
+        }else{
+          state.configDisplay.delete(setting.bit);
+        }
+        saveConfigDisplay();
+        renderTable();
+      });
+      label.appendChild(cb);
+      label.appendChild(document.createTextNode(setting.label));
+      holder.appendChild(label);
+    });
+  }
 
   function flagsLabel(flags){
     const f = Number(flags) & 0xFF;
@@ -178,12 +236,27 @@ function updateNodeCfgUi(){
     rows.forEach(r => {
       const tr = document.createElement("tr");
       const checked = state.selected.has(r.addr);
+      const configByte = Number(r.configByte ?? 0) & 0xFF;
+      const selectedConfigs = [];
+      const tooltipConfigs = [];
+      CONFIG_SETTINGS.forEach(setting => {
+        const enabled = !!(configByte & (1 << setting.bit));
+        const label = `${setting.label}: ${enabled ? "On" : "Off"}`;
+        if(state.configDisplay.has(setting.bit)){
+          selectedConfigs.push(`<span class="tag ${enabled ? "ok" : "off"}">${label}</span>`);
+        }else{
+          tooltipConfigs.push(label);
+        }
+      });
+      const configCell = selectedConfigs.length ? selectedConfigs.join(" ") : "-";
+      const configTooltip = tooltipConfigs.length ? tooltipConfigs.join(" | ") : "";
       tr.innerHTML = `
         <td><input type="checkbox" ${checked?"checked":""} data-mac="${r.addr}"></td>
         <td>${r.name ?? ""}</td>
         <td class="mono">${r.addr ?? ""}</td>
         <td>${r.groupId}</td>
         <td>${powerTag(r.flags)} <span class="mono">${flagsLabel(r.flags)}</span></td>
+        <td>${configCell}</td>
         <td>${fmt.num(r.presetId)}</td>
         <td>${fmt.num(r.brightness)}</td>
         <td>${fmt.num(r.voltage_mV)}</td>
@@ -195,6 +268,9 @@ function updateNodeCfgUi(){
         <td>${r.caps ?? ""}</td>
         <td>${(r.online===true) ? '<span class="tag online">Online</span>' : (r.online===false) ? '<span class="tag off">Offline</span>' : ''}</td>
       `;
+      if(configTooltip){
+        tr.title = configTooltip;
+      }
       body.appendChild(tr);
     });
 
@@ -571,15 +647,18 @@ $("#btnNodeCfgSend").addEventListener("click", async ()=>{
   const sel = ($("#nodeCfgCmd").value || "").trim();
   const parts = sel.split(":");
   const option = Number(parts[0] || 0);
-  const flags  = Number(parts[1] || 0);
+  const data0 = Number(parts[1] || 0);
+  const data1 = Number(parts[2] || 0);
+  const data2 = Number(parts[3] || 0);
+  const data3 = Number(parts[4] || 0);
 
-  if(option === 0x02){
-    if(!confirm("Clear learned Master on the selected node?")) return;
-  } else if(option === 0x05){
+  if(option === 0x80){
+    if(!confirm("Forget learned Master MAC on the selected node?")) return;
+  } else if(option === 0x81){
     if(!confirm("Reboot the selected node now?")) return;
   }
 
-  const r = await apiPost("/gatecontrol/api/config", {mac: macs[0], option, flags});
+  const r = await apiPost("/gatecontrol/api/config", {mac: macs[0], option, data0, data1, data2, data3});
   if(r.busy){
     alert(`Busy: ${r.task?.name || "task"} is running`);
   }
@@ -648,6 +727,7 @@ $("#btnNodeCfgSend").addEventListener("click", async ()=>{
   (async ()=>{
     // Connect SSE first so we still get feedback even if initial REST loads fail
     connectEvents();
+    renderConfigDisplayOptions();
 
     try{
       await loadAll();

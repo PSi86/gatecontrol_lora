@@ -28,6 +28,7 @@ class LP:
     OPC_CONTROL   = 0x04
     OPC_CONFIG    = 0x05
     OPC_SYNC      = 0x06
+    OPC_STREAM    = 0x07
     OPC_ACK       = 0x7E
 
     @staticmethod
@@ -46,6 +47,7 @@ if _HAVE_AUTO:
         LP.OPC_CONTROL   = getattr(LPA, "OPC_CONTROL", getattr(LPA, "OPC_WLED_CONTROL", LP.OPC_CONTROL))
         LP.OPC_CONFIG    = getattr(LPA, "OPC_CONFIG", LP.OPC_CONFIG)
         LP.OPC_SYNC      = getattr(LPA, "OPC_SYNC", LP.OPC_SYNC)
+        LP.OPC_STREAM    = getattr(LPA, "OPC_STREAM", LP.OPC_STREAM)
         LP.OPC_ACK       = getattr(LPA, "OPC_ACK", LP.OPC_ACK)
 
         make_type = getattr(LPA, "make_type", LP.make_type)
@@ -290,9 +292,16 @@ class LoRaUSB:
         )
         self._send_m2n(LP.make_type(LP.DIR_M2N, LP.OPC_CONTROL), recv3, body)
 
-    def send_config(self, recv3:bytes=b'\xFF\xFF\xFF', option:int=0, flags:int=0):
-        """Send CONFIG (2B): option, flags."""
-        body = struct.pack("<BB", int(option) & 0xFF, int(flags) & 0xFF)
+    def send_config(self, recv3:bytes=b'\xFF\xFF\xFF', option:int=0, data0:int=0, data1:int=0, data2:int=0, data3:int=0):
+        """Send CONFIG (5B): option, data0..data3."""
+        body = struct.pack(
+            "<BBBBB",
+            int(option) & 0xFF,
+            int(data0) & 0xFF,
+            int(data1) & 0xFF,
+            int(data2) & 0xFF,
+            int(data3) & 0xFF,
+        )
         self._send_m2n(LP.make_type(LP.DIR_M2N, LP.OPC_CONFIG), recv3, body)
 
     def send_sync(self, recv3:bytes=b'\xFF\xFF\xFF', ts24:int=0, brightness:int=0):
@@ -300,6 +309,15 @@ class LoRaUSB:
         ts = int(ts24) & 0xFFFFFF
         body = bytes([(ts & 0xFF), ((ts >> 8) & 0xFF), ((ts >> 16) & 0xFF), (int(brightness) & 0xFF)])
         self._send_m2n(LP.make_type(LP.DIR_M2N, LP.OPC_SYNC), recv3, body)
+
+    def send_stream(self, recv3:bytes, ctrl:int, data:bytes):
+        """Send STREAM_M2N (9B): ctrl byte + 8 data bytes."""
+        if not isinstance(data, (bytes, bytearray)):
+            raise ValueError("data must be bytes")
+        if len(data) != 8:
+            raise ValueError("data must be exactly 8 bytes")
+        body = struct.pack("<B", int(ctrl) & 0xFF) + bytes(data)
+        self._send_m2n(LP.make_type(LP.DIR_M2N, LP.OPC_STREAM), recv3, body)
 
     # Backwards helper (old opcode name), kept to avoid breaking older host code.
     # Prefer send_control() to fully control flags.
@@ -414,12 +432,25 @@ class LoRaUSB:
                 ev.update({"reply": "IDENTIFY_REPLY", "body_raw": body})
 
         elif opc == LP.OPC_STATUS:
-            # STATUS_REPLY = 7B: [flags, presetId, brightness, vbat_mV(LE16), rssi_node(i8), snr_node(i8)]
-            if len(body) == 7:
+            # STATUS_REPLY = 8B: [flags, configByte, presetId, brightness, vbat_mV(LE16), rssi_node(i8), snr_node(i8)]
+            if len(body) == 8:
+                flags, config_byte, presetId, brightness, vbat_mV, rssi_node, snr_node = struct.unpack("<BBBBHbb", body)
+                ev.update({
+                    "reply": "STATUS_REPLY",
+                    "flags": flags,
+                    "configByte": config_byte,
+                    "presetId": presetId,
+                    "brightness": brightness,
+                    "vbat_mV": vbat_mV,
+                    "node_rssi": rssi_node,
+                    "node_snr": snr_node,
+                })
+            elif len(body) == 7:
                 flags, presetId, brightness, vbat_mV, rssi_node, snr_node = struct.unpack("<BBBHbb", body)
                 ev.update({
                     "reply": "STATUS_REPLY",
                     "flags": flags,
+                    "configByte": 0,
                     "presetId": presetId,
                     "brightness": brightness,
                     "vbat_mV": vbat_mV,

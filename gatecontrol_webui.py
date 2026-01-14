@@ -332,6 +332,7 @@ def register_gc_blueprint(
 
             # new proto v1.2 fields
             "flags": int(getattr(dev, "flags", 0) or 0),
+            "configByte": int(getattr(dev, "configByte", 0) or 0),
             "presetId": int(getattr(dev, "presetId", 0) or 0),
             "brightness": int(getattr(dev, "brightness", 0) or 0),
 
@@ -766,25 +767,44 @@ def register_gc_blueprint(
 
         try:
             option = int(body.get("option", 0)) & 0xFF
-            flags  = int(body.get("flags", 0)) & 0xFF
+            data0 = int(body.get("data0", body.get("flags", 0))) & 0xFF
+            data1 = int(body.get("data1", 0)) & 0xFF
+            data2 = int(body.get("data2", 0)) & 0xFF
+            data3 = int(body.get("data3", 0)) & 0xFF
         except Exception:
-            return jsonify({"ok": False, "error": "invalid option/flags"}), 400
+            return jsonify({"ok": False, "error": "invalid option/data"}), 400
 
-        if option not in (0x01, 0x02, 0x03, 0x04, 0x05):
+        config_options = {
+            0x01,  # MAC filter enabled
+            0x03,  # MAC filter persistency
+            0x04,  # WLAN AP open
+            0x80,  # forget master MAC
+            0x81,  # reboot
+        }
+        if option not in config_options:
             return jsonify({"ok": False, "error": "unknown config option"}), 400
 
         try:
             # Prefer instance helper if present
             if hasattr(gc_instance, "sendConfig"):
-                gc_instance.sendConfig(option=option, flags=flags, recv3=recv3)
+                gc_instance.sendConfig(option=option, data0=data0, data1=data1, data2=data2, data3=data3, recv3=recv3)
             else:
-                gc_instance.lora.send_config(recv3=recv3, option=option, flags=flags)
+                gc_instance.lora.send_config(recv3=recv3, option=option, data0=data0, data1=data1, data2=data2, data3=data3)
         except Exception as ex:
             _log(f"GateControl: config failed: {ex}")
             return jsonify({"ok": False, "error": str(ex)}), 500
 
         _set_master(state="TX", tx_pending=True, last_event="CONFIG_SENT")
-        return jsonify({"ok": True, "sent": 1, "recv3": recv3.hex().upper(), "option": option, "flags": flags})
+        return jsonify({
+            "ok": True,
+            "sent": 1,
+            "recv3": recv3.hex().upper(),
+            "option": option,
+            "data0": data0,
+            "data1": data1,
+            "data2": data2,
+            "data3": data3,
+        })
 
     @bp.route("/gatecontrol/api/devices/control", methods=["POST"])
     def api_devices_control():
@@ -1398,7 +1418,7 @@ def register_gc_blueprint(
                     })
                     try:
                         recv3 = _recv3_bytes_from_addr(str(addr))
-                        gc_instance.sendConfig(0x04, 1, recv3)
+                        gc_instance.sendConfig(0x04, data0=1, recv3=recv3)
                     except Exception as ex:
                         dev_res["error"] = f"LoRa AP enable failed: {ex}"
                         results["errors"].append(dev_res["error"])
@@ -1599,7 +1619,7 @@ def register_gc_blueprint(
                     })
                     try:
                         recv3 = _recv3_bytes_from_addr(str(addr))
-                        gc_instance.sendConfig(0x04, 1, recv3)
+                        gc_instance.sendConfig(0x04, data0=1, recv3=recv3)
                     except Exception:
                         # best-effort; even if this fails, the HTTP wait below will time out
                         pass
@@ -1678,7 +1698,7 @@ def register_gc_blueprint(
                             "message": "Disable WLED AP via LoRa (best-effort)",
                         })
                         recv3 = _recv3_bytes_from_addr(str(addr))
-                        gc_instance.sendConfig(0x04, 0, recv3)
+                        gc_instance.sendConfig(0x04, data0=0, recv3=recv3)
                     except Exception:
                         pass
 

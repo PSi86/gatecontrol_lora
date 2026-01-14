@@ -32,6 +32,8 @@ body{ margin:0; font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif
 .tag.ok{ color:#b6f5cf; border-color:#2d553f; background:#102017; }
 .tag.off{ color:#ffd8d8; border-color:#5a2a2a; background:#221314; }
 .tag.online{ color:#c8f0ff; border-color:#2a4459; background:#12202a; }
+.gc-config-options{ display:flex; flex-wrap:wrap; gap:10px; }
+.gc-config-options label{ display:inline-flex; align-items:center; gap:6px; font-size:12px; color:var(--muted); }
 .muted{ color:var(--muted); }
 button{ background:#232330; border:1px solid #2a2a32; color:var(--text); padding:6px 10px; border-radius:8px; cursor:pointer; }
 button:hover{ border-color:#3b3b44; }

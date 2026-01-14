@@ -45,17 +45,22 @@
 <div class="gc-toolbar">
   <label>Node Config:</label>
   <select id="nodeCfgCmd">
-    <option value="04:1">WiFi AP ON</option>
-    <option value="04:0">WiFi AP OFF</option>
-    <option value="01:1">MAC filter ON</option>
-    <option value="01:0">MAC filter OFF</option>
-    <option value="03:1">MAC filter persist ON</option>
-    <option value="03:0">MAC filter persist OFF</option>
-    <option value="02:1">Clear learned Master</option>
-    <option value="05:1">Reboot node</option>
+    <option value="04:1">WLAN AP open</option>
+    <option value="04:0">WLAN AP closed</option>
+    <option value="01:1">MAC filter enabled</option>
+    <option value="01:0">MAC filter disabled</option>
+    <option value="03:1">MAC filter persist enabled</option>
+    <option value="03:0">MAC filter persist disabled</option>
+    <option value="0x80:1">Forget master MAC</option>
+    <option value="0x81:1">Reboot node</option>
   </select>
   <button id="btnNodeCfgSend">Send</button>
   <span id="nodeCfgHint" class="muted">Select exactly one device</span>
+</div>
+
+<div class="gc-toolbar">
+  <label>Config Anzeige:</label>
+  <div id="configDisplayOptions" class="gc-config-options"></div>
 </div>
 
 
@@ -67,6 +72,7 @@
             <th data-key="addr">MAC</th>
             <th data-key="groupId">Group</th>
             <th data-key="flags">Flags</th>
+            <th data-key="configByte">Config</th>
             <th data-key="presetId">Preset</th>
             <th data-key="brightness">Bright</th>
             <th data-key="voltage_mV">VBat</th>

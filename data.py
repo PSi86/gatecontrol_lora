@@ -29,6 +29,7 @@ class GC_Device:
         flags: int = GC_FLAG_POWER_ON,
         presetId: int = 1,
         brightness: int = 70,
+        configByte: int = 0,
     ):
         self.addr: str = addr
         self.type: int = int(type)
@@ -41,6 +42,7 @@ class GC_Device:
         self.flags: int = int(flags) & 0xFF
         self.presetId: int = int(presetId) & 0xFF
         self.brightness: int = int(brightness) & 0xFF
+        self.configByte: int = int(configByte) & 0xFF
 
         # Telemetry (STATUS_REPLY)
         self.voltage_mV: int = int(voltage_mV)
@@ -79,9 +81,10 @@ class GC_Device:
         except Exception:
             pass
 
-    def update_from_status(self, flags, presetId, brightness, vbat_mV, node_rssi, node_snr, host_rssi=None, host_snr=None):
+    def update_from_status(self, flags, configByte, presetId, brightness, vbat_mV, node_rssi, node_snr, host_rssi=None, host_snr=None):
         # CONTROL snapshot (as reported by node)
         self.flags = int(flags) & 0xFF if flags is not None else self.flags
+        self.configByte = int(configByte) & 0xFF if configByte is not None else self.configByte
         self.presetId = int(presetId) & 0xFF if presetId is not None else self.presetId
         self.brightness = int(brightness) & 0xFF if brightness is not None else self.brightness
 
