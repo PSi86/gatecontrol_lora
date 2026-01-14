@@ -1,0 +1,706 @@
+from __future__ import annotations
+
+import logging
+import time
+from typing import Optional, Union
+
+from .ui import GateControlUIMixin
+from RHUI import UIFieldSelectOption
+from .data import (
+    GC_Device,
+    GC_DeviceGroup,
+    GC_Type,
+    GC_FLAG_HAS_BRI,
+    GC_FLAG_POWER_ON,
+    gc_backup_devicelist,
+    gc_backup_grouplist,
+    gc_devicelist,
+    gc_grouplist,
+)
+
+# ---- lora proto registry (auto-generated from lora_proto.h) ----
+try:
+    from . import lora_proto_auto as LPA
+except Exception:
+    import lora_proto_auto as LPA
+
+# ---- transport import (tolerant to both package and flat layout) ----
+try:
+    from .gc_transport import (
+        LP,
+        EV_RX_WINDOW_CLOSED,
+        LoRaUSB,
+        _mac_last3_from_hex,
+    )
+except Exception:
+    from gc_transport import (
+        LP,
+        EV_RX_WINDOW_CLOSED,
+        LoRaUSB,
+        _mac_last3_from_hex,
+    )
+
+logger = logging.getLogger(__name__)
+
+
+class GateControl_LoRa(GateControlUIMixin):
+    def __init__(self, rhapi, name, label):
+        self.lora = None
+        self.ready = False
+        self._rhapi = rhapi
+        self.name = name
+        self.label = label
+        self.lora = None
+        self.ready = False
+        self.action_reg_fn = None
+        self.deviceCfgValid = False
+        self.groupCfgValid = False
+        self.uiDeviceList = None
+        self.uiGroupList = None
+        self.uiDiscoveryGroupList = None
+
+        # Transport-level pending expectation (for online/offline determination).
+        self._pending_expect = None  # dict with keys: dev, rule, opcode7, sender_last3, ts
+
+        self._transport_hooks_installed = False
+        # Basic colors: 1-9; Basic effects: 10-19; Special Effects (WLED only): 20-100
+        self.uiEffectList = [
+            UIFieldSelectOption("01", "Red"),
+            UIFieldSelectOption("02", "Green"),
+            UIFieldSelectOption("03", "Blue"),
+            UIFieldSelectOption("04", "White"),
+            UIFieldSelectOption("05", "Yellow"),
+            UIFieldSelectOption("06", "Cyan"),
+            UIFieldSelectOption("07", "Magenta"),
+            UIFieldSelectOption("10", "Blink Multicolor"),
+            UIFieldSelectOption("11", "Pulse White"),
+            UIFieldSelectOption("12", "Colorloop"),
+            UIFieldSelectOption("13", "Blink RGB"),
+            UIFieldSelectOption("20", "WLED Chaser"),
+            UIFieldSelectOption("21", "WLED Chaser inverted"),
+            UIFieldSelectOption("22", "WLED Rainbow"),
+        ]
+
+    def onStartup(self, _args):
+        self.load_from_db()
+        self.discoverPort({})
+
+    def save_to_db(self, args):
+        logger.debug("GC: Writing current states to Database")
+        config_str_devices = str([obj.__dict__ for obj in gc_devicelist])
+        self._rhapi.db.option_set("esp_gc_device_config", config_str_devices)
+
+        if len(gc_grouplist) >= len(gc_backup_grouplist):
+            config_str_groups = str([obj.__dict__ for obj in gc_grouplist])
+        else:
+            config_str_groups = str([obj.__dict__ for obj in gc_backup_grouplist])
+        self._rhapi.db.option_set("esp_gc_groups_config", config_str_groups)
+
+    def load_from_db(self):
+        logger.debug("GC: Applying config from Database")
+        config_str_devices = self._rhapi.db.option("esp_gc_device_config", None)
+        config_str_groups = self._rhapi.db.option("esp_gc_groups_config", None)
+
+        if config_str_devices is None:
+            config_str_devices = str([obj.__dict__ for obj in gc_backup_devicelist])
+            self._rhapi.db.option_set("esp_gc_device_config", config_str_devices)
+
+        if config_str_devices == "":
+            config_str_devices = "[]"
+            self._rhapi.db.option_set("esp_gc_device_config", config_str_devices)
+
+        config_list_devices = list(eval(config_str_devices))
+        gc_devicelist.clear()
+
+        for device in config_list_devices:
+            logger.debug(device)
+            try:
+                flags = device.get("flags", None)
+                presetId = device.get("presetId", None)
+
+                if flags is None:
+                    legacy_state = int(device.get("state", 1) or 0)
+                    flags = GC_FLAG_POWER_ON if legacy_state else 0
+                    if "brightness" in device:
+                        flags |= GC_FLAG_HAS_BRI
+
+                if presetId is None:
+                    presetId = int(device.get("effect", 1) or 1)
+
+                brightness = int(device.get("brightness", 70) or 0)
+
+                gc_devicelist.append(
+                    GC_Device(
+                        addr=str(device.get("addr", "")).upper(),
+                        type=int(device.get("type", 0) or 0),
+                        name=str(device.get("name", "")),
+                        groupId=int(device.get("groupId", 0) or 0),
+                        version=int(device.get("version", 0) or 0),
+                        caps=int(device.get("caps", 0) or 0),
+                        flags=int(flags) & 0xFF,
+                        presetId=int(presetId) & 0xFF,
+                        brightness=brightness & 0xFF,
+                    )
+                )
+            except Exception:
+                logger.exception("GC: failed to load device entry from DB: %r", device)
+                continue
+
+        if config_str_groups is None or config_str_groups == "":
+            config_str_groups = str([obj.__dict__ for obj in gc_backup_grouplist])
+            self._rhapi.db.option_set("esp_gc_groups_config", config_str_groups)
+
+        config_list_groups = list(eval(config_str_groups))
+        gc_grouplist.clear()
+
+        for group in config_list_groups:
+            logger.debug(group)
+            gc_grouplist.append(GC_DeviceGroup(group["name"], group["static_group"], group["device_type"]))
+
+        self.uiDeviceList = self.createUiDevList()
+        self.uiGroupList = self.createUiGroupList()
+        self.uiDiscoveryGroupList = self.createUiGroupList(True)
+        self.register_settings()
+        self.register_quickset_ui()
+        self.registerActions()
+        self._rhapi.ui.broadcast_ui("settings")
+        self._rhapi.ui.broadcast_ui("run")
+
+    def discoverPort(self, args):
+        """Initialize communicator via LoRaUSB only. No direct serial here."""
+        port = self._rhapi.db.option("psi_comms_port", None)
+        try:
+            self.lora = LoRaUSB(port=port, on_event=None)
+            ok = self.lora.discover_and_open()
+            if ok:
+                self.lora.start()
+                self.ready = True
+                self._install_transport_hooks()
+                used = self.lora.port or "unknown"
+                mac = getattr(self.lora, "ident_mac", None)
+                if mac:
+                    logger.info("GateControl Communicator ready on %s with MAC: %s", used, mac)
+                    if "manual" in args:
+                        self._rhapi.ui.message_notify(self._rhapi.__("GateControl Communicator ready on {} with MAC: {}").format(used, mac))
+                return
+            else:
+                self.ready = False
+                logger.warning("No GateControl Communicator module discovered or configured")
+                if "manual" in args:
+                    self._rhapi.ui.message_notify(self._rhapi.__("No GateControl Communicator module discovered or configured"))
+        except Exception as ex:
+            self.ready = False
+            logger.error("LoRaUSB init failed: %s", ex)
+            if "manual" in args:
+                self._rhapi.ui.message_notify(self._rhapi.__("Failed to initialize communicator: {}").format(str(ex)))
+
+    def onRaceStart(self, _args):
+        logger.warning("GateControl Race Start Event")
+
+    def onRaceFinish(self, _args):
+        logger.warning("GateControl Race Finish Event")
+
+    def onRaceStop(self, _args):
+        logger.warning("GateControl Race Stop Event")
+
+    def onSendMessage(self, args):
+        logger.warning("Event onSendMessage")
+
+    def getDevices(self, groupFilter=255, targetDevice=None, addToGroup=-1):
+        if not getattr(self, "lora", None):
+            logger.warning("getDevices: communicator not ready")
+            return 0
+
+        self._install_transport_hooks()
+
+        if targetDevice is None:
+            recv3 = b"\xFF\xFF\xFF"
+            groupId = int(groupFilter) & 0xFF
+        else:
+            recv3 = _mac_last3_from_hex(targetDevice.addr)
+            groupId = int(targetDevice.groupId) & 0xFF
+
+        found = 0
+
+        def _collect(ev: dict) -> bool:
+            nonlocal found
+            try:
+                if ev.get("opc") == LP.OPC_DEVICES and ev.get("reply") == "IDENTIFY_REPLY":
+                    found += 1
+                    return True
+            except Exception:
+                pass
+            return False
+
+        logger.debug("GET_DEVICES -> recv3=%s group=%d flags=%d", recv3.hex().upper(), groupId, 0)
+
+        try:
+            self.lora.drain_events(0.0)
+        except Exception:
+            pass
+
+        self._wait_rx_window(
+            lambda: self.lora.send_get_devices(recv3=recv3, group_id=groupId, flags=0),
+            collect_pred=_collect,
+            fail_safe_s=8.0,
+        )
+
+        if addToGroup > 0 and addToGroup < 255:
+            for dev in list(gc_devicelist):
+                if int(getattr(dev, "groupId", 0)) == 0:
+                    dev.groupId = addToGroup
+                    self.setGateGroupId(dev)
+
+        if hasattr(self, "_rhapi") and hasattr(self._rhapi, "ui"):
+            self._rhapi.ui.message_notify(
+                "Device Discovery finished with {} devices found and added to GroupId: {}".format(found, addToGroup)
+            )
+        return found
+
+    def getStatus(self, groupFilter=255, targetDevice=None):
+        if not getattr(self, "lora", None):
+            logger.warning("getStatus: communicator not ready")
+            return 0
+
+        self._install_transport_hooks()
+
+        if targetDevice is None:
+            recv3 = b"\xFF\xFF\xFF"
+            groupId = int(groupFilter) & 0xFF
+            sender_filter = None
+        else:
+            recv3 = _mac_last3_from_hex(targetDevice.addr)
+            groupId = int(targetDevice.groupId) & 0xFF
+            sender_filter = recv3.hex().upper()
+
+        updated = 0
+
+        def _collect(ev: dict) -> bool:
+            nonlocal updated
+            try:
+                if ev.get("opc") == LP.OPC_STATUS and ev.get("reply") == "STATUS_REPLY":
+                    if sender_filter:
+                        sender3 = ev.get("sender3")
+                        if isinstance(sender3, (bytes, bytearray)) and bytes(sender3).hex().upper() != sender_filter:
+                            return False
+                    updated += 1
+                    return True
+            except Exception:
+                pass
+            return False
+
+        try:
+            self.lora.drain_events(0.0)
+        except Exception:
+            pass
+
+        self._wait_rx_window(
+            lambda: self.lora.send_get_status(recv3=recv3, group_id=groupId, flags=0),
+            collect_pred=_collect,
+            fail_safe_s=8.0,
+        )
+
+        return updated
+
+    def setGateGroupId(self, targetDevice: GC_Device, forceSet: bool = False, wait_for_ack: bool = True) -> bool:
+        if not getattr(self, "lora", None):
+            logger.warning("setGateGroupId: communicator not ready")
+            return False
+
+        self._install_transport_hooks()
+
+        recv3 = _mac_last3_from_hex(targetDevice.addr)
+        group_id = int(targetDevice.groupId) & 0xFF
+        is_broadcast = recv3 == b"\xFF\xFF\xFF"
+
+        if not is_broadcast:
+            targetDevice.ack_clear()
+        send_t0 = time.time()
+
+        try:
+            self.lora.drain_events(0.0)
+        except Exception:
+            pass
+
+        self._wait_rx_window(lambda: self.lora.send_set_group(recv3, group_id), collect_pred=None, fail_safe_s=8.0)
+
+        if not wait_for_ack or is_broadcast:
+            return True
+
+        ok = (
+            targetDevice.ack_ok()
+            and targetDevice.last_ack.get("opcode") == LP.OPC_SET_GROUP
+            and targetDevice.last_ack.get("ts", 0) > send_t0
+        )
+
+        if not ok:
+            logger.warning(
+                "No ACK_OK for SET_GROUP to %s (status=%s, opcode=%s, ts_ok=%s)",
+                targetDevice.addr,
+                targetDevice.last_ack.get("status"),
+                targetDevice.last_ack.get("opcode"),
+                targetDevice.last_ack.get("ts", 0) > send_t0,
+            )
+        return ok
+
+    def forceGroups(self, args=None, sanityCheck: bool = True):
+        logger.debug("Forcing all known devices to their stored groups.")
+        num_groups = len(gc_grouplist)
+
+        for device in gc_devicelist:
+            if sanityCheck is True and device.groupId >= num_groups:
+                device.groupId = 0
+            self.setGateGroupId(device, forceSet=True)
+            time.sleep(0.2)
+
+    def sendGateControl(self, targetDevice, flags=None, presetId=None, brightness=None):
+        """Send CONTROL to a single node (receiver = last3 of targetDevice.addr)."""
+        if not getattr(self, "lora", None):
+            logger.warning("sendGateControl: communicator not ready")
+            return
+        recv3 = _mac_last3_from_hex(targetDevice.addr)
+        groupId = int(targetDevice.groupId) & 0xFF
+
+        f = int(targetDevice.flags if flags is None else flags) & 0xFF
+        p = int(targetDevice.presetId if presetId is None else presetId) & 0xFF
+        b = int(targetDevice.brightness if brightness is None else brightness) & 0xFF
+
+        self.lora.send_control(recv3=recv3, group_id=groupId, flags=f, preset_id=p, brightness=b)
+
+        targetDevice.flags = f
+        targetDevice.presetId = p
+        targetDevice.brightness = b
+        logger.debug(
+            "GC: Updated Device %s: flags=0x%02X presetId=%d brightness=%d",
+            targetDevice.addr,
+            targetDevice.flags,
+            targetDevice.presetId,
+            targetDevice.brightness,
+        )
+
+    def sendGroupControl(self, gcGroupId, gcFlags, gcPresetId, gcBrightness):
+        """Broadcast CONTROL to a group (receiver=FFFFFF); update local cache for group devices."""
+        if not getattr(self, "lora", None):
+            logger.warning("sendGroupControl: communicator not ready")
+            return
+
+        groupId = int(gcGroupId) & 0xFF
+        f = int(gcFlags) & 0xFF
+        p = int(gcPresetId) & 0xFF
+        b = int(gcBrightness) & 0xFF
+
+        for device in gc_devicelist:
+            try:
+                if (int(getattr(device, "groupId", 0)) & 0xFF) == groupId:
+                    device.flags = f
+                    device.presetId = p
+                    device.brightness = b
+            except Exception:
+                continue
+
+        self.lora.send_control(
+            recv3=b"\xFF\xFF\xFF",
+            group_id=groupId,
+            flags=f,
+            preset_id=p,
+            brightness=b,
+        )
+
+    def sendConfig(self, option, flags, recv3=b"\xFF\xFF\xFF"):
+        if not getattr(self, "lora", None):
+            logger.warning("sendConfig: communicator not ready")
+            return
+        self.lora.send_config(recv3=recv3, option=int(option) & 0xFF, flags=int(flags) & 0xFF)
+
+    def sendSync(self, ts24, brightness, recv3=b"\xFF\xFF\xFF"):
+        if not getattr(self, "lora", None):
+            logger.warning("sendSync: communicator not ready")
+            return
+        self.lora.send_sync(recv3=recv3, ts24=int(ts24) & 0xFFFFFF, brightness=int(brightness) & 0xFF)
+
+    def _wait_rx_window(self, send_fn, collect_pred=None, fail_safe_s: float = 8.0):
+        if not getattr(self, "lora", None):
+            return [], False
+
+        lora = self.lora
+        collected = []
+        got_closed = False
+
+        if hasattr(lora, "add_listener") and hasattr(lora, "remove_listener"):
+            import threading
+
+            closed_ev = threading.Event()
+
+            def _cb(ev: dict):
+                nonlocal got_closed
+                try:
+                    if not isinstance(ev, dict):
+                        return
+                    if ev.get("type") == EV_RX_WINDOW_CLOSED:
+                        got_closed = True
+                        closed_ev.set()
+                        return
+                    if collect_pred and collect_pred(ev):
+                        collected.append(ev)
+                except Exception:
+                    pass
+
+            lora.add_listener(_cb)
+            try:
+                send_fn()
+                closed_ev.wait(timeout=float(fail_safe_s))
+            finally:
+                try:
+                    lora.remove_listener(_cb)
+                except Exception:
+                    pass
+            return collected, got_closed
+
+        send_fn()
+        t_end = time.time() + float(fail_safe_s)
+        while time.time() < t_end:
+            for ev in lora.drain_events(timeout_s=0.1):
+                if ev.get("type") == EV_RX_WINDOW_CLOSED:
+                    got_closed = True
+                    return collected, got_closed
+                if collect_pred and collect_pred(ev):
+                    collected.append(ev)
+        return collected, got_closed
+
+    def _handle_ack_event(self, ev: dict) -> None:
+        try:
+            sender3_hex = self._to_hex_str(ev.get("sender3"))
+            dev = self.getDeviceFromAddress(sender3_hex) if sender3_hex else None
+            if not dev:
+                return
+
+            ack_of = ev.get("ack_of")
+            ack_status = ev.get("ack_status")
+            ack_seq = ev.get("ack_seq")
+            host_rssi = ev.get("host_rssi")
+            host_snr = ev.get("host_snr")
+
+            if ack_of is None or ack_status is None:
+                return
+
+            logger.debug(
+                "ACK from %s: ack_of=%s status=%s seq=%s",
+                sender3_hex,
+                ev.get("ack_of"),
+                ev.get("ack_status"),
+                ev.get("ack_seq"),
+            )
+
+            dev.ack_update(int(ack_of), int(ack_status), ack_seq, host_rssi, host_snr)
+
+        except Exception:
+            logger.exception("ACK handling failed")
+
+    def _install_transport_hooks(self) -> None:
+        if self._transport_hooks_installed:
+            return
+        lora = getattr(self, "lora", None)
+        if not lora:
+            return
+
+        try:
+            if hasattr(lora, "add_listener"):
+                lora.add_listener(self._on_transport_event_gc)
+            else:
+                prev = getattr(lora, "on_event", None)
+
+                def _mux(ev):
+                    try:
+                        self._on_transport_event_gc(ev)
+                    except Exception:
+                        pass
+                    if prev:
+                        try:
+                            prev(ev)
+                        except Exception:
+                            pass
+
+                lora.on_event = _mux
+        except Exception:
+            logger.exception("GateControl: failed to install transport RX listener")
+
+        try:
+            if hasattr(lora, "add_tx_listener"):
+                lora.add_tx_listener(self._on_transport_tx)
+        except Exception:
+            logger.exception("GateControl: failed to install transport TX listener")
+
+        self._transport_hooks_installed = True
+
+    def _on_transport_tx(self, ev: dict) -> None:
+        try:
+            if not ev or ev.get("type") != "TX_M2N":
+                return
+            recv3 = ev.get("recv3")
+            if not isinstance(recv3, (bytes, bytearray)) or len(recv3) != 3:
+                return
+            recv3_b = bytes(recv3)
+
+            if recv3_b == b"\xFF\xFF\xFF":
+                return
+
+            opcode7 = int(ev.get("opc", -1)) & 0x7F
+            try:
+                rule = LPA.find_rule(opcode7)
+            except Exception:
+                rule = None
+            if not rule:
+                return
+
+            if int(getattr(rule, "req_dir", getattr(LPA, "DIR_M2N", 0))) != int(getattr(LPA, "DIR_M2N", 0)):
+                return
+
+            policy = int(getattr(rule, "policy", getattr(LPA, "RESP_NONE", 0)))
+            if policy == int(getattr(LPA, "RESP_NONE", 0)):
+                return
+
+            dev = self.getDeviceFromAddress(recv3_b.hex().upper())
+            if not dev:
+                return
+
+            self._pending_expect = {
+                "dev": dev,
+                "rule": rule,
+                "opcode7": opcode7,
+                "sender_last3": (dev.addr or "").upper()[-6:],
+                "ts": time.time(),
+            }
+        except Exception:
+            logger.exception("GateControl: TX hook failed")
+
+    def _on_transport_event_gc(self, ev: dict) -> None:
+        try:
+            if not isinstance(ev, dict):
+                return
+
+            t = ev.get("type")
+
+            if t == EV_RX_WINDOW_CLOSED:
+                self._pending_window_closed(ev)
+                return
+
+            opc = ev.get("opc")
+            if opc is None:
+                return
+
+            if int(opc) == int(LP.OPC_ACK):
+                self._handle_ack_event(ev)
+            elif int(opc) == int(LP.OPC_STATUS) and ev.get("reply") == "STATUS_REPLY":
+                sender3_hex = self._to_hex_str(ev.get("sender3"))
+                dev = self.getDeviceFromAddress(sender3_hex) if sender3_hex else None
+                if dev:
+                    dev.update_from_status(
+                        ev.get("flags"),
+                        ev.get("presetId"),
+                        ev.get("brightness"),
+                        ev.get("vbat_mV"),
+                        ev.get("node_rssi"),
+                        ev.get("node_snr"),
+                        ev.get("host_rssi"),
+                        ev.get("host_snr"),
+                    )
+            elif int(opc) == int(LP.OPC_DEVICES) and ev.get("reply") == "IDENTIFY_REPLY":
+
+                mac6 = ev.get("mac6")
+                if isinstance(mac6, (bytes, bytearray)) and len(mac6) == 6:
+                    mac12 = bytes(mac6).hex().upper()
+                    dev = self.getDeviceFromAddress(mac12)
+                    if not dev:
+                        dev = GC_Device(addr=mac12, type=GC_Type.WLED_CUSTOM, name=f"WLED {mac12}")
+                        gc_devicelist.append(dev)
+                        try:
+                            if hasattr(self, "createUiDevList"):
+                                self.uiDeviceList = self.createUiDevList()
+                        except Exception:
+                            pass
+
+                    dev.update_from_identify(
+                        ev.get("version"),
+                        ev.get("caps"),
+                        ev.get("groupId"),
+                        mac6,
+                        ev.get("host_rssi"),
+                        ev.get("host_snr"),
+                    )
+
+            self._pending_try_match(ev)
+
+        except Exception:
+            logger.exception("GateControl: RX hook failed")
+
+    def _pending_try_match(self, ev: dict) -> None:
+        p = self._pending_expect
+        if not p:
+            return
+
+        try:
+            sender3_hex = self._to_hex_str(ev.get("sender3")).upper()
+            if not sender3_hex:
+                return
+            if sender3_hex != (p.get("sender_last3") or "").upper():
+                return
+
+            rule = p.get("rule")
+            opcode7 = int(p.get("opcode7", -1)) & 0x7F
+            policy = int(getattr(rule, "policy", getattr(LPA, "RESP_NONE", 0)))
+
+            if policy == int(getattr(LPA, "RESP_ACK", 1)):
+                if int(ev.get("opc", -1)) == int(LP.OPC_ACK) and int(ev.get("ack_of", -2)) == opcode7:
+                    dev = p.get("dev")
+                    if dev:
+                        dev.mark_online()
+                    self._pending_expect = None
+            elif policy == int(getattr(LPA, "RESP_SPECIFIC", 2)):
+                rsp_opc = int(getattr(rule, "rsp_opcode7", -1)) & 0x7F
+                if int(ev.get("opc", -1)) == rsp_opc:
+                    dev = p.get("dev")
+                    if dev:
+                        dev.mark_online()
+                    self._pending_expect = None
+        except Exception:
+            logger.exception("GateControl: pending match failed")
+
+    def _pending_window_closed(self, ev: dict) -> None:
+        p = self._pending_expect
+        if not p:
+            return
+
+        try:
+            dev = p.get("dev")
+            rule = p.get("rule")
+            opcode7 = int(p.get("opcode7", -1)) & 0x7F
+            name = getattr(rule, "name", f"opc=0x{opcode7:02X}")
+            if dev:
+                dev.mark_offline(f"Missing reply ({name})")
+        finally:
+            self._pending_expect = None
+
+    def getDeviceFromAddress(self, addr: str) -> Optional[GC_Device]:
+        """MAC als String ohne Trennzeichen: 12 (voll) oder 6 (last3)."""
+        if not addr:
+            return None
+        s = str(addr).strip().upper()
+        if len(s) == 12:
+            for d in gc_devicelist:
+                if (d.addr or "").upper() == s:
+                    return d
+            return None
+        if len(s) == 6:
+            for d in gc_devicelist:
+                if (d.addr or "").upper().endswith(s):
+                    return d
+            return None
+        return None
+
+    @staticmethod
+    def _to_hex_str(addr: Union[str, bytes, bytearray, None]) -> str:
+        if addr is None:
+            return ""
+        if isinstance(addr, (bytes, bytearray)):
+            return bytes(addr).hex().upper()
+        return str(addr).strip().replace(":", "").replace(" ", "").upper()
