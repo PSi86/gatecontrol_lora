@@ -243,12 +243,12 @@ function updateNodeCfgUi(){
         const enabled = !!(configByte & (1 << setting.bit));
         const label = `${setting.label}: ${enabled ? "On" : "Off"}`;
         if(state.configDisplay.has(setting.bit)){
-          selectedConfigs.push(`<span class="tag ${enabled ? "ok" : "off"}">${label}</span>`);
+          selectedConfigs.push(`<span class="tag ${enabled ? "ok" : "off"}" title="${label}">${setting.label}</span>`);
         }else{
           tooltipConfigs.push(label);
         }
       });
-      const configCell = selectedConfigs.length ? selectedConfigs.join(" ") : "-";
+      const configCell = selectedConfigs.length ? `<div class="gc-config-tags">${selectedConfigs.join("")}</div>` : "-";
       const configTooltip = tooltipConfigs.length ? tooltipConfigs.join(" | ") : "";
       tr.innerHTML = `
         <td><input type="checkbox" ${checked?"checked":""} data-mac="${r.addr}"></td>
