@@ -988,6 +988,8 @@ def register_gc_blueprint(
                 preset_id = int(key)
             except (TypeError, ValueError):
                 continue
+            if preset_id == 0:
+                continue
 
             if not isinstance(preset_obj, dict):
                 continue
