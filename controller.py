@@ -47,8 +47,6 @@ logger = logging.getLogger(__name__)
 
 class GateControl_LoRa(GateControlUIMixin):
     def __init__(self, rhapi, name, label):
-        self.lora = None
-        self.ready = False
         self._rhapi = rhapi
         self.name = name
         self.label = label
@@ -385,17 +383,40 @@ class GateControl_LoRa(GateControlUIMixin):
             self.setGateGroupId(device, forceSet=True)
             time.sleep(0.2)
 
+    def _require_lora(self, context: str):
+        if getattr(self, "lora", None):
+            return True
+        logger.warning("%s: communicator not ready", context)
+        return False
+
+    @staticmethod
+    def _coerce_control_values(flags, preset_id, brightness, *, fallback: GC_Device | None = None):
+        if fallback is not None:
+            flags = fallback.flags if flags is None else flags
+            preset_id = fallback.presetId if preset_id is None else preset_id
+            brightness = fallback.brightness if brightness is None else brightness
+        return int(flags) & 0xFF, int(preset_id) & 0xFF, int(brightness) & 0xFF
+
+    @staticmethod
+    def _update_group_control_cache(group_id: int, flags: int, preset_id: int, brightness: int) -> None:
+        for device in gc_devicelist:
+            try:
+                if (int(getattr(device, "groupId", 0)) & 0xFF) != group_id:
+                    continue
+                device.flags = flags
+                device.presetId = preset_id
+                device.brightness = brightness
+            except Exception:
+                continue
+
     def sendGateControl(self, targetDevice, flags=None, presetId=None, brightness=None):
         """Send CONTROL to a single node (receiver = last3 of targetDevice.addr)."""
-        if not getattr(self, "lora", None):
-            logger.warning("sendGateControl: communicator not ready")
+        if not self._require_lora("sendGateControl"):
             return
         recv3 = _mac_last3_from_hex(targetDevice.addr)
         groupId = int(targetDevice.groupId) & 0xFF
 
-        f = int(targetDevice.flags if flags is None else flags) & 0xFF
-        p = int(targetDevice.presetId if presetId is None else presetId) & 0xFF
-        b = int(targetDevice.brightness if brightness is None else brightness) & 0xFF
+        f, p, b = self._coerce_control_values(flags, presetId, brightness, fallback=targetDevice)
 
         self.lora.send_control(recv3=recv3, group_id=groupId, flags=f, preset_id=p, brightness=b)
 
@@ -412,23 +433,13 @@ class GateControl_LoRa(GateControlUIMixin):
 
     def sendGroupControl(self, gcGroupId, gcFlags, gcPresetId, gcBrightness):
         """Broadcast CONTROL to a group (receiver=FFFFFF); update local cache for group devices."""
-        if not getattr(self, "lora", None):
-            logger.warning("sendGroupControl: communicator not ready")
+        if not self._require_lora("sendGroupControl"):
             return
 
         groupId = int(gcGroupId) & 0xFF
-        f = int(gcFlags) & 0xFF
-        p = int(gcPresetId) & 0xFF
-        b = int(gcBrightness) & 0xFF
+        f, p, b = self._coerce_control_values(gcFlags, gcPresetId, gcBrightness)
 
-        for device in gc_devicelist:
-            try:
-                if (int(getattr(device, "groupId", 0)) & 0xFF) == groupId:
-                    device.flags = f
-                    device.presetId = p
-                    device.brightness = b
-            except Exception:
-                continue
+        self._update_group_control_cache(groupId, f, p, b)
 
         self.lora.send_control(
             recv3=b"\xFF\xFF\xFF",
@@ -454,6 +465,8 @@ class GateControl_LoRa(GateControlUIMixin):
         opcode7 = int(opcode7) & 0x7F
         recv3_b = bytes(recv3 or b"")
         sender_filter = recv3_b if recv3_b and recv3_b != b"\xFF\xFF\xFF" else None
+        sender_filter_hex = sender_filter.hex().upper() if sender_filter else ""
+        sender_dev = self.getDeviceFromAddress(sender_filter_hex) if sender_filter_hex else None
 
         try:
             rule = LPA.find_rule(opcode7)
@@ -479,15 +492,13 @@ class GateControl_LoRa(GateControlUIMixin):
                 opc = int(ev.get("opc", -1))
                 if policy == int(getattr(LPA, "RESP_ACK", 1)):
                     if opc == int(LP.OPC_ACK) and int(ev.get("ack_of", -1)) == opcode7:
-                        dev = self.getDeviceFromAddress(sender_filter.hex().upper()) if sender_filter else None
-                        if dev:
-                            dev.mark_online()
+                        if sender_dev:
+                            sender_dev.mark_online()
                         return True
                 elif policy == int(getattr(LPA, "RESP_SPECIFIC", 2)):
                     if opc == rsp_opc:
-                        dev = self.getDeviceFromAddress(sender_filter.hex().upper()) if sender_filter else None
-                        if dev:
-                            dev.mark_online()
+                        if sender_dev:
+                            sender_dev.mark_online()
                         return True
             except Exception:
                 return False
