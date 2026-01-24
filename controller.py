@@ -66,6 +66,7 @@ class GateControl_LoRa(GateControlUIMixin):
 
         self._transport_hooks_installed = False
         self._pending_config = {}
+        self._rule_cache: dict[int, object | None] = {}
         # Basic colors: 1-9; Basic effects: 10-19; Special Effects (WLED only): 20-100
         self.uiEffectList = [
             UIFieldSelectOption("01", "Red"),
@@ -438,6 +439,31 @@ class GateControl_LoRa(GateControlUIMixin):
             brightness=b,
         )
 
+    def _rule_for_opcode(self, opcode7: int):
+        key = int(opcode7) & 0x7F
+        if key not in self._rule_cache:
+            try:
+                self._rule_cache[key] = LPA.find_rule(key)
+            except Exception:
+                self._rule_cache[key] = None
+        return self._rule_cache.get(key)
+
+    def _policy_for_rule(self, rule) -> int:
+        return int(getattr(rule, "policy", getattr(LPA, "RESP_NONE", 0))) if rule else int(getattr(LPA, "RESP_NONE", 0))
+
+    def _device_from_sender(self, sender3: bytes | None):
+        if not sender3:
+            return None
+        try:
+            return self.getDeviceFromAddress(bytes(sender3).hex().upper())
+        except Exception:
+            return None
+
+    def _rx_window_state(self, ev: dict) -> int:
+        if getattr(self, "lora", None):
+            return int(ev.get("rx_windows", getattr(self.lora, "rx_window_state", 0)) or 0)
+        return int(ev.get("rx_windows", 0) or 0)
+
     def _send_and_wait_for_reply(
         self,
         recv3: bytes,
@@ -455,12 +481,8 @@ class GateControl_LoRa(GateControlUIMixin):
         recv3_b = bytes(recv3 or b"")
         sender_filter = recv3_b if recv3_b and recv3_b != b"\xFF\xFF\xFF" else None
 
-        try:
-            rule = LPA.find_rule(opcode7)
-        except Exception:
-            rule = None
-
-        policy = int(getattr(rule, "policy", getattr(LPA, "RESP_NONE", 0))) if rule else int(getattr(LPA, "RESP_NONE", 0))
+        rule = self._rule_for_opcode(opcode7)
+        policy = self._policy_for_rule(rule)
         if policy == int(getattr(LPA, "RESP_NONE", 0)):
             send_fn()
             return [], False
@@ -479,13 +501,13 @@ class GateControl_LoRa(GateControlUIMixin):
                 opc = int(ev.get("opc", -1))
                 if policy == int(getattr(LPA, "RESP_ACK", 1)):
                     if opc == int(LP.OPC_ACK) and int(ev.get("ack_of", -1)) == opcode7:
-                        dev = self.getDeviceFromAddress(sender_filter.hex().upper()) if sender_filter else None
+                        dev = self._device_from_sender(sender_filter) if sender_filter else None
                         if dev:
                             dev.mark_online()
                         return True
                 elif policy == int(getattr(LPA, "RESP_SPECIFIC", 2)):
                     if opc == rsp_opc:
-                        dev = self.getDeviceFromAddress(sender_filter.hex().upper()) if sender_filter else None
+                        dev = self._device_from_sender(sender_filter) if sender_filter else None
                         if dev:
                             dev.mark_online()
                         return True
@@ -719,10 +741,7 @@ class GateControl_LoRa(GateControlUIMixin):
         return collected, got_closed
 
     def _opcode_name(self, opcode7: int) -> str:
-        try:
-            rule = LPA.find_rule(int(opcode7) & 0x7F)
-        except Exception:
-            rule = None
+        rule = self._rule_for_opcode(opcode7)
         if rule and getattr(rule, "name", None):
             return str(rule.name)
         return f"0x{int(opcode7) & 0x7F:02X}"
@@ -788,10 +807,7 @@ class GateControl_LoRa(GateControlUIMixin):
 
     def _log_rx_window_event(self, ev: dict) -> None:
         t = ev.get("type")
-        if getattr(self, "lora", None):
-            state = int(ev.get("rx_windows", getattr(self.lora, "rx_window_state", 0)) or 0)
-        else:
-            state = int(ev.get("rx_windows", 0) or 0)
+        state = self._rx_window_state(ev)
         if t == EV_RX_WINDOW_OPEN:
             logger.debug("RX window OPEN: state=%s min_ms=%s", state, ev.get("window_ms"))
         elif t == EV_RX_WINDOW_CLOSED:
@@ -872,21 +888,18 @@ class GateControl_LoRa(GateControlUIMixin):
                 return
 
             opcode7 = int(ev.get("opc", -1)) & 0x7F
-            try:
-                rule = LPA.find_rule(opcode7)
-            except Exception:
-                rule = None
+            rule = self._rule_for_opcode(opcode7)
             if not rule:
                 return
 
             if int(getattr(rule, "req_dir", getattr(LPA, "DIR_M2N", 0))) != int(getattr(LPA, "DIR_M2N", 0)):
                 return
 
-            policy = int(getattr(rule, "policy", getattr(LPA, "RESP_NONE", 0)))
+            policy = self._policy_for_rule(rule)
             if policy == int(getattr(LPA, "RESP_NONE", 0)):
                 return
 
-            dev = self.getDeviceFromAddress(recv3_b.hex().upper())
+            dev = self._device_from_sender(recv3_b)
             if not dev:
                 return
 
@@ -979,7 +992,7 @@ class GateControl_LoRa(GateControlUIMixin):
 
             rule = p.get("rule")
             opcode7 = int(p.get("opcode7", -1)) & 0x7F
-            policy = int(getattr(rule, "policy", getattr(LPA, "RESP_NONE", 0)))
+            policy = self._policy_for_rule(rule)
 
             if policy == int(getattr(LPA, "RESP_ACK", 1)):
                 if int(ev.get("opc", -1)) == int(LP.OPC_ACK) and int(ev.get("ack_of", -2)) == opcode7:
