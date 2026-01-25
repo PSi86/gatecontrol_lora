@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from typing import Optional, Union
 
@@ -28,6 +29,7 @@ except Exception:
 try:
     from .gc_transport import (
         LP,
+        EV_ERROR,
         EV_RX_WINDOW_CLOSED,
         EV_RX_WINDOW_OPEN,
         LoRaUSB,
@@ -36,6 +38,7 @@ try:
 except Exception:
     from gc_transport import (
         LP,
+        EV_ERROR,
         EV_RX_WINDOW_CLOSED,
         EV_RX_WINDOW_OPEN,
         LoRaUSB,
@@ -64,6 +67,9 @@ class GateControl_LoRa(GateControlUIMixin):
 
         self._transport_hooks_installed = False
         self._pending_config = {}
+        self._reconnect_in_progress = False
+        self._last_reconnect_ts = 0.0
+        self._last_error_notify_ts = 0.0
         # Basic colors: 1-9; Basic effects: 10-19; Special Effects (WLED only): 20-100
         self.uiEffectList = [
             UIFieldSelectOption("01", "Red"),
@@ -171,6 +177,7 @@ class GateControl_LoRa(GateControlUIMixin):
         """Initialize communicator via LoRaUSB only. No direct serial here."""
         port = self._rhapi.db.option("psi_comms_port", None)
         try:
+            self._transport_hooks_installed = False
             self.lora = LoRaUSB(port=port, on_event=None)
             ok = self.lora.discover_and_open()
             if ok:
@@ -918,6 +925,21 @@ class GateControl_LoRa(GateControlUIMixin):
 
             t = ev.get("type")
 
+            if t == EV_ERROR:
+                reason = str(ev.get("data") or "unknown error")
+                self.ready = False
+                now = time.time()
+                if (now - self._last_error_notify_ts) > 2:
+                    self._last_error_notify_ts = now
+                    try:
+                        self._rhapi.ui.message_notify(
+                            self._rhapi.__("GateControl Communicator disconnected: {}").format(reason)
+                        )
+                    except Exception:
+                        logger.exception("GateControl: failed to notify UI about disconnect")
+                self._schedule_reconnect(reason)
+                return
+
             if t in (EV_RX_WINDOW_OPEN, EV_RX_WINDOW_CLOSED):
                 self._log_rx_window_event(ev)
                 if t == EV_RX_WINDOW_CLOSED:
@@ -975,6 +997,28 @@ class GateControl_LoRa(GateControlUIMixin):
 
         except Exception:
             logger.exception("GateControl: RX hook failed")
+
+    def _schedule_reconnect(self, reason: str) -> None:
+        now = time.time()
+        if self._reconnect_in_progress or (now - self._last_reconnect_ts) < 5:
+            return
+        self._last_reconnect_ts = now
+        self._reconnect_in_progress = True
+
+        def _reconnect():
+            try:
+                logger.warning("GateControl: attempting LoRaUSB reconnect after error: %s", reason)
+                try:
+                    if self.lora:
+                        self.lora.close()
+                except Exception:
+                    pass
+                self.lora = None
+                self.discoverPort({})
+            finally:
+                self._reconnect_in_progress = False
+
+        threading.Thread(target=_reconnect, daemon=True).start()
 
     def _pending_try_match(self, ev: dict) -> None:
         p = self._pending_expect
