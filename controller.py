@@ -164,6 +164,13 @@ class GateControl_LoRa(GateControlUIMixin):
             logger.debug(group)
             gc_grouplist.append(GC_DeviceGroup(group["name"], group["static_group"], group["device_type"]))
 
+        if not gc_grouplist:
+            gc_grouplist.append(GC_DeviceGroup("Unconfigured", static_group=1, device_type=0))
+        else:
+            gc_grouplist[0].name = "Unconfigured"
+            gc_grouplist[0].static_group = 1
+            gc_grouplist[0].device_type = 0
+
         self.uiDeviceList = self.createUiDevList()
         self.uiGroupList = self.createUiGroupList()
         self.uiDiscoveryGroupList = self.createUiGroupList(True)
@@ -229,12 +236,21 @@ class GateControl_LoRa(GateControlUIMixin):
             groupId = int(targetDevice.groupId) & 0xFF
 
         found = 0
+        responders = set()
 
         def _collect(ev: dict) -> bool:
             nonlocal found
             try:
                 if ev.get("opc") == LP.OPC_DEVICES and ev.get("reply") == "IDENTIFY_REPLY":
                     found += 1
+                    mac6 = ev.get("mac6")
+                    if isinstance(mac6, (bytes, bytearray)) and len(mac6) == 6:
+                        responders.add(bytes(mac6).hex().upper())
+                    else:
+                        sender3 = ev.get("sender3")
+                        sender_hex = self._to_hex_str(sender3)
+                        if sender_hex:
+                            responders.add(sender_hex.upper())
                     return True
             except Exception:
                 pass
@@ -254,15 +270,19 @@ class GateControl_LoRa(GateControlUIMixin):
         )
 
         if addToGroup > 0 and addToGroup < 255:
-            for dev in list(gc_devicelist):
-                if int(getattr(dev, "groupId", 0)) == 0:
-                    dev.groupId = addToGroup
-                    self.setGateGroupId(dev)
+            for addr in responders:
+                dev = self.getDeviceFromAddress(addr)
+                if not dev:
+                    continue
+                dev.groupId = addToGroup
+                self.setGateGroupId(dev)
 
         if hasattr(self, "_rhapi") and hasattr(self._rhapi, "ui"):
-            self._rhapi.ui.message_notify(
-                "Device Discovery finished with {} devices found and added to GroupId: {}".format(found, addToGroup)
-            )
+            if addToGroup > 0 and addToGroup < 255:
+                msg = "Device Discovery finished with {} devices found and added to GroupId: {}".format(found, addToGroup)
+            else:
+                msg = "Device Discovery finished with {} devices found.".format(found)
+            self._rhapi.ui.message_notify(msg)
         return found
 
     def getStatus(self, groupFilter=255, targetDevice=None):

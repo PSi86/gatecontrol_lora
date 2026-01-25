@@ -300,7 +300,7 @@ class GateControlUIMixin:
         payload["gc_devices_backup"] = [
             {"addr": "3C84279EBFE4", "type": 24, "name": "WLED 3C84279EBFE4", "groupId": 0, "flags": 1, "presetId": 1, "brightness": 70}
         ]
-        payload["gc_groups_backup"] = [{"name": "All WLED Gates", "static_group": 1, "device_type": 24}]
+        payload["gc_groups_backup"] = [{"name": "Unconfigured", "static_group": 1, "device_type": 0}]
         return payload
 
     # GC Data Importer function: write imported data to DB

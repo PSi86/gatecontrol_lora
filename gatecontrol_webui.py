@@ -619,6 +619,8 @@ def register_gc_blueprint(
         new_name = body.get("name", None)
 
         changed = 0
+        if new_group is not None:
+            _ensure_transport_hooked()
         with _gc_lock:
             for mac in macs:
                 dev = gc_instance.getDeviceFromAddress(mac)
@@ -629,7 +631,8 @@ def register_gc_blueprint(
                     changed += 1
                 if new_group is not None:
                     try:
-                        gc_instance.setGateGroupId(dev, int(new_group))
+                        dev.groupId = int(new_group)
+                        gc_instance.setGateGroupId(dev)
                         changed += 1
                     except Exception as ex:
                         _log(f"GateControl: setGateGroupId failed for {mac}: {ex}")

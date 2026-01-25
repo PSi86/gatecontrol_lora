@@ -164,7 +164,7 @@ class GC_Type:
 
 
 gc_backup_devicelist = []
-gc_backup_grouplist = [GC_DeviceGroup("All WLED Gates", 1, int(GC_Type.WLED_CUSTOM))]
+gc_backup_grouplist = [GC_DeviceGroup("Unconfigured", 1, 0)]
 
 gc_devicelist: list[GC_Device] = []
 gc_grouplist: list[GC_DeviceGroup] = []
