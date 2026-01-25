@@ -7,6 +7,25 @@
     hex2: v => ("0" + (Number(v) & 0xFF).toString(16).toUpperCase()).slice(-2),
   };
 
+  const WLED_TYPES = new Set([10, 11, 50]);
+
+  function getDeviceTypeId(dev){
+    const v = dev.device_type ?? dev.caps ?? dev.type ?? 0;
+    return Number(v || 0);
+  }
+
+  function isWledType(typeId){
+    return WLED_TYPES.has(Number(typeId || 0));
+  }
+
+  function groupMatchesSelection(dev, groupId){
+    const gid = Number(groupId);
+    if(gid === 255){
+      return isWledType(getDeviceTypeId(dev));
+    }
+    return Number(dev.groupId) === gid;
+  }
+
   // Flag bits (must match firmware; kept local for UI only)
   const GC_FLAG_POWER_ON    = 0x01;
   const GC_FLAG_ARM_ON_SYNC = 0x02;
@@ -209,7 +228,8 @@ function updatePresetsDownloadUi(){
   function renderBulkGroup(){
     const sel = $("#bulkGroup"), sel2 = $("#discoverGroup");
     sel.innerHTML = ""; sel2.innerHTML = "";
-    state.groups.forEach(gr => {
+    const selectableGroups = state.groups.filter(gr => !gr.static && Number(gr.id) !== 255);
+    selectableGroups.forEach(gr => {
       const o = document.createElement("option");
       o.value = gr.id; o.textContent = `${gr.id}: ${gr.name}`;
       sel.appendChild(o);
@@ -226,7 +246,7 @@ function updatePresetsDownloadUi(){
     // Apply current filters first
     let rows = state.devices.slice();
     if(state.selGroupId!==null){
-      rows = rows.filter(r => Number(r.groupId)===Number(state.selGroupId));
+      rows = rows.filter(r => groupMatchesSelection(r, state.selGroupId));
     }
 
     // Prune selection to currently visible devices (within the current filter)
@@ -249,6 +269,8 @@ function updatePresetsDownloadUi(){
     rows.forEach(r => {
       const tr = document.createElement("tr");
       const checked = state.selected.has(r.addr);
+      const typeId = getDeviceTypeId(r);
+      const typeLabel = r.device_type_name || r.type_name || (isNaN(typeId) ? "" : String(typeId));
       const configByte = Number(r.configByte ?? 0) & 0xFF;
       const selectedConfigs = [];
       const tooltipConfigs = [];
@@ -278,7 +300,7 @@ function updatePresetsDownloadUi(){
         <td>${fmt.num(r.host_rssi)}</td>
         <td>${fmt.num(r.host_snr)}</td>
         <td>${r.version ?? ""}</td>
-        <td>${r.caps ?? ""}</td>
+        <td>${typeLabel}</td>
         <td>${(r.online===true) ? '<span class="tag online">Online</span>' : (r.online===false) ? '<span class="tag off">Offline</span>' : ''}</td>
       `;
       if(configTooltip){
@@ -463,7 +485,7 @@ function updatePresetsDownloadUi(){
     $("#fwSelCount").textContent = String(state.selected.size || 0);
     const filtered = (state.selGroupId === null || state.selGroupId === undefined)
       ? state.devices.length
-      : state.devices.filter(d => Number(d.groupId) === Number(state.selGroupId)).length;
+      : state.devices.filter(d => groupMatchesSelection(d, state.selGroupId)).length;
     $("#fwFilterCount").textContent = String(filtered || 0);
     $("#fwAllCount").textContent = String(state.devices.length || 0);
   }
@@ -482,7 +504,7 @@ function updatePresetsDownloadUi(){
       if(state.selGroupId === null || state.selGroupId === undefined){
         return state.devices.map(d => d.addr).filter(Boolean);
       }
-      return state.devices.filter(d => Number(d.groupId) === Number(state.selGroupId)).map(d => d.addr).filter(Boolean);
+      return state.devices.filter(d => groupMatchesSelection(d, state.selGroupId)).map(d => d.addr).filter(Boolean);
     }
     return state.devices.map(d => d.addr).filter(Boolean);
   }

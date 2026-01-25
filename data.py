@@ -35,7 +35,8 @@ class GC_Device:
         self.type: int = int(type)
         self.name: str = name
         self.version: int = int(version)  # GateControl FW version -> via IDENTIFY_REPLY
-        self.caps: int = int(caps)  # capability flags (IDENTIFY_REPLY)
+        # NOTE: identify reply field "caps" is now used as device_type.
+        self.caps: int = int(caps)
         self.groupId: int = int(groupId)
 
         # CONTROL state (proto v1.2)
@@ -61,9 +62,11 @@ class GC_Device:
         # ACK status: last ACK from this device
         self.last_ack = {"ok": False, "opcode": None, "status": None, "seq": None, "ts": 0.0}
 
-    def update_from_identify(self, version, caps, groupId, mac6_bytes, host_rssi=None, host_snr=None):
+    def update_from_identify(self, version, device_type, groupId, mac6_bytes, host_rssi=None, host_snr=None):
         self.version = int(version) if version is not None else self.version
-        self.caps = int(caps) if caps is not None else self.caps
+        if device_type is not None:
+            self.caps = int(device_type)
+            self.type = int(device_type)
 
         # Only overwrite groupId if device was previously unconfigured
         if self.groupId == 0 and groupId:
@@ -150,21 +153,39 @@ class GC_DeviceGroup:
 
 
 class GC_Type:
-    IDENTIFY_COMMUNICATOR = 1  # Same as used from TBS Fusion OSD VRX Plugin
-    ESPNOW_GATE = 20  # unified message structure - groups only work with this type
-
-    BASIC_IR_GATE = 21  # IR Area Controller will identify with this code
-    CUSTOM_IR_GATE = 22  # not used currently
-
-    WIZMOTE_GATE = 23  # standard WLED type (does not support self identification)
-    WLED_CUSTOM = 24  # once custom WLED fw is built this will be the identifier
+    IDENTIFY_COMMUNICATOR = 1
+    WLED_REV3 = 10
+    WLED_REV4 = 11
+    WLED_STARTBLOCK_REV3 = 50
 
     GET_DEVICES = 30  # only devices with groupId != 0 should respond here
     SET_GROUP = 31  # send this command to make a device store the received groupId
 
 
+GC_DEVICE_TYPES = {
+    GC_Type.IDENTIFY_COMMUNICATOR: {"name": "IDENTIFY_COMMUNICATOR", "STARTBLOCK": 0, "LEDMATRIX": 0},
+    GC_Type.WLED_REV3: {"name": "WLED_REV3", "STARTBLOCK": 0, "LEDMATRIX": 0},
+    GC_Type.WLED_REV4: {"name": "WLED_REV4", "STARTBLOCK": 0, "LEDMATRIX": 0},
+    GC_Type.WLED_STARTBLOCK_REV3: {"name": "WLED_STARTBLOCK_REV3", "STARTBLOCK": 1, "LEDMATRIX": 0},
+}
+
+
+def get_device_type_info(type_id: int | None) -> dict:
+    tid = int(type_id or 0)
+    return GC_DEVICE_TYPES.get(tid, {"name": f"UNKNOWN_{tid}", "STARTBLOCK": 0, "LEDMATRIX": 0})
+
+
+def is_wled_device_type(type_id: int | None) -> bool:
+    tid = int(type_id or 0)
+    return tid in {
+        GC_Type.WLED_REV3,
+        GC_Type.WLED_REV4,
+        GC_Type.WLED_STARTBLOCK_REV3,
+    }
+
+
 gc_backup_devicelist = []
-gc_backup_grouplist = [GC_DeviceGroup("Unconfigured", 1, 0)]
+gc_backup_grouplist = [GC_DeviceGroup("All WLED Devices", 1, 0)]
 
 gc_devicelist: list[GC_Device] = []
 gc_grouplist: list[GC_DeviceGroup] = []

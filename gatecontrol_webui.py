@@ -48,6 +48,11 @@ import shutil
 
 from flask import Blueprint, request, jsonify, templating, Response, stream_with_context
 
+try:
+    from .data import get_device_type_info, is_wled_device_type  # type: ignore
+except Exception:  # pragma: no cover
+    from data import get_device_type_info, is_wled_device_type
+
 # Use gevent lock/queue if available, otherwise fallback to threading primitives
 try:
     from gevent.lock import Semaphore as _GCLock  # type: ignore
@@ -338,11 +343,13 @@ def register_gc_blueprint(
         # Online status (central link logic): always boolean, no timestamp gating.
         # Devices become online only when an expected reply is received; otherwise offline.
         online = bool(getattr(dev, "link_online", False))
+        device_type = int(getattr(dev, "type", getattr(dev, "caps", 0)) or 0)
+        type_info = get_device_type_info(device_type)
 
         d = {
             "addr": getattr(dev, "addr", None),
             "name": getattr(dev, "name", None),
-            "type": int(getattr(dev, "type", 0) or 0),
+            "type": device_type,
             "groupId": int(getattr(dev, "groupId", 0) or 0),
 
             # new proto v1.2 fields
@@ -358,7 +365,9 @@ def register_gc_blueprint(
             "host_snr": int(getattr(dev, "host_snr", 0) or 0),
 
             "version": int(getattr(dev, "version", 0) or 0),
-            "caps": int(getattr(dev, "caps", 0) or 0),
+            "caps": int(getattr(dev, "caps", device_type) or 0),
+            "device_type": device_type,
+            "device_type_name": type_info.get("name"),
             "last_seen_ts": float(getattr(dev, "last_seen_ts", 0.0) or 0.0),
             "last_ack": getattr(dev, "last_ack", None),
             "online": online,
@@ -374,6 +383,17 @@ def register_gc_blueprint(
         except Exception:
             pass
         return counts
+
+    def _gc_wled_count():
+        count = 0
+        try:
+            for dev in gc_devicelist:
+                dtype = int(getattr(dev, "type", getattr(dev, "caps", 0)) or 0)
+                if is_wled_device_type(dtype):
+                    count += 1
+        except Exception:
+            pass
+        return count
 
     bp = Blueprint(
         "gatecontrol",
@@ -465,13 +485,30 @@ def register_gc_blueprint(
         with _gc_lock:
             group_rows = []
             counts = _gc_group_counts()
+            wled_count = _gc_wled_count()
+            group_rows.append({
+                "id": 0,
+                "name": "Unconfigured",
+                "static": False,
+                "device_type": 0,
+                "device_count": int(counts.get(0, 0)),
+            })
             for i, g in enumerate(gc_grouplist):
+                name = getattr(g, "name", f"Group {i}")
+                if str(name).strip().lower() == "unconfigured":
+                    continue
+                if str(name).strip().lower() == "all wled devices":
+                    gid = 255
+                    device_count = wled_count
+                else:
+                    gid = i
+                    device_count = int(counts.get(i, 0))
                 group_rows.append({
-                    "id": i,
-                    "name": getattr(g, "name", f"Group {i}"),
+                    "id": gid,
+                    "name": name,
                     "static": bool(getattr(g, "static_group", 0)),
                     "device_type": int(getattr(g, "device_type", 0) or 0),
-                    "device_count": int(counts.get(i, 0)),
+                    "device_count": device_count,
                 })
         return jsonify({"ok": True, "groups": group_rows})
 
@@ -567,7 +604,10 @@ def register_gc_blueprint(
 
         def do_discover():
             # Discovery: ask nodes with groupId=0 and assign to group
-            n_found = int(gc_instance.getDevices(groupFilter=0, addToGroup=int(target_gid) if target_gid is not None else -1) or 0)
+            add_to_group = -1
+            if target_gid not in (None, 0, "0"):
+                add_to_group = int(target_gid)
+            n_found = int(gc_instance.getDevices(groupFilter=0, addToGroup=add_to_group) or 0)
             return {"found": n_found, "createdGroupId": created_gid, "targetGroupId": target_gid}
 
         t = _start_task("discover", do_discover, meta={"createdGroupId": created_gid, "targetGroupId": target_gid})

@@ -11,6 +11,7 @@ from .data import (
     GC_Device,
     GC_DeviceGroup,
     GC_Type,
+    get_device_type_info,
     GC_FLAG_HAS_BRI,
     GC_FLAG_POWER_ON,
     gc_backup_devicelist,
@@ -136,14 +137,18 @@ class GateControl_LoRa(GateControlUIMixin):
 
                 brightness = int(device.get("brightness", 70) or 0)
 
+                device_type = device.get("device_type", None)
+                if device_type is None:
+                    device_type = device.get("caps", device.get("type", 0))
+
                 gc_devicelist.append(
                     GC_Device(
                         addr=str(device.get("addr", "")).upper(),
-                        type=int(device.get("type", 0) or 0),
+                        type=int(device_type or 0),
                         name=str(device.get("name", "")),
                         groupId=int(device.get("groupId", 0) or 0),
                         version=int(device.get("version", 0) or 0),
-                        caps=int(device.get("caps", 0) or 0),
+                        caps=int(device_type or 0),
                         flags=int(flags) & 0xFF,
                         presetId=int(presetId) & 0xFF,
                         brightness=brightness & 0xFF,
@@ -164,12 +169,15 @@ class GateControl_LoRa(GateControlUIMixin):
             logger.debug(group)
             gc_grouplist.append(GC_DeviceGroup(group["name"], group["static_group"], group["device_type"]))
 
-        if not gc_grouplist:
-            gc_grouplist.append(GC_DeviceGroup("Unconfigured", static_group=1, device_type=0))
+        gc_grouplist[:] = [g for g in gc_grouplist if str(getattr(g, "name", "")).strip().lower() != "unconfigured"]
+
+        if not any(str(getattr(g, "name", "")).strip().lower() == "all wled devices" for g in gc_grouplist):
+            gc_grouplist.append(GC_DeviceGroup("All WLED Devices", static_group=1, device_type=0))
         else:
-            gc_grouplist[0].name = "Unconfigured"
-            gc_grouplist[0].static_group = 1
-            gc_grouplist[0].device_type = 0
+            for g in gc_grouplist:
+                if str(getattr(g, "name", "")).strip().lower() == "all wled devices":
+                    g.static_group = 1
+                    g.device_type = 0
 
         self.uiDeviceList = self.createUiDevList()
         self.uiGroupList = self.createUiGroupList()
@@ -809,13 +817,16 @@ class GateControl_LoRa(GateControlUIMixin):
         if opc == int(LP.OPC_DEVICES) and ev.get("reply") == "IDENTIFY_REPLY":
             mac6 = ev.get("mac6")
             mac12 = bytes(mac6).hex().upper() if isinstance(mac6, (bytes, bytearray)) and len(mac6) == 6 else None
+            device_type = ev.get("caps")
+            dtype_name = get_device_type_info(device_type).get("name")
             logger.debug(
-                "IDENTIFY from %s: mac=%s group=%s ver=%s caps=%s host_rssi=%s host_snr=%s",
+                "IDENTIFY from %s: mac=%s group=%s ver=%s device_type=%s (%s) host_rssi=%s host_snr=%s",
                 sender3_hex,
                 mac12 or sender3_hex,
                 ev.get("groupId"),
                 ev.get("version"),
-                ev.get("caps"),
+                device_type,
+                dtype_name,
                 ev.get("host_rssi"),
                 ev.get("host_snr"),
             )
@@ -996,7 +1007,8 @@ class GateControl_LoRa(GateControlUIMixin):
                     mac12 = bytes(mac6).hex().upper()
                     dev = self.getDeviceFromAddress(mac12)
                     if not dev:
-                        dev = GC_Device(addr=mac12, type=GC_Type.WLED_CUSTOM, name=f"WLED {mac12}")
+                        device_type = ev.get("caps", 0)
+                        dev = GC_Device(addr=mac12, type=int(device_type or 0), name=f"WLED {mac12}")
                         gc_devicelist.append(dev)
                         try:
                             if hasattr(self, "createUiDevList"):

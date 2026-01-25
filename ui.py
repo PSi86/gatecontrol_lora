@@ -91,7 +91,11 @@ class GateControlUIMixin:
         temp_ui_grouplist = []
         for i, group in enumerate(gc_grouplist):
             if exclude_static is False or (exclude_static is True and group.static_group == 0):
-                temp_ui_grouplist.append(UIFieldSelectOption(i, group.name))
+                if group.static_group and str(getattr(group, "name", "")) == "All WLED Devices":
+                    value = 255
+                else:
+                    value = i
+                temp_ui_grouplist.append(UIFieldSelectOption(value, group.name))
         return temp_ui_grouplist
 
     def register_quickset_ui(self):
@@ -273,7 +277,7 @@ class GateControlUIMixin:
 
         payload["help/gc_devices"] = ["Device List of known devices"]
         payload["help/gc_devices/addr"] = ["MAC of the device without ':' as separator"]
-        payload["help/gc_devices/type"] = ["BASIC_IR_GATE:21, CUSTOM_IR_GATE:22, WIZMOTE_GATE:23, WLED_CUSTOM:24"]
+        payload["help/gc_devices/type"] = ["IDENTIFY_COMMUNICATOR:1, WLED_REV3:10, WLED_REV4:11, WLED_STARTBLOCK_REV3:50"]
         payload["help/gc_devices/name"] = ["UI: shown name of a device"]
         payload["help/gc_devices/groupId"] = [
             "Used to group devices for control. Valid numbers start with 3 (0-2 are reserved for device type based groups)"
@@ -300,7 +304,7 @@ class GateControlUIMixin:
         payload["gc_devices_backup"] = [
             {"addr": "3C84279EBFE4", "type": 24, "name": "WLED 3C84279EBFE4", "groupId": 0, "flags": 1, "presetId": 1, "brightness": 70}
         ]
-        payload["gc_groups_backup"] = [{"name": "Unconfigured", "static_group": 1, "device_type": 0}]
+        payload["gc_groups_backup"] = [{"name": "All WLED Devices", "static_group": 1, "device_type": 0}]
         return payload
 
     # GC Data Importer function: write imported data to DB
