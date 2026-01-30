@@ -11,6 +11,7 @@ from .data import (
     GC_Device,
     GC_DeviceGroup,
     GC_Dev_Type,
+    build_specials_state,
     create_device,
     get_dev_type_info,
     GC_FLAG_HAS_BRI,
@@ -137,8 +138,6 @@ class GateControl_LoRa(GateControlUIMixin):
                     presetId = int(device.get("effect", 1) or 1)
 
                 brightness = int(device.get("brightness", 70) or 0)
-                startblock_slots = int(device.get("startblock_slots", 1) or 1)
-                startblock_first_slot = int(device.get("startblock_first_slot", 1) or 1)
 
                 dev_type = device.get("dev_type", None)
                 if dev_type is None:
@@ -146,6 +145,7 @@ class GateControl_LoRa(GateControlUIMixin):
                 if dev_type is None:
                     dev_type = device.get("caps", device.get("type", 0))
 
+                special_state = build_specials_state(int(dev_type or 0), device)
                 gc_devicelist.append(
                     create_device(
                         addr=str(device.get("addr", "")).upper(),
@@ -157,8 +157,7 @@ class GateControl_LoRa(GateControlUIMixin):
                         flags=int(flags) & 0xFF,
                         presetId=int(presetId) & 0xFF,
                         brightness=brightness & 0xFF,
-                        startblock_slots=startblock_slots & 0xFF,
-                        startblock_first_slot=startblock_first_slot & 0xFF,
+                        specials=special_state,
                     )
                 )
             except Exception:
@@ -530,8 +529,8 @@ class GateControl_LoRa(GateControlUIMixin):
         ok_first = self.sendConfig(option=0x8D, data0=first_slot, recv3=recv3, wait_for_ack=True)
         if not ok_first:
             return False
-        targetDevice.startblock_slots = slots & 0xFF
-        targetDevice.startblock_first_slot = first_slot & 0xFF
+        targetDevice.specials["startblock_slots"] = slots & 0xFF
+        targetDevice.specials["startblock_first_slot"] = first_slot & 0xFF
         try:
             self.save_to_db({"manual": True})
         except Exception:

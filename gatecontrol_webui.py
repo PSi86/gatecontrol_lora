@@ -49,9 +49,9 @@ import shutil
 from flask import Blueprint, request, jsonify, templating, Response, stream_with_context
 
 try:
-    from .data import get_dev_type_info, get_specials_config, is_wled_dev_type  # type: ignore
+    from .data import get_dev_type_info, get_specials_config, get_special_keys_for_caps, is_wled_dev_type  # type: ignore
 except Exception:  # pragma: no cover
-    from data import get_dev_type_info, get_specials_config, is_wled_dev_type
+    from data import get_dev_type_info, get_specials_config, get_special_keys_for_caps, is_wled_dev_type
 
 # Use gevent lock/queue if available, otherwise fallback to threading primitives
 try:
@@ -375,16 +375,7 @@ def register_gc_blueprint(
             "configByte": int(getattr(dev, "configByte", 0) or 0),
             "presetId": int(getattr(dev, "presetId", 0) or 0),
             "brightness": int(getattr(dev, "brightness", 0) or 0),
-            "startblock_slots": (
-                int(getattr(dev, "startblock_slots"))
-                if hasattr(dev, "startblock_slots")
-                else None
-            ),
-            "startblock_first_slot": (
-                int(getattr(dev, "startblock_first_slot"))
-                if hasattr(dev, "startblock_first_slot")
-                else None
-            ),
+            "specials": dict(getattr(dev, "specials", {}) or {}),
 
             "voltage_mV": int(getattr(dev, "voltage_mV", 0) or 0),
             "node_rssi": int(getattr(dev, "node_rssi", 0) or 0),
@@ -400,6 +391,11 @@ def register_gc_blueprint(
             "last_ack": getattr(dev, "last_ack", None),
             "online": online,
         }
+        special_keys = get_special_keys_for_caps(type_info.get("caps", []))
+        specials = getattr(dev, "specials", {}) or {}
+        for key in special_keys:
+            if key in specials:
+                d[key] = specials[key]
         return d
 
     def _gc_group_counts():
@@ -951,7 +947,9 @@ def register_gc_blueprint(
                 dev = gc_instance.getDeviceFromAddress(mac_str)
                 if not dev:
                     raise RuntimeError("device not found")
-                setattr(dev, key, int(value_int) & 0xFF)
+                if not hasattr(dev, "specials") or dev.specials is None:
+                    dev.specials = {}
+                dev.specials[key] = int(value_int) & 0xFF
                 try:
                     gc_instance.save_to_db({"manual": True})
                 except Exception:

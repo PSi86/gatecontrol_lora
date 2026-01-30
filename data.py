@@ -44,6 +44,7 @@ class GC_Device:
         self.presetId: int = int(presetId) & 0xFF
         self.brightness: int = int(brightness) & 0xFF
         self.configByte: int = int(configByte) & 0xFF
+        self.specials: dict[str, int] = {}
 
         # Telemetry (STATUS_REPLY)
         self.voltage_mV: int = int(voltage_mV)
@@ -145,43 +146,6 @@ class GC_Device:
         return bool(self.last_ack["ok"])
 
 
-class GC_DeviceStartblock(GC_Device):
-    def __init__(
-        self,
-        addr: str,
-        dev_type: int,
-        name: str,
-        groupId: int = 0,
-        version: int = 0,
-        caps: int = 0,
-        voltage_mV: int = 0,
-        node_rssi: int = 0,
-        node_snr: int = 0,
-        flags: int = GC_FLAG_POWER_ON,
-        presetId: int = 1,
-        brightness: int = 70,
-        configByte: int = 0,
-        startblock_slots: int = 1,
-        startblock_first_slot: int = 1,
-    ):
-        super().__init__(
-            addr=addr,
-            dev_type=dev_type,
-            name=name,
-            groupId=groupId,
-            version=version,
-            caps=caps,
-            voltage_mV=voltage_mV,
-            node_rssi=node_rssi,
-            node_snr=node_snr,
-            flags=flags,
-            presetId=presetId,
-            brightness=brightness,
-            configByte=configByte,
-        )
-        self.startblock_slots: int = int(startblock_slots) & 0xFF
-        self.startblock_first_slot: int = int(startblock_first_slot) & 0xFF
-
 class GC_DeviceGroup:
     def __init__(self, name: str, static_group: int = 0, dev_type: int = 0):
         self.name: str = name  # UI Name of Device
@@ -282,17 +246,39 @@ def get_specials_config() -> dict:
     return data
 
 
-def create_device(*, dev_type: int, **kwargs) -> GC_Device:
-    startblock_slots = kwargs.pop("startblock_slots", None)
-    startblock_first_slot = kwargs.pop("startblock_first_slot", None)
-    if int(dev_type or 0) == GC_Dev_Type.WLED_STARTBLOCK_REV3:
-        return GC_DeviceStartblock(
-            dev_type=dev_type,
-            startblock_slots=(1 if startblock_slots is None else startblock_slots),
-            startblock_first_slot=(1 if startblock_first_slot is None else startblock_first_slot),
-            **kwargs,
-        )
-    return GC_Device(dev_type=dev_type, **kwargs)
+def get_special_keys_for_caps(caps: list[str]) -> list[str]:
+    keys = []
+    for cap in caps:
+        spec = GC_SPECIALS.get(cap, {})
+        for opt in spec.get("options", []):
+            key = opt.get("key")
+            if key:
+                keys.append(key)
+    return keys
+
+
+def build_specials_state(type_id: int | None, stored: dict | None = None) -> dict[str, int]:
+    caps = get_dev_type_info(type_id).get("caps", [])
+    stored = stored or {}
+    state: dict[str, int] = {}
+    for cap in caps:
+        spec = GC_SPECIALS.get(cap, {})
+        for opt in spec.get("options", []):
+            key = opt.get("key")
+            if not key:
+                continue
+            default_val = opt.get("min", 0)
+            try:
+                state[key] = int(stored.get(key, default_val))
+            except Exception:
+                state[key] = int(default_val)
+    return state
+
+
+def create_device(*, dev_type: int, specials: dict | None = None, **kwargs) -> GC_Device:
+    dev = GC_Device(dev_type=dev_type, **kwargs)
+    dev.specials = build_specials_state(dev_type, specials)
+    return dev
 
 
 gc_backup_devicelist = []
