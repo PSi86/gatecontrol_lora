@@ -76,6 +76,9 @@
     fwUploads: { fwId: null, cfgId: null },
     configDisplay: loadConfigDisplay(),
     presets: { files: [], current: "" },
+    specials: {},
+    specialDevice: null,
+    specialTab: null,
   };
 
   async function apiGet(url){
@@ -124,6 +127,7 @@
     $("#btnDiscoverStart").disabled = disable;
     updateNodeCfgUi();
     updatePresetsDownloadUi();
+    updateSpecialUi();
   }
 
 
@@ -147,6 +151,129 @@ function updatePresetsDownloadUi(){
   if(hint){
     hint.textContent = (n === 1) ? "" : "Select exactly one device";
   }
+}
+
+function updateSpecialUi(){
+  const panel = $("#specialPanel");
+  if(!panel) return;
+  panel.querySelectorAll("button").forEach(btn => {
+    if(btn.classList.contains("special-save") || btn.classList.contains("special-refresh")){
+      btn.disabled = state.busy || !state.specialDevice;
+    }
+  });
+}
+
+function getSpecialsForDevice(dev){
+  const caps = Array.isArray(dev.dev_type_caps) ? dev.dev_type_caps : [];
+  return caps
+    .map(cap => ({ key: cap, info: state.specials[cap] }))
+    .filter(entry => entry.info && Array.isArray(entry.info.options) && entry.info.options.length > 0);
+}
+
+function renderSpecialTabs(){
+  const tabs = $("#specialTabs");
+  const panel = $("#specialPanel");
+  if(!tabs || !panel) return;
+  tabs.innerHTML = "";
+  panel.innerHTML = "";
+  const dev = state.specialDevice;
+  if(!dev) return;
+  const specials = getSpecialsForDevice(dev);
+  if(specials.length === 0){
+    panel.innerHTML = "<p class=\"muted\">No configurable options for this device.</p>";
+    return;
+  }
+  if(!state.specialTab || !specials.some(s => s.key === state.specialTab)){
+    state.specialTab = specials[0].key;
+  }
+  specials.forEach(({ key, info }) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.textContent = info.label || key;
+    if(key === state.specialTab) btn.classList.add("active");
+    btn.addEventListener("click", () => {
+      state.specialTab = key;
+      renderSpecialTabs();
+    });
+    tabs.appendChild(btn);
+  });
+
+  const active = specials.find(s => s.key === state.specialTab) || specials[0];
+  const options = active.info.options || [];
+  options.forEach(opt => {
+    const row = document.createElement("div");
+    row.className = "gc-special-row";
+    const label = document.createElement("label");
+    label.textContent = opt.label || opt.key;
+    const input = document.createElement("input");
+    input.type = "number";
+    if(opt.min !== undefined) input.min = String(opt.min);
+    if(opt.max !== undefined) input.max = String(opt.max);
+    const currentVal = dev[opt.key];
+    if(currentVal !== undefined && currentVal !== null){
+      input.value = String(currentVal);
+    }
+    const actions = document.createElement("div");
+    actions.className = "gc-special-actions";
+    const saveBtn = document.createElement("button");
+    saveBtn.type = "button";
+    saveBtn.className = "special-save";
+    saveBtn.textContent = "Save";
+    const refreshBtn = document.createElement("button");
+    refreshBtn.type = "button";
+    refreshBtn.className = "special-refresh";
+    refreshBtn.textContent = "Refresh";
+    actions.appendChild(saveBtn);
+    actions.appendChild(refreshBtn);
+    row.appendChild(label);
+    row.appendChild(input);
+    row.appendChild(actions);
+    panel.appendChild(row);
+
+    saveBtn.addEventListener("click", async () => {
+      if(!state.specialDevice) return;
+      const value = Number(input.value);
+      if(!Number.isFinite(value)){
+        $("#specialHint").textContent = "Enter a valid number.";
+        return;
+      }
+      $("#specialHint").textContent = `Saving ${opt.label || opt.key}…`;
+      const r = await apiPost("/gatecontrol/api/specials/config", {
+        mac: state.specialDevice.addr,
+        key: opt.key,
+        value,
+      });
+      if(r && r.task){
+        try{ updateTask(r.task); }catch{}
+      }
+      if(r.busy){
+        $("#specialHint").textContent = `Busy: ${r.task?.name || "task"} is running`;
+        return;
+      }
+      if(!r.ok){
+        $("#specialHint").textContent = r.error || "Failed to save option.";
+      }
+    });
+
+    refreshBtn.addEventListener("click", async () => {
+      $("#specialHint").textContent = "Refreshing is not implemented yet.";
+      await apiPost("/gatecontrol/api/specials/get", {
+        mac: state.specialDevice?.addr,
+        key: opt.key,
+      }).catch(()=>{});
+    });
+  });
+
+  updateSpecialUi();
+}
+
+function openSpecialsDialog(mac){
+  const dev = state.devices.find(d => d.addr === mac);
+  if(!dev) return;
+  state.specialDevice = dev;
+  $("#specialHint").textContent = "";
+  renderSpecialTabs();
+  $("#dlgSpecials").showModal();
 }
 
   function renderConfigDisplayOptions(){
@@ -204,8 +331,14 @@ function updatePresetsDownloadUi(){
     renderTable();
   }
 
+  async function loadSpecials(){
+    const s = await apiGet("/gatecontrol/api/specials");
+    state.specials = s.specials || {};
+    renderTable();
+  }
+
   async function loadAll(){
-    await Promise.all([loadGroups(), loadDevices()]);
+    await Promise.all([loadGroups(), loadDevices(), loadSpecials()]);
   }
 
   function renderGroups(){
@@ -270,6 +403,10 @@ function updatePresetsDownloadUi(){
       const checked = state.selected.has(r.addr);
       const typeId = getDeviceTypeId(r);
       const typeLabel = r.dev_type_name || r.type_name || (isNaN(typeId) ? "" : String(typeId));
+      const specials = getSpecialsForDevice(r);
+      const typeCell = (specials.length && typeLabel)
+        ? `<button class="gc-link-btn specials-link" data-mac="${r.addr ?? ""}">${typeLabel}</button>`
+        : typeLabel;
       const configByte = Number(r.configByte ?? 0) & 0xFF;
       const selectedConfigs = [];
       const tooltipConfigs = [];
@@ -299,7 +436,7 @@ function updatePresetsDownloadUi(){
         <td>${fmt.num(r.host_rssi)}</td>
         <td>${fmt.num(r.host_snr)}</td>
         <td>${r.version ?? ""}</td>
-        <td>${typeLabel}</td>
+        <td>${typeCell}</td>
         <td>${(r.online===true) ? '<span class="tag online">Online</span>' : (r.online===false) ? '<span class="tag off">Offline</span>' : ''}</td>
       `;
       if(configTooltip){
@@ -315,6 +452,13 @@ function updatePresetsDownloadUi(){
         if(cb.checked) state.selected.add(mac); else state.selected.delete(mac);
         updateNodeCfgUi();
         updatePresetsDownloadUi();
+      });
+    });
+
+    $$(".specials-link").forEach(btn => {
+      btn.addEventListener("click", (e) => {
+        const mac = e.currentTarget.getAttribute("data-mac");
+        if(mac) openSpecialsDialog(mac);
       });
     });
 
@@ -473,6 +617,20 @@ function updatePresetsDownloadUi(){
         hintEl.textContent = `Error: ${t.last_error || "unknown"}`;
       } else if(st==="running"){
         // running updates handled above
+      }
+    }
+  }
+
+  if(name==="special_config"){
+    const hintEl = $("#specialHint");
+    if(hintEl){
+      if(st==="done"){
+        hintEl.textContent = "Option saved.";
+      } else if(st==="error"){
+        hintEl.textContent = `Error: ${t.last_error || "unknown"}`;
+      } else if(st==="running"){
+        const meta = t.meta || {};
+        hintEl.textContent = meta.message ? String(meta.message) : "Saving option…";
       }
     }
   }
@@ -768,6 +926,17 @@ function updatePresetsDownloadUi(){
     const r = await apiPost("/gatecontrol/api/groups/force",{});
     if(r.busy) return;
   });
+
+  const dlgSpecials = $("#dlgSpecials");
+  if(dlgSpecials){
+    dlgSpecials.addEventListener("close", ()=>{
+      state.specialDevice = null;
+      state.specialTab = null;
+      $("#specialHint").textContent = "";
+      $("#specialTabs").innerHTML = "";
+      $("#specialPanel").innerHTML = "";
+    });
+  }
 
   const dlgPresets = $("#dlgPresets");
   $("#btnWledPresets").addEventListener("click", async ()=>{

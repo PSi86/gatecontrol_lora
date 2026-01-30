@@ -39,6 +39,8 @@ body{ margin:0; font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif
 button{ background:#232330; border:1px solid #2a2a32; color:var(--text); padding:6px 10px; border-radius:8px; cursor:pointer; }
 button:hover{ border-color:#3b3b44; }
 button:disabled{ opacity:.5; cursor:not-allowed; }
+.gc-link-btn{ background:none; border:none; color:var(--accent); padding:0; cursor:pointer; font:inherit; text-decoration:underline; }
+.gc-link-btn:hover{ color:#76a6ff; }
 select, input{ background:#1a1a23; color:var(--text); border:1px solid #2a2a32; border-radius:8px; padding:6px 8px; }
 dialog{ border:none; border-radius:12px; background:#14141a; color:var(--text); width:min(520px, 96vw); }
 dialog::backdrop{ background:rgba(0,0,0,.4); }
@@ -48,3 +50,9 @@ dialog::backdrop{ background:rgba(0,0,0,.4); }
 .gc-dialog-actions{ display:flex; gap:8px; justify-content:flex-end; margin-top:12px; flex-wrap:wrap; }
 .gc-form h3{ margin:0 0 6px 0; }
 .gc-form code{ font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace; font-size: 12px; }
+.gc-tabs{ display:flex; gap:8px; flex-wrap:wrap; margin:8px 0; }
+.gc-tabs button{ background:#1a1a23; }
+.gc-tabs button.active{ border-color:var(--accent); color:#cfe0ff; }
+.gc-tab-panel{ border:1px solid #2a2a32; border-radius:10px; padding:10px; }
+.gc-special-row{ display:grid; grid-template-columns: minmax(160px, 1fr) 120px auto; gap:8px; align-items:center; margin:8px 0; }
+.gc-special-actions{ display:flex; gap:6px; }

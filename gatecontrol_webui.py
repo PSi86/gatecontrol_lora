@@ -49,9 +49,9 @@ import shutil
 from flask import Blueprint, request, jsonify, templating, Response, stream_with_context
 
 try:
-    from .data import get_dev_type_info, is_wled_dev_type  # type: ignore
+    from .data import get_dev_type_info, get_specials_config, is_wled_dev_type  # type: ignore
 except Exception:  # pragma: no cover
-    from data import get_dev_type_info, is_wled_dev_type
+    from data import get_dev_type_info, get_specials_config, is_wled_dev_type
 
 # Use gevent lock/queue if available, otherwise fallback to threading primitives
 try:
@@ -176,6 +176,24 @@ def register_gc_blueprint(
     def _task_busy_response():
         snap = _task_snapshot()
         return jsonify({"ok": False, "busy": True, "task": snap}), 409
+
+    def _parse_recv3_from_addr(addr_str) -> Optional[bytes]:
+        """Parse address string (3B or 6B, with/without separators) and return last3 bytes."""
+        if addr_str is None:
+            return None
+        try:
+            s = str(addr_str)
+        except Exception:
+            return None
+        hexchars = "0123456789abcdefABCDEF"
+        s = "".join(ch for ch in s if ch in hexchars)
+        if len(s) < 6:
+            return None
+        s = s[-6:]
+        try:
+            return bytes.fromhex(s)
+        except Exception:
+            return None
 
     # --- Transport event hookup (LoRaUSB.on_event) ---
     _hooked_lora = {"ok": False}
@@ -357,6 +375,16 @@ def register_gc_blueprint(
             "configByte": int(getattr(dev, "configByte", 0) or 0),
             "presetId": int(getattr(dev, "presetId", 0) or 0),
             "brightness": int(getattr(dev, "brightness", 0) or 0),
+            "startblock_slots": (
+                int(getattr(dev, "startblock_slots"))
+                if hasattr(dev, "startblock_slots")
+                else None
+            ),
+            "startblock_first_slot": (
+                int(getattr(dev, "startblock_first_slot"))
+                if hasattr(dev, "startblock_first_slot")
+                else None
+            ),
 
             "voltage_mV": int(getattr(dev, "voltage_mV", 0) or 0),
             "node_rssi": int(getattr(dev, "node_rssi", 0) or 0),
@@ -479,6 +507,10 @@ def register_gc_blueprint(
         with _gc_lock:
             rows = [_gc_serialize_device(d) for d in gc_devicelist]
         return jsonify({"ok": True, "devices": rows})
+
+    @bp.route("/gatecontrol/api/specials", methods=["GET"])
+    def api_specials():
+        return jsonify({"ok": True, "specials": get_specials_config()})
 
     @bp.route("/gatecontrol/api/groups", methods=["GET"])
     def api_groups():
@@ -797,24 +829,6 @@ def register_gc_blueprint(
         if len(macs) != 1:
             return jsonify({"ok": False, "error": "select exactly one device"}), 400
 
-        def _parse_recv3_from_addr(addr_str) -> Optional[bytes]:
-            """Parse address string (3B or 6B, with/without separators) and return last3 bytes."""
-            if addr_str is None:
-                return None
-            try:
-                s = str(addr_str)
-            except Exception:
-                return None
-            hexchars = "0123456789abcdefABCDEF"
-            s = "".join(ch for ch in s if ch in hexchars)
-            if len(s) < 6:
-                return None
-            s = s[-6:]
-            try:
-                return bytes.fromhex(s)
-            except Exception:
-                return None
-
         recv3 = _parse_recv3_from_addr(macs[0])
         if not recv3:
             return jsonify({"ok": False, "error": "invalid mac/address"}), 400
@@ -861,6 +875,99 @@ def register_gc_blueprint(
             "data2": data2,
             "data3": data3,
         })
+
+    # -----------------------
+    # JSON API: Specials config (device-specific options)
+    # -----------------------
+    @bp.route("/gatecontrol/api/specials/config", methods=["POST"])
+    def api_specials_config():
+        if _task_is_running():
+            return _task_busy_response()
+
+        body = request.get_json(silent=True) or {}
+        mac = body.get("mac", None)
+        key = body.get("key", None)
+        value = body.get("value", None)
+        if not mac or not key:
+            return jsonify({"ok": False, "error": "missing mac/key"}), 400
+
+        recv3 = _parse_recv3_from_addr(mac)
+        if not recv3:
+            return jsonify({"ok": False, "error": "invalid mac/address"}), 400
+        if recv3 == b"\xFF\xFF\xFF":
+            return jsonify({"ok": False, "error": "broadcast not allowed for config"}), 400
+
+        try:
+            value_int = int(value)
+        except Exception:
+            return jsonify({"ok": False, "error": "invalid value"}), 400
+
+        mac_str = str(mac).upper()
+        with _gc_lock:
+            dev = gc_instance.getDeviceFromAddress(mac_str)
+            if not dev:
+                return jsonify({"ok": False, "error": "device not found"}), 404
+            dev_caps = set(get_dev_type_info(getattr(dev, "dev_type", 0)).get("caps", []))
+            specials = get_specials_config()
+            option_info = None
+            for cap in dev_caps:
+                spec = specials.get(cap, {})
+                for opt in spec.get("options", []):
+                    if opt.get("key") == key:
+                        option_info = opt
+                        break
+                if option_info:
+                    break
+
+        if not option_info:
+            return jsonify({"ok": False, "error": "option not supported for device"}), 400
+
+        option = option_info.get("option", None)
+        if option is None:
+            return jsonify({"ok": False, "error": "option not writable"}), 400
+
+        min_v = option_info.get("min")
+        max_v = option_info.get("max")
+        if min_v is not None and value_int < int(min_v):
+            return jsonify({"ok": False, "error": f"value must be >= {min_v}"}), 400
+        if max_v is not None and value_int > int(max_v):
+            return jsonify({"ok": False, "error": f"value must be <= {max_v}"}), 400
+
+        _ensure_transport_hooked()
+
+        def do_special_config():
+            _task_update(meta={"mac": mac_str, "key": key, "message": f"Sending {key} (0x{int(option):02X})"})
+            ok = gc_instance.sendConfig(
+                option=int(option) & 0xFF,
+                data0=value_int,
+                recv3=recv3,
+                wait_for_ack=True,
+                timeout_s=6.0,
+            )
+            if not ok:
+                raise RuntimeError(f"ACK timeout for option 0x{int(option):02X}")
+
+            with _gc_lock:
+                dev = gc_instance.getDeviceFromAddress(mac_str)
+                if not dev:
+                    raise RuntimeError("device not found")
+                setattr(dev, key, int(value_int) & 0xFF)
+                try:
+                    gc_instance.save_to_db({"manual": True})
+                except Exception:
+                    pass
+
+            return {"mac": mac_str, "key": key, "value": value_int}
+
+        meta = {"mac": mac_str, "key": key, "message": "Preparing special config"}
+        t = _start_task("special_config", do_special_config, meta=meta)
+        if not t:
+            return _task_busy_response()
+        return jsonify({"ok": True, "task": t})
+
+    @bp.route("/gatecontrol/api/specials/get", methods=["POST"])
+    def api_specials_get():
+        return jsonify({"ok": False, "error": "not implemented"}), 501
 
     @bp.route("/gatecontrol/api/devices/control", methods=["POST"])
     def api_devices_control():

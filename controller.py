@@ -11,6 +11,7 @@ from .data import (
     GC_Device,
     GC_DeviceGroup,
     GC_Dev_Type,
+    create_device,
     get_dev_type_info,
     GC_FLAG_HAS_BRI,
     GC_FLAG_POWER_ON,
@@ -136,6 +137,8 @@ class GateControl_LoRa(GateControlUIMixin):
                     presetId = int(device.get("effect", 1) or 1)
 
                 brightness = int(device.get("brightness", 70) or 0)
+                startblock_slots = int(device.get("startblock_slots", 1) or 1)
+                startblock_first_slot = int(device.get("startblock_first_slot", 1) or 1)
 
                 dev_type = device.get("dev_type", None)
                 if dev_type is None:
@@ -144,7 +147,7 @@ class GateControl_LoRa(GateControlUIMixin):
                     dev_type = device.get("caps", device.get("type", 0))
 
                 gc_devicelist.append(
-                    GC_Device(
+                    create_device(
                         addr=str(device.get("addr", "")).upper(),
                         dev_type=int(dev_type or 0),
                         name=str(device.get("name", "")),
@@ -154,6 +157,8 @@ class GateControl_LoRa(GateControlUIMixin):
                         flags=int(flags) & 0xFF,
                         presetId=int(presetId) & 0xFF,
                         brightness=brightness & 0xFF,
+                        startblock_slots=startblock_slots & 0xFF,
+                        startblock_first_slot=startblock_first_slot & 0xFF,
                     )
                 )
             except Exception:
@@ -491,6 +496,47 @@ class GateControl_LoRa(GateControlUIMixin):
             preset_id=p,
             brightness=b,
         )
+
+    def sendWledControl(self, *, targetDevice=None, targetGroup=None, params=None):
+        if params is None:
+            params = {}
+        preset_id = int(params.get("presetId", 1))
+        brightness = int(params.get("brightness", 0))
+        flags = (GC_FLAG_POWER_ON if brightness > 0 else 0) | GC_FLAG_HAS_BRI
+
+        if targetGroup is not None:
+            self.sendGroupControl(int(targetGroup), flags, preset_id, brightness)
+            return True
+        if targetDevice is not None:
+            self.sendGateControl(targetDevice, flags, preset_id, brightness)
+            return True
+        return False
+
+    def sendStartblockConfig(self, *, targetDevice=None, targetGroup=None, params=None):
+        if targetGroup is not None:
+            return False
+        if not targetDevice or not self._require_lora("sendStartblockConfig"):
+            return False
+        if params is None:
+            params = {}
+        slots = int(params.get("startblock_slots", 1))
+        first_slot = int(params.get("startblock_first_slot", 1))
+        recv3 = _mac_last3_from_hex(targetDevice.addr)
+        if not recv3:
+            return False
+        ok_slots = self.sendConfig(option=0x8C, data0=slots, recv3=recv3, wait_for_ack=True)
+        if not ok_slots:
+            return False
+        ok_first = self.sendConfig(option=0x8D, data0=first_slot, recv3=recv3, wait_for_ack=True)
+        if not ok_first:
+            return False
+        targetDevice.startblock_slots = slots & 0xFF
+        targetDevice.startblock_first_slot = first_slot & 0xFF
+        try:
+            self.save_to_db({"manual": True})
+        except Exception:
+            pass
+        return True
 
     def _send_and_wait_for_reply(
         self,
@@ -1016,7 +1062,7 @@ class GateControl_LoRa(GateControlUIMixin):
                     dev = self.getDeviceFromAddress(mac12)
                     if not dev:
                         dev_type = ev.get("caps", 0)
-                        dev = GC_Device(addr=mac12, dev_type=int(dev_type or 0), name=f"WLED {mac12}")
+                        dev = create_device(addr=mac12, dev_type=int(dev_type or 0), name=f"WLED {mac12}")
                         gc_devicelist.append(dev)
                         try:
                             if hasattr(self, "createUiDevList"):

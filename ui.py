@@ -13,6 +13,8 @@ from .data import (
     GC_DeviceGroup,
     GC_FLAG_HAS_BRI,
     GC_FLAG_POWER_ON,
+    get_dev_type_info,
+    get_specials_config,
     gc_devicelist,
     gc_grouplist,
 )
@@ -86,6 +88,48 @@ class GateControlUIMixin:
             temp_ui_devlist.append(UIFieldSelectOption(device.addr, device.name))
         return temp_ui_devlist
 
+    def gc_createUiDevList(
+        self,
+        dev_types: list[int] | None = None,
+        capabilities: list[str] | None = None,
+        outputDevices: bool = True,
+        outputGroups: bool = True,
+    ):
+        logger.debug("GC: Creating filtered UI device/group list")
+        dev_types_set = set(int(d) for d in dev_types) if dev_types else None
+        cap_set = set(capabilities) if capabilities else None
+
+        def _matches_device(dev):
+            if dev_types_set and int(getattr(dev, "dev_type", 0) or 0) not in dev_types_set:
+                return False
+            if cap_set:
+                caps = set(get_dev_type_info(getattr(dev, "dev_type", 0)).get("caps", []))
+                if not cap_set.issubset(caps):
+                    return False
+            return True
+
+        selected_devs = [dev for dev in gc_devicelist if _matches_device(dev)]
+        output = {"devices": [], "groups": []}
+
+        if outputDevices:
+            output["devices"] = [UIFieldSelectOption(dev.addr, dev.name) for dev in selected_devs]
+
+        if outputGroups:
+            group_ids = {int(getattr(dev, "groupId", 0) or 0) for dev in selected_devs}
+            temp_groups = []
+            for i, group in enumerate(gc_grouplist):
+                if group.static_group and str(getattr(group, "name", "")) == "All WLED Gates":
+                    if cap_set and "WLED" not in cap_set:
+                        continue
+                    if selected_devs:
+                        temp_groups.append(UIFieldSelectOption(255, group.name))
+                    continue
+                if i in group_ids:
+                    temp_groups.append(UIFieldSelectOption(i, group.name))
+            output["groups"] = temp_groups
+
+        return output
+
     def createUiGroupList(self, exclude_static=False):
         logger.debug("GC: Creating UI Device Select Options")
         temp_ui_grouplist = []
@@ -150,6 +194,142 @@ class GateControlUIMixin:
                 )
             ]:
                 self.action_reg_fn(effect)
+
+            specials = get_specials_config()
+            for cap_key, cap_info in specials.items():
+                funcs = cap_info.get("functions", []) or []
+                if not funcs:
+                    continue
+                cap_label = cap_info.get("label", cap_key)
+                options_by_key = {opt.get("key"): opt for opt in cap_info.get("options", [])}
+                for fn_info in funcs:
+                    fn_key = fn_info.get("key")
+                    fn_label = fn_info.get("label") or cap_label
+                    vars_list = fn_info.get("vars", []) or []
+                    allow_unicast = bool(fn_info.get("unicast"))
+                    allow_broadcast = bool(fn_info.get("broadcast"))
+
+                    def _build_fields(mode):
+                        fields = []
+                        if mode == "device":
+                            options = self.gc_createUiDevList(capabilities=[cap_key], outputGroups=False)["devices"]
+                            if not options:
+                                return None
+                            fields.append(
+                                UIField(
+                                    f"gc_special_{fn_key}_device",
+                                    "Device",
+                                    UIFieldType.SELECT,
+                                    options=options,
+                                    value=options[0].value if options else "",
+                                )
+                            )
+                        else:
+                            options = self.gc_createUiDevList(capabilities=[cap_key], outputDevices=False)["groups"]
+                            if not options:
+                                return None
+                            fields.append(
+                                UIField(
+                                    f"gc_special_{fn_key}_group",
+                                    "Group",
+                                    UIFieldType.SELECT,
+                                    options=options,
+                                    value=options[0].value if options else "",
+                                )
+                            )
+                        for var in vars_list:
+                            opt_meta = options_by_key.get(var, {})
+                            label = opt_meta.get("label", var)
+                            default_val = opt_meta.get("min", 0)
+                            fields.append(
+                                UIField(f"gc_special_{fn_key}_{var}", label, UIFieldType.BASIC_INT, value=default_val)
+                            )
+                        return fields
+
+                    if allow_unicast:
+                        fields = _build_fields("device")
+                        if not fields:
+                            continue
+                        label = f"{cap_label} by Device" if fn_label == cap_label else f"{fn_label} by Device"
+                        self.action_reg_fn(
+                            ActionEffect(
+                                label,
+                                self._make_special_action_handler(fn_key, "device"),
+                                fields,
+                                name=f"gc_special_{fn_key}_device",
+                            )
+                        )
+                    if allow_broadcast:
+                        fields = _build_fields("group")
+                        if not fields:
+                            continue
+                        label = f"{cap_label} by Group" if fn_label == cap_label else f"{fn_label} by Group"
+                        self.action_reg_fn(
+                            ActionEffect(
+                                label,
+                                self._make_special_action_handler(fn_key, "group"),
+                                fields,
+                                name=f"gc_special_{fn_key}_group",
+                            )
+                        )
+
+    def _make_special_action_handler(self, fn_key: str, mode: str):
+        def _handler(action, args=None):
+            return self.specialAction(action, fn_key, mode)
+        return _handler
+
+    def specialAction(self, action, fn_key: str, mode: str):
+        specials = get_specials_config()
+        fn_info = None
+        cap_key = None
+        for cap, info in specials.items():
+            for fn in info.get("functions", []) or []:
+                if fn.get("key") == fn_key:
+                    fn_info = fn
+                    cap_key = cap
+                    break
+            if fn_info:
+                break
+        if not fn_info:
+            logger.warning("specialAction: function not found: %s", fn_key)
+            return
+
+        vars_list = fn_info.get("vars", []) or []
+        params = {}
+        for var in vars_list:
+            key = f"gc_special_{fn_key}_{var}"
+            try:
+                params[var] = int(action.get(key, 0))
+            except Exception:
+                params[var] = action.get(key, 0)
+
+        target_device = None
+        target_group = None
+        if mode == "device":
+            target_addr = action.get(f"gc_special_{fn_key}_device")
+            if target_addr:
+                target_device = self.getDeviceFromAddress(target_addr)
+        else:
+            try:
+                target_group = int(action.get(f"gc_special_{fn_key}_group"))
+            except Exception:
+                target_group = None
+
+        comm_name = fn_info.get("comm")
+        if not comm_name:
+            logger.warning("specialAction: missing comm function for %s", fn_key)
+            return
+
+        comm_fn = getattr(self, comm_name, None)
+        if not callable(comm_fn):
+            logger.warning("specialAction: comm function missing: %s", comm_name)
+            return
+
+        logger.debug("GC: specialAction %s (%s)", fn_key, cap_key or "unknown")
+        try:
+            comm_fn(targetDevice=target_device, targetGroup=target_group, params=params)
+        except Exception:
+            logger.exception("GC: specialAction failed: %s", fn_key)
 
     def register_gc_dataimporter(self, args):
         for importer in [

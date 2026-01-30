@@ -145,6 +145,43 @@ class GC_Device:
         return bool(self.last_ack["ok"])
 
 
+class GC_DeviceStartblock(GC_Device):
+    def __init__(
+        self,
+        addr: str,
+        dev_type: int,
+        name: str,
+        groupId: int = 0,
+        version: int = 0,
+        caps: int = 0,
+        voltage_mV: int = 0,
+        node_rssi: int = 0,
+        node_snr: int = 0,
+        flags: int = GC_FLAG_POWER_ON,
+        presetId: int = 1,
+        brightness: int = 70,
+        configByte: int = 0,
+        startblock_slots: int = 1,
+        startblock_first_slot: int = 1,
+    ):
+        super().__init__(
+            addr=addr,
+            dev_type=dev_type,
+            name=name,
+            groupId=groupId,
+            version=version,
+            caps=caps,
+            voltage_mV=voltage_mV,
+            node_rssi=node_rssi,
+            node_snr=node_snr,
+            flags=flags,
+            presetId=presetId,
+            brightness=brightness,
+            configByte=configByte,
+        )
+        self.startblock_slots: int = int(startblock_slots) & 0xFF
+        self.startblock_first_slot: int = int(startblock_first_slot) & 0xFF
+
 class GC_DeviceGroup:
     def __init__(self, name: str, static_group: int = 0, dev_type: int = 0):
         self.name: str = name  # UI Name of Device
@@ -159,6 +196,44 @@ class GC_Dev_Type:
     WLED_STARTBLOCK_REV3 = 50
 
 GC_DEV_TYPE_CAPS = ["STARTBLOCK", "LEDMATRIX", "WLED"]
+
+GC_SPECIALS = {
+    "STARTBLOCK": {
+        "label": "Startblock",
+        "options": [
+            {"key": "startblock_slots", "label": "Number Of Slots", "option": 0x8C, "min": 1, "max": 8},
+            {"key": "startblock_first_slot", "label": "First Slot", "option": 0x8D, "min": 1, "max": 8},
+        ],
+        "functions": [
+            {
+                "key": "startblock_config",
+                "label": "Startblock",
+                "comm": "sendStartblockConfig",
+                "vars": ["startblock_slots", "startblock_first_slot"],
+                "unicast": True,
+                "broadcast": False,
+            }
+        ],
+    },
+    "WLED": {
+        "label": "WLED",
+        "options": [
+            {"key": "presetId", "label": "Preset", "option": 0x90, "min": 1, "max": 255},
+            {"key": "brightness", "label": "Brightness", "option": 0x91, "min": 0, "max": 255},
+        ],
+        "functions": [
+            {
+                "key": "wled_control",
+                "label": "WLED",
+                "comm": "sendWledControl",
+                "vars": ["presetId", "brightness"],
+                "unicast": True,
+                "broadcast": True,
+            }
+        ],
+    },
+    "LEDMATRIX": {"label": "Matrix", "options": [], "functions": []},
+}
 
 GC_DEV_TYPE_INFO = {
     GC_Dev_Type.IDENTIFY_COMMUNICATOR: {"name": "IDENTIFY_COMMUNICATOR"},
@@ -181,6 +256,32 @@ def get_dev_type_info(type_id: int | None) -> dict:
 def is_wled_dev_type(type_id: int | None) -> bool:
     info = get_dev_type_info(type_id)
     return bool(info.get("WLED"))
+
+
+def get_specials_config() -> dict:
+    data = {}
+    for cap, info in GC_SPECIALS.items():
+        options = [dict(opt) for opt in info.get("options", [])]
+        functions = [dict(fn) for fn in info.get("functions", [])]
+        data[cap] = {
+            **{k: v for k, v in info.items() if k not in {"options", "functions"}},
+            "options": options,
+            "functions": functions,
+        }
+    return data
+
+
+def create_device(*, dev_type: int, **kwargs) -> GC_Device:
+    startblock_slots = kwargs.pop("startblock_slots", None)
+    startblock_first_slot = kwargs.pop("startblock_first_slot", None)
+    if int(dev_type or 0) == GC_Dev_Type.WLED_STARTBLOCK_REV3:
+        return GC_DeviceStartblock(
+            dev_type=dev_type,
+            startblock_slots=(1 if startblock_slots is None else startblock_slots),
+            startblock_first_slot=(1 if startblock_first_slot is None else startblock_first_slot),
+            **kwargs,
+        )
+    return GC_Device(dev_type=dev_type, **kwargs)
 
 
 gc_backup_devicelist = []
