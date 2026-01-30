@@ -691,7 +691,7 @@ class GateControl_LoRa(GateControlUIMixin):
         retries: int = 2,
         timeout_s: float = 8.0,
     ) -> dict[str, int]:
-        """Send up to 128 bytes as STREAM packets (8B per packet) to a device or group broadcast."""
+        """Send up to 128 bytes as STREAM payload to the master for downstream splitting."""
         if not getattr(self, "lora", None):
             logger.warning("sendStream: communicator not ready")
             return {}
@@ -706,20 +706,10 @@ class GateControl_LoRa(GateControlUIMixin):
             raise ValueError("sendStream requires groupId or device")
 
         total_packets = max(1, (len(data) + 7) // 8)
-        packets = []
-        for idx in range(total_packets):
-            start = idx == 0
-            stop = idx == total_packets - 1
-            packets_left = (total_packets - idx - 1)
-            if start and stop:
-                packets_left = 0
-            elif start:
-                packets_left = total_packets
-            ctrl = self._stream_ctrl(start, stop, packets_left)
-            chunk = data[idx * 8 : (idx + 1) * 8]
-            if len(chunk) < 8:
-                chunk = chunk + (b"\x00" * (8 - len(chunk)))
-            packets.append((ctrl, chunk, stop))
+        start = True
+        stop = total_packets == 1
+        packets_left = 0 if stop else total_packets
+        ctrl = self._stream_ctrl(start, stop, packets_left)
 
         if device is None:
             targets = [
@@ -743,13 +733,6 @@ class GateControl_LoRa(GateControlUIMixin):
         except Exception:
             pass
 
-        for ctrl, chunk, is_last in packets:
-            if is_last:
-                break
-            self.lora.send_stream(recv3=recv3, ctrl=ctrl, data=chunk)
-            time.sleep(0.02)
-
-        last_ctrl, last_chunk, _ = packets[-1]
         acked = set()
 
         def _collect(ev: dict) -> bool:
@@ -771,7 +754,7 @@ class GateControl_LoRa(GateControlUIMixin):
 
         for attempt in range(max(0, int(retries)) + 1):
             self._wait_rx_window(
-                lambda: self.lora.send_stream(recv3=recv3, ctrl=last_ctrl, data=last_chunk),
+                lambda: self.lora.send_stream(recv3=recv3, ctrl=ctrl, data=data),
                 collect_pred=_collect,
                 fail_safe_s=timeout_s,
             )
