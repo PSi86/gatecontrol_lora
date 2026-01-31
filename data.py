@@ -161,6 +161,27 @@ class GC_Dev_Type:
 
 GC_DEV_TYPE_CAPS = ["STARTBLOCK", "LEDMATRIX", "WLED"]
 
+
+def _normalize_select_options(raw_options) -> list[dict]:
+    options: list[dict] = []
+    for opt in raw_options or []:
+        if isinstance(opt, dict):
+            value = opt.get("value", opt.get("key"))
+            label = opt.get("label", opt.get("name", value))
+        else:
+            value = getattr(opt, "value", opt)
+            label = getattr(opt, "label", getattr(opt, "name", value))
+        if value is None:
+            continue
+        options.append({"value": str(value), "label": str(label)})
+    return options
+
+
+def get_ui_control_options(control: str, *, effect_list=None) -> list[dict]:
+    if control == "effect_select":
+        return _normalize_select_options(effect_list)
+    return []
+
 GC_SPECIALS = {
     "STARTBLOCK": {
         "label": "Startblock",

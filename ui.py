@@ -15,6 +15,7 @@ from .data import (
     GC_FLAG_POWER_ON,
     get_dev_type_info,
     get_specials_config,
+    get_ui_control_options,
     gc_devicelist,
     gc_grouplist,
 )
@@ -23,6 +24,12 @@ logger = logging.getLogger(__name__)
 
 
 class GateControlUIMixin:
+    def _get_ui_control_select_options(self, control: str) -> list[UIFieldSelectOption]:
+        options = get_ui_control_options(control, effect_list=getattr(self, "uiEffectList", None))
+        if not options and control == "effect_select":
+            return list(getattr(self, "uiEffectList", []) or [])
+        return [UIFieldSelectOption(opt["value"], opt["label"]) for opt in options]
+
     # called in load_from_db which is called in onStartup
     def register_settings(self):
         logger.debug("GC: Registering Settings UI Elements")
@@ -143,14 +150,15 @@ class GateControlUIMixin:
         return temp_ui_grouplist
 
     def register_quickset_ui(self):
-        default_effect = self.uiEffectList[0].value if self.uiEffectList else "01"
+        effect_options = self._get_ui_control_select_options("effect_select")
+        default_effect = effect_options[0].value if effect_options else "01"
         self._rhapi.ui.register_panel("esp_gc_quickset", "GateControl Quickset", "run")
         self._rhapi.fields.register_option(
             UIField("gc_quickset_group", "Gate Group", UIFieldType.SELECT, options=self.uiGroupList, value=self.uiGroupList[0].value),
             "esp_gc_quickset",
         )
         self._rhapi.fields.register_option(
-            UIField("gc_quickset_effect", "Color", UIFieldType.SELECT, options=self.uiEffectList, value=default_effect),
+            UIField("gc_quickset_effect", "Color", UIFieldType.SELECT, options=effect_options, value=default_effect),
             "esp_gc_quickset",
         )
         self._rhapi.fields.register_option(
@@ -174,7 +182,8 @@ class GateControlUIMixin:
                 logger.debug("Saved Actions Register Function in GateControl Instance")
 
         if not args and self.action_reg_fn:
-            default_effect = self.uiEffectList[0].value if self.uiEffectList else "01"
+            effect_options = self._get_ui_control_select_options("effect_select")
+            default_effect = effect_options[0].value if effect_options else "01"
             for effect in [
                 ActionEffect(
                     "GateControl Action",
@@ -187,7 +196,7 @@ class GateControlUIMixin:
                             options=self.uiGroupList,
                             value=self.uiGroupList[0].value,
                         ),
-                        UIField("gc_action_effect", "Color", UIFieldType.SELECT, options=self.uiEffectList, value=default_effect),
+                        UIField("gc_action_effect", "Color", UIFieldType.SELECT, options=effect_options, value=default_effect),
                         UIField("gc_action_brightness", "Brightness", UIFieldType.BASIC_INT, value=70),
                     ],
                     name="gcaction",
@@ -245,6 +254,32 @@ class GateControlUIMixin:
                             opt_meta = options_by_key.get(var, {})
                             label = opt_meta.get("label", var)
                             default_val = opt_meta.get("min", 0)
+                            ui_meta = (fn_info.get("ui") or {}).get(var, {})
+                            control = ui_meta.get("control")
+                            if control:
+                                select_options = self._get_ui_control_select_options(control)
+                                if select_options:
+                                    default_select = select_options[0].value
+                                    if default_val is not None:
+                                        for opt in select_options:
+                                            try:
+                                                if int(opt.value) == int(default_val):
+                                                    default_select = opt.value
+                                                    break
+                                            except Exception:
+                                                if str(opt.value) == str(default_val):
+                                                    default_select = opt.value
+                                                    break
+                                    fields.append(
+                                        UIField(
+                                            f"gc_special_{fn_key}_{var}",
+                                            label,
+                                            UIFieldType.SELECT,
+                                            options=select_options,
+                                            value=default_select,
+                                        )
+                                    )
+                                    continue
                             fields.append(
                                 UIField(f"gc_special_{fn_key}_{var}", label, UIFieldType.BASIC_INT, value=default_val)
                             )

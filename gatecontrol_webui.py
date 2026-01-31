@@ -49,9 +49,9 @@ import shutil
 from flask import Blueprint, request, jsonify, templating, Response, stream_with_context
 
 try:
-    from .data import get_dev_type_info, get_specials_config, get_special_keys_for_caps, is_wled_dev_type  # type: ignore
+    from .data import get_dev_type_info, get_specials_config, get_special_keys_for_caps, get_ui_control_options, is_wled_dev_type  # type: ignore
 except Exception:  # pragma: no cover
-    from data import get_dev_type_info, get_specials_config, get_special_keys_for_caps, is_wled_dev_type
+    from data import get_dev_type_info, get_specials_config, get_special_keys_for_caps, get_ui_control_options, is_wled_dev_type
 
 # Use gevent lock/queue if available, otherwise fallback to threading primitives
 try:
@@ -549,16 +549,7 @@ def register_gc_blueprint(
     @bp.route("/gatecontrol/api/options", methods=["GET"])
     def api_options():
         # still called "effects" for UI legacy; values can represent preset ids
-        opts = []
-        try:
-            for opt in gc_instance.uiEffectList:
-                val = getattr(opt, "value", None)
-                lab = getattr(opt, "label", None) or getattr(opt, "name", None) or str(opt)
-                if val is None:
-                    continue
-                opts.append({"value": str(val), "label": str(lab)})
-        except Exception:
-            opts = []
+        opts = get_ui_control_options("effect_select", effect_list=getattr(gc_instance, "uiEffectList", None))
         return jsonify({"ok": True, "effects": opts})
 
     # -----------------------
