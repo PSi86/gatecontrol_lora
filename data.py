@@ -196,19 +196,10 @@ GC_SPECIALS = {
         ],
         "functions": [
             {
-                "key": "startblock_config",
-                "label": "Startblock",
-                "comm": "sendStartblockConfig",
-                "vars": ["startblock_slots", "startblock_first_slot"],
-                "type": "config",
-                "unicast": True,
-                "broadcast": False,
-            },
-            {
                 "key": "startblock_control",
-                "label": "Startblock",
+                "label": "Startblock Control",
                 "comm": "sendStartblockControl",
-                "vars": ["startblock_slots", "startblock_first_slot"],
+                "vars": [],
                 "type": "control",
                 "unicast": True,
                 "broadcast": True,
@@ -217,14 +208,11 @@ GC_SPECIALS = {
     },
     "WLED": {
         "label": "WLED",
-        "options": [
-            {"key": "presetId", "label": "Preset", "option": 0x90, "min": 1, "max": 255},
-            {"key": "brightness", "label": "Brightness", "option": 0x91, "min": 0, "max": 255},
-        ],
+        "options": [],
         "functions": [
             {
                 "key": "wled_control",
-                "label": "WLED",
+                "label": "WLED Control",
                 "comm": "sendWledControl",
                 "vars": ["presetId", "brightness"],
                 "ui": {
