@@ -15,7 +15,6 @@ from .data import (
     GC_FLAG_POWER_ON,
     get_dev_type_info,
     get_specials_config,
-    effect_select_options,
     gc_devicelist,
     gc_grouplist,
 )
@@ -25,7 +24,8 @@ logger = logging.getLogger(__name__)
 
 class GateControlUIMixin:
     def _get_select_options(self, fn_key: str, var_key: str) -> list[UIFieldSelectOption]:
-        specials = get_specials_config(effect_list=getattr(self, "uiEffectList", None))
+        context = {"rhapi": self._rhapi, "uiEffectList": getattr(self, "uiEffectList", None)}
+        specials = get_specials_config(context=context)
         for cap_info in specials.values():
             for fn_info in cap_info.get("functions", []) or []:
                 if fn_info.get("key") != fn_key:
@@ -33,16 +33,8 @@ class GateControlUIMixin:
                 ui_meta = (fn_info.get("ui") or {}).get(var_key, {})
                 generator = ui_meta.get("generator")
                 if callable(generator):
-                    try:
-                        raw = generator(effect_list=getattr(self, "uiEffectList", None), rhapi=self._rhapi)
-                    except TypeError:
-                        raw = generator(effect_list=getattr(self, "uiEffectList", None))
+                    raw = generator(context=context)
                     return [UIFieldSelectOption(opt["value"], opt["label"]) for opt in raw]
-        if fn_key == "wled_control" and var_key == "presetId":
-            fallback = effect_select_options(effect_list=getattr(self, "uiEffectList", None))
-            if not fallback:
-                return list(getattr(self, "uiEffectList", []) or [])
-            return [UIFieldSelectOption(opt["value"], opt["label"]) for opt in fallback]
         return []
 
     # called in load_from_db which is called in onStartup
@@ -219,7 +211,7 @@ class GateControlUIMixin:
             ]:
                 self.action_reg_fn(effect)
 
-            specials = get_specials_config(effect_list=getattr(self, "uiEffectList", None))
+            specials = get_specials_config(context={"rhapi": self._rhapi, "uiEffectList": getattr(self, "uiEffectList", None)})
             for cap_key, cap_info in specials.items():
                 funcs = cap_info.get("functions", []) or []
                 if not funcs:

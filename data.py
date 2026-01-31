@@ -177,7 +177,9 @@ def _normalize_select_options(raw_options) -> list[dict]:
     return options
 
 
-def effect_select_options(*, effect_list=None, **_kwargs) -> list[dict]:
+def effect_select_options(*, context=None, **_kwargs) -> list[dict]:
+    ctx = context or {}
+    effect_list = ctx.get("uiEffectList") or ctx.get("effect_list")
     return _normalize_select_options(effect_list)
 
 GC_SPECIALS = {
@@ -255,7 +257,7 @@ def is_wled_dev_type(type_id: int | None) -> bool:
     return bool(info.get("WLED"))
 
 
-def get_specials_config(*, effect_list=None, serialize_ui: bool = False) -> dict:
+def get_specials_config(*, context: dict | None = None, serialize_ui: bool = False) -> dict:
     data = {}
     for cap, info in GC_SPECIALS.items():
         options = [dict(opt) for opt in info.get("options", [])]
@@ -269,7 +271,7 @@ def get_specials_config(*, effect_list=None, serialize_ui: bool = False) -> dict
                 if callable(generator):
                     if serialize_ui:
                         ui_copy.pop("generator", None)
-                        ui_copy["options"] = generator(effect_list=effect_list)
+                        ui_copy["options"] = generator(context=context or {})
                     else:
                         ui_copy["generator"] = generator
                 ui_meta[var_key] = ui_copy
