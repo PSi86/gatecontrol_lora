@@ -76,8 +76,7 @@
     fwUploads: { fwId: null, cfgId: null },
     configDisplay: loadConfigDisplay(),
     presets: { files: [], current: "" },
-    specialsAll: {},
-    specialsDevice: {},
+    specials: {},
     specialDevice: null,
     specialTab: null,
   };
@@ -167,7 +166,7 @@ function updateSpecialUi(){
 function getSpecialsForDevice(dev){
   const caps = Array.isArray(dev.dev_type_caps) ? dev.dev_type_caps : [];
   return caps
-    .map(cap => ({ key: cap, info: state.specialsAll[cap] }))
+    .map(cap => ({ key: cap, info: state.specials[cap] }))
     .filter(entry => {
       if(!entry.info) return false;
       const opts = Array.isArray(entry.info.options) ? entry.info.options.length > 0 : false;
@@ -232,11 +231,7 @@ function renderSpecialTabs(){
   panel.innerHTML = "";
   const dev = state.specialDevice;
   if(!dev) return;
-  const caps = Array.isArray(dev.dev_type_caps) ? dev.dev_type_caps : [];
-  const specialsSource = Object.keys(state.specialsDevice || {}).length ? state.specialsDevice : state.specialsAll;
-  const specials = caps
-    .map(cap => ({ key: cap, info: specialsSource[cap] }))
-    .filter(entry => entry.info);
+  const specials = getSpecialsForDevice(dev);
   if(specials.length === 0){
     panel.innerHTML = "<p class=\"muted\">No configurable options for this device.</p>";
     return;
@@ -425,12 +420,6 @@ async function openSpecialsDialog(mac){
   if(!dev) return;
   state.specialDevice = dev;
   $("#specialHint").textContent = "";
-  try{
-    const s = await apiGet(`/gatecontrol/api/specials?mac=${encodeURIComponent(mac)}`);
-    state.specialsDevice = s.specials || {};
-  }catch{
-    state.specialsDevice = {};
-  }
   renderSpecialTabs();
   $("#dlgSpecials").showModal();
 }
@@ -492,7 +481,7 @@ async function openSpecialsDialog(mac){
 
   async function loadSpecials(){
     const s = await apiGet("/gatecontrol/api/specials");
-    state.specialsAll = s.specials || {};
+    state.specials = s.specials || {};
     renderTable();
   }
 
@@ -1105,7 +1094,6 @@ async function openSpecialsDialog(mac){
     dlgSpecials.addEventListener("close", ()=>{
       state.specialDevice = null;
       state.specialTab = null;
-      state.specialsDevice = {};
       $("#specialHint").textContent = "";
       $("#specialTabs").innerHTML = "";
       $("#specialPanel").innerHTML = "";
