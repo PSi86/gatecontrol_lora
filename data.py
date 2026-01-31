@@ -177,7 +177,7 @@ def _normalize_select_options(raw_options) -> list[dict]:
     return options
 
 
-def effect_select_options(*, effect_list=None) -> list[dict]:
+def effect_select_options(*, effect_list=None, **_kwargs) -> list[dict]:
     return _normalize_select_options(effect_list)
 
 GC_SPECIALS = {
