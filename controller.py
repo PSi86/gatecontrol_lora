@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
-from typing import Optional, Union
+from typing import Dict, Optional, Tuple, Union
 
 from .ui import GateControlUIMixin
 from RHUI import UIFieldSelectOption
@@ -49,6 +50,75 @@ except Exception:
     )
 
 logger = logging.getLogger(__name__)
+
+_STARTBLOCK_VER = 0x01
+
+_DE_UMLAUT_MAP = {
+    "ä": "ae",
+    "ö": "oe",
+    "ü": "ue",
+    "ß": "ss",
+    "Ä": "AE",
+    "Ö": "OE",
+    "Ü": "UE",
+}
+
+_ALLOWED_NAME_RE = re.compile(r"[^A-Z0-9 _\-\.\+]", re.IGNORECASE)
+
+
+def _sanitize_pilot_name(name: str, max_len: int = 32) -> str:
+    if not name:
+        return ""
+    for k, v in _DE_UMLAUT_MAP.items():
+        name = name.replace(k, v)
+    name = name.strip().upper()
+    name = _ALLOWED_NAME_RE.sub(" ", name)
+    name = re.sub(r"\s+", " ", name).strip()
+    return name[:max_len] if max_len > 0 else name
+
+
+def _encode_channel_fixed2(label: str) -> bytes:
+    """
+    Immer exakt 2 Bytes ASCII.
+    - upper()
+    - padding mit '-' falls zu kurz
+    - truncate falls zu lang
+    """
+    lab = (label or "").strip().upper()
+    lab2 = (lab + "--")[:2]
+    return lab2.encode("ascii", errors="replace")
+
+
+def build_startblock_payload_v1(
+    slot: int,
+    channel_label: str,
+    pilot_name: str,
+    max_name_len: int = 32,
+    name_encoding: str = "ascii",
+) -> bytes:
+    """
+    [ver][slot][chan2][name_len u8][name bytes]
+    """
+    slot_b = max(0, min(255, int(slot)))
+    chan2 = _encode_channel_fixed2(channel_label)
+
+    clean_name = _sanitize_pilot_name(pilot_name, max_len=max_name_len)
+
+    if name_encoding.lower() == "utf-8":
+        name_bytes = clean_name.encode("utf-8", errors="replace")
+    else:
+        name_bytes = clean_name.encode("ascii", errors="replace")
+
+    if len(name_bytes) > 255:
+        name_bytes = name_bytes[:255]
+
+    out = bytearray()
+    out.append(_STARTBLOCK_VER)
+    out.append(slot_b)
+    out.extend(chan2)  # 2 bytes
+    out.append(len(name_bytes))  # 1 byte
+    out.extend(name_bytes)
+    return bytes(out)
 
 
 class GateControl_LoRa(GateControlUIMixin):
@@ -542,6 +612,8 @@ class GateControl_LoRa(GateControlUIMixin):
             return {}
         if params is None:
             params = {}
+        if params.get("startblock_use_current_heat"):
+            return self._send_startblock_current_heat(targetDevice=targetDevice, targetGroup=targetGroup, params=params)
         slots = int(params.get("startblock_slots", 1)) & 0xFF
         first_slot = int(params.get("startblock_first_slot", 1)) & 0xFF
         payload = bytes([slots, first_slot])
@@ -550,6 +622,149 @@ class GateControl_LoRa(GateControlUIMixin):
         if targetGroup is not None:
             return self.sendStream(payload, groupId=int(targetGroup))
         return {}
+
+    def _get_channel_label_for_node(self, node_index: int) -> str:
+        """
+        Best-effort: liefert z.B. 'R1'. Fallback '--'
+        Passe ggf. die Attribute/Pfade an deine RH-Version an.
+        """
+        try:
+            ctx = getattr(self._rhapi, "_racecontext", None)
+            if not ctx:
+                return "--"
+            rhdata = getattr(ctx, "rhdata", None)
+            race = getattr(ctx, "race", None)
+            if not (rhdata and race):
+                return "--"
+
+            # 1) Direkt am race Objekt (je nach RH-Version)
+            for attr in ("node_frequencies", "frequencies", "seat_frequencies"):
+                freqs = getattr(race, attr, None)
+                if isinstance(freqs, (list, tuple)) and 0 <= node_index < len(freqs):
+                    item = freqs[node_index]
+                    if isinstance(item, str) and len(item) >= 2:
+                        return item[:2].upper()
+                    if isinstance(item, dict):
+                        v = item.get("label") or item.get("name") or item.get("channel")
+                        if isinstance(v, str) and len(v) >= 2:
+                            return v[:2].upper()
+
+            # 2) Frequencyset Pfad (falls vorhanden)
+            fs_id = getattr(race, "frequencyset", None)
+            if fs_id is None:
+                fs_id = getattr(race, "frequencyset_id", None)
+
+            if fs_id is not None:
+                get_fs = getattr(rhdata, "get_frequencyset_by_id", None) or getattr(rhdata, "get_frequencyset", None)
+                if callable(get_fs):
+                    fs = get_fs(fs_id)
+                    freqs = None
+                    if isinstance(fs, dict):
+                        freqs = fs.get("frequencies") or fs.get("freqs")
+                    else:
+                        freqs = getattr(fs, "frequencies", None) or getattr(fs, "freqs", None)
+
+                    if isinstance(freqs, (list, tuple)) and 0 <= node_index < len(freqs):
+                        item = freqs[node_index]
+                        if isinstance(item, str) and len(item) >= 2:
+                            return item[:2].upper()
+                        if isinstance(item, dict):
+                            v = item.get("label") or item.get("name") or item.get("channel")
+                            if isinstance(v, str) and len(v) >= 2:
+                                return v[:2].upper()
+
+            return "--"
+        except Exception:
+            return "--"
+
+    def _get_startblock_entries_from_current_heat(self) -> Dict[int, Tuple[str, str]]:
+        """
+        Returns: {slot_num: (channel_label_2chars, pilot_name)}
+        """
+        out: Dict[int, Tuple[str, str]] = {}
+        try:
+            ctx = getattr(self._rhapi, "_racecontext", None)
+            if not ctx:
+                return out
+            rhdata = getattr(ctx, "rhdata", None)
+            race = getattr(ctx, "race", None)
+            if not (rhdata and race):
+                return out
+
+            current_heat = getattr(race, "current_heat", None)
+            if current_heat is None:
+                return out
+
+            heat_nodes = rhdata.get_heatNodes_by_heat(current_heat)
+
+            for hn in heat_nodes or []:
+                pid = getattr(hn, "pilot_id", None)
+                if pid is None:
+                    continue
+
+                node_raw = getattr(hn, "node_index", None)
+                if node_raw is None:
+                    node_raw = getattr(hn, "node", None)
+                if node_raw is None:
+                    continue
+                node_index = int(node_raw)
+
+                slot_num = node_index + 1 if node_index in (0, 1, 2, 3) else node_index
+                if not (1 <= slot_num <= 4):
+                    continue
+
+                # Pilot Name: callsign bevorzugt
+                pilot_name = ""
+                get_pilot = getattr(rhdata, "get_pilot", None)
+                if callable(get_pilot):
+                    p = get_pilot(pid)
+                    if p:
+                        pilot_name = (
+                            getattr(p, "callsign", None)
+                            or getattr(p, "name", None)
+                            or getattr(p, "display_name", None)
+                            or ""
+                        )
+                if not pilot_name:
+                    pilot_name = f"P{pid}"
+
+                channel_label = self._get_channel_label_for_node(node_index)
+                out[slot_num] = (channel_label, pilot_name)
+
+            return out
+        except Exception as e:
+            logger.debug("_get_startblock_entries_from_current_heat failed: %s", e)
+            return out
+
+    def _send_startblock_current_heat(self, *, targetDevice=None, targetGroup=None, params=None) -> dict[str, int]:
+        if params is None:
+            params = {}
+        entries = self._get_startblock_entries_from_current_heat()
+        max_name_len = int(params.get("startblock_max_name_len", 32) or 32)
+        name_encoding = str(params.get("startblock_name_encoding", "ascii"))
+        totals = {"expected": 0, "acked": 0}
+
+        for slot in (1, 2, 3, 4):
+            channel_label, pilot_name = entries.get(slot, ("--", ""))
+            payload = build_startblock_payload_v1(
+                slot=slot,
+                channel_label=channel_label,
+                pilot_name=pilot_name,
+                max_name_len=max_name_len,
+                name_encoding=name_encoding,
+            )
+
+            if targetDevice is not None:
+                result = self.sendStream(payload, device=targetDevice)
+            elif targetGroup is not None:
+                result = self.sendStream(payload, groupId=int(targetGroup))
+            else:
+                result = {}
+
+            totals["expected"] += int(result.get("expected", 0) or 0)
+            totals["acked"] += int(result.get("acked", 0) or 0)
+
+        return totals
 
     def _send_and_wait_for_reply(
         self,
