@@ -504,12 +504,24 @@ def register_gc_blueprint(
             rows = [_gc_serialize_device(d) for d in gc_devicelist]
         return jsonify({"ok": True, "devices": rows})
 
+    def _specials_payload_for_device(mac: str | None = None) -> dict:
+        context = {"gc_instance": gc_instance}
+        specials = get_specials_config(context=context, serialize_ui=True)
+        if not mac:
+            return specials
+        mac_str = str(mac).upper()
+        dev = gc_instance.getDeviceFromAddress(mac_str)
+        if not dev:
+            return {}
+        dev_caps = set(get_dev_type_info(getattr(dev, "dev_type", 0)).get("caps", []))
+        return {cap: info for cap, info in specials.items() if cap in dev_caps}
+
     @bp.route("/gatecontrol/api/specials", methods=["GET"])
     def api_specials():
-        context = {"gc_instance": gc_instance}
+        mac = request.args.get("mac")
         return jsonify({
             "ok": True,
-            "specials": get_specials_config(context=context, serialize_ui=True),
+            "specials": _specials_payload_for_device(mac),
         })
 
     @bp.route("/gatecontrol/api/groups", methods=["GET"])
@@ -553,6 +565,9 @@ def register_gc_blueprint(
     @bp.route("/gatecontrol/api/options", methods=["GET"])
     def api_options():
         # still called "effects" for UI legacy; values can represent preset ids
+        mac = request.args.get("mac")
+        if mac:
+            return jsonify({"ok": True, "specials": _specials_payload_for_device(mac)})
         opts = effect_select_options(context={"gc_instance": gc_instance})
         return jsonify({"ok": True, "effects": opts})
 
