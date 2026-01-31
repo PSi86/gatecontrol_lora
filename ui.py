@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 class GateControlUIMixin:
     def _get_select_options(self, fn_key: str, var_key: str) -> list[UIFieldSelectOption]:
-        context = {"rhapi": self._rhapi, "uiEffectList": getattr(self, "uiEffectList", None)}
+        context = {"rhapi": self._rhapi, "gc": self}
         specials = get_specials_config(context=context)
         for cap_info in specials.values():
             for fn_info in cap_info.get("functions", []) or []:
@@ -211,7 +211,7 @@ class GateControlUIMixin:
             ]:
                 self.action_reg_fn(effect)
 
-            specials = get_specials_config(context={"rhapi": self._rhapi, "uiEffectList": getattr(self, "uiEffectList", None)})
+            specials = get_specials_config(context={"rhapi": self._rhapi, "gc": self})
             for cap_key, cap_info in specials.items():
                 funcs = cap_info.get("functions", []) or []
                 if not funcs:

@@ -506,7 +506,7 @@ def register_gc_blueprint(
 
     @bp.route("/gatecontrol/api/specials", methods=["GET"])
     def api_specials():
-        context = {"uiEffectList": getattr(gc_instance, "uiEffectList", None)}
+        context = {"gc_instance": gc_instance}
         return jsonify({
             "ok": True,
             "specials": get_specials_config(context=context, serialize_ui=True),
@@ -553,7 +553,7 @@ def register_gc_blueprint(
     @bp.route("/gatecontrol/api/options", methods=["GET"])
     def api_options():
         # still called "effects" for UI legacy; values can represent preset ids
-        opts = effect_select_options(context={"uiEffectList": getattr(gc_instance, "uiEffectList", None)})
+        opts = effect_select_options(context={"gc_instance": gc_instance})
         return jsonify({"ok": True, "effects": opts})
 
     # -----------------------
@@ -899,7 +899,7 @@ def register_gc_blueprint(
             if not dev:
                 return jsonify({"ok": False, "error": "device not found"}), 404
             dev_caps = set(get_dev_type_info(getattr(dev, "dev_type", 0)).get("caps", []))
-            specials = get_specials_config(context={"uiEffectList": getattr(gc_instance, "uiEffectList", None)})
+            specials = get_specials_config(context={"gc_instance": gc_instance})
             option_info = None
             for cap in dev_caps:
                 spec = specials.get(cap, {})
@@ -982,7 +982,7 @@ def register_gc_blueprint(
             if not dev:
                 return jsonify({"ok": False, "error": "device not found"}), 404
             dev_caps = set(get_dev_type_info(getattr(dev, "dev_type", 0)).get("caps", []))
-            specials = get_specials_config(context={"uiEffectList": getattr(gc_instance, "uiEffectList", None)})
+            specials = get_specials_config(context={"gc_instance": gc_instance})
             fn_info = None
             cap_key = None
             options_by_key = {}

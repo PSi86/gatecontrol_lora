@@ -179,7 +179,12 @@ def _normalize_select_options(raw_options) -> list[dict]:
 
 def effect_select_options(*, context=None, **_kwargs) -> list[dict]:
     ctx = context or {}
-    effect_list = ctx.get("uiEffectList") or ctx.get("effect_list")
+    gc_instance = ctx.get("gc_instance") or ctx.get("gc")
+    effect_list = None
+    if gc_instance is not None:
+        effect_list = getattr(gc_instance, "uiEffectList", None)
+    if effect_list is None:
+        effect_list = ctx.get("uiEffectList") or ctx.get("effect_list")
     return _normalize_select_options(effect_list)
 
 GC_SPECIALS = {
