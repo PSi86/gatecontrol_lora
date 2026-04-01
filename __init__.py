@@ -2,12 +2,7 @@
 Works with Rotorhazard 4.0.
 """
 
-import logging
-
-from eventmanager import Evt
-
-from .racelink_webui import register_rl_blueprint
-from .controller import RaceLink_LoRa
+from .bootstrap import build_plugin
 from .data import (
     RL_Device,
     RL_DeviceGroup,
@@ -17,42 +12,16 @@ from .data import (
     RL_FLAG_HAS_BRI,
     RL_FLAG_FORCE_TT0,
     RL_FLAG_FORCE_REAPPLY,
-    rl_backup_devicelist,
-    rl_backup_grouplist,
-    rl_devicelist,
-    rl_grouplist,
 )
 
-logger = logging.getLogger(__name__)
+rl_instance = None
 
 
 def initialize(rhapi):
     global rl_instance
-
-    rl_instance = RaceLink_LoRa(
-        rhapi,
-        "RaceLink_LoRa",
-        "RaceLink",
-    )
-
-    register_rl_blueprint(
-        rhapi,
-        rl_instance=rl_instance,
-        rl_devicelist=rl_devicelist,
-        rl_grouplist=rl_grouplist,
-        RL_DeviceGroup=RL_DeviceGroup,
-        logger=logger,
-    )
-
-    rhapi.events.on(Evt.DATA_IMPORT_INITIALIZE, rl_instance.register_rl_dataimporter)
-    rhapi.events.on(Evt.DATA_EXPORT_INITIALIZE, rl_instance.register_rl_dataexporter)
-    rhapi.events.on(Evt.ACTIONS_INITIALIZE, rl_instance.registerActions)
-
-    rhapi.events.on(Evt.STARTUP, rl_instance.onStartup)
-
-    rhapi.events.on(Evt.RACE_START, rl_instance.onRaceStart)
-    rhapi.events.on(Evt.RACE_FINISH, rl_instance.onRaceFinish)
-    rhapi.events.on(Evt.RACE_STOP, rl_instance.onRaceStop)
+    plugin = build_plugin(rhapi)
+    rl_instance = plugin.controller
+    return plugin
 
 
 __all__ = [
@@ -64,10 +33,5 @@ __all__ = [
     "RL_FLAG_HAS_BRI",
     "RL_FLAG_FORCE_TT0",
     "RL_FLAG_FORCE_REAPPLY",
-    "RaceLink_LoRa",
-    "rl_backup_devicelist",
-    "rl_backup_grouplist",
-    "rl_devicelist",
-    "rl_grouplist",
     "initialize",
 ]
