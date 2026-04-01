@@ -28,6 +28,7 @@ class LP:
     OPC_CONTROL   = 0x04
     OPC_CONFIG    = 0x05
     OPC_SYNC      = 0x06
+    OPC_STREAM    = 0x07
     OPC_ACK       = 0x7E
 
     @staticmethod
@@ -46,6 +47,7 @@ if _HAVE_AUTO:
         LP.OPC_CONTROL   = getattr(LPA, "OPC_CONTROL", getattr(LPA, "OPC_WLED_CONTROL", LP.OPC_CONTROL))
         LP.OPC_CONFIG    = getattr(LPA, "OPC_CONFIG", LP.OPC_CONFIG)
         LP.OPC_SYNC      = getattr(LPA, "OPC_SYNC", LP.OPC_SYNC)
+        LP.OPC_STREAM    = getattr(LPA, "OPC_STREAM", LP.OPC_STREAM)
         LP.OPC_ACK       = getattr(LPA, "OPC_ACK", LP.OPC_ACK)
 
         make_type = getattr(LPA, "make_type", LP.make_type)
@@ -91,6 +93,7 @@ class LoRaUSB:
         self._qmax = 1000
         self._listeners = []
         self._tx_listeners = []
+        self._rx_window_state = 0
 
     @staticmethod
     def _is_usb_port(portinfo):
@@ -148,7 +151,7 @@ class LoRaUSB:
                 except Exception:
                     pass
                 self.ser.open()
-                time.sleep(1.0)
+                time.sleep(0.5)
                 self.ser.reset_input_buffer()
                 self.ser.write(payload)
                 # etwas Puffer, z. B. "GateCommunicator_v4" + MAC (ohne \r\n)
@@ -250,6 +253,15 @@ class LoRaUSB:
             except Exception:
                 pass
 
+    def _handle_disconnect(self, msg: str) -> None:
+        logger.warning(msg)
+        self._emit({"type": EV_ERROR, "data": msg})
+        self._stop = True
+        try:
+            self.ser.close()
+        except Exception:
+            pass
+
     def _send_m2n(self, type_full:int, recv3:bytes, body:bytes=b""):
         if len(recv3) != 3:
             raise ValueError("recv3 must be 3 bytes")
@@ -268,8 +280,9 @@ class LoRaUSB:
             )
             self._emit_tx({"type": "TX_M2N", "type_full": type_full, "dir": (type_full & 0x80), "opc": (type_full & 0x7F), "recv3": recv3, "body_len": len(body or b"")})
         except serial.SerialException as e:
-            logger.error("TX write failed: %s", e)
-            raise
+            self._handle_disconnect(f"USB TX failed: {e}")
+            return False
+        return True
 
     def send_get_devices(self, recv3=b'\xFF\xFF\xFF', group_id=0, flags=0):
         body = struct.pack("<BB", group_id & 0xFF, flags & 0xFF)  # P_GetDevices
@@ -290,9 +303,16 @@ class LoRaUSB:
         )
         self._send_m2n(LP.make_type(LP.DIR_M2N, LP.OPC_CONTROL), recv3, body)
 
-    def send_config(self, recv3:bytes=b'\xFF\xFF\xFF', option:int=0, flags:int=0):
-        """Send CONFIG (2B): option, flags."""
-        body = struct.pack("<BB", int(option) & 0xFF, int(flags) & 0xFF)
+    def send_config(self, recv3:bytes=b'\xFF\xFF\xFF', option:int=0, data0:int=0, data1:int=0, data2:int=0, data3:int=0):
+        """Send CONFIG (5B): option, data0..data3."""
+        body = struct.pack(
+            "<BBBBB",
+            int(option) & 0xFF,
+            int(data0) & 0xFF,
+            int(data1) & 0xFF,
+            int(data2) & 0xFF,
+            int(data3) & 0xFF,
+        )
         self._send_m2n(LP.make_type(LP.DIR_M2N, LP.OPC_CONFIG), recv3, body)
 
     def send_sync(self, recv3:bytes=b'\xFF\xFF\xFF', ts24:int=0, brightness:int=0):
@@ -300,6 +320,13 @@ class LoRaUSB:
         ts = int(ts24) & 0xFFFFFF
         body = bytes([(ts & 0xFF), ((ts >> 8) & 0xFF), ((ts >> 16) & 0xFF), (int(brightness) & 0xFF)])
         self._send_m2n(LP.make_type(LP.DIR_M2N, LP.OPC_SYNC), recv3, body)
+
+    def send_stream(self, recv3:bytes, ctrl:int, data:bytes):
+        """Send STREAM_M2N: ctrl byte + data payload (variable length)."""
+        if not isinstance(data, (bytes, bytearray)):
+            raise ValueError("data must be bytes")
+        body = struct.pack("<B", int(ctrl) & 0xFF) + bytes(data)
+        self._send_m2n(LP.make_type(LP.DIR_M2N, LP.OPC_STREAM), recv3, body)
 
     # Backwards helper (old opcode name), kept to avoid breaking older host code.
     # Prefer send_control() to fully control flags.
@@ -315,7 +342,11 @@ class LoRaUSB:
     def _reader(self):
         in_frame = False; need = 0; buf = bytearray()
         while not self._stop:
-            b = self.ser.read(1)
+            try:
+                b = self.ser.read(1)
+            except serial.SerialException as e:
+                self._handle_disconnect(f"USB serial disconnected: {e}")
+                break
             if not b: 
                 continue
             x = b[0]
@@ -348,6 +379,25 @@ class LoRaUSB:
             except Exception:
                 pass
 
+    def _update_rx_window_state(self, event_type:int) -> int:
+        """Track RX window state transitions (valid states: 0 or 1)."""
+        delta = 1 if event_type == EV_RX_WINDOW_OPEN else -1
+        new_state = int(self._rx_window_state) + delta
+        if new_state not in (0, 1):
+            logger.error(
+                "RX window state invalid after %s: %s -> %s",
+                "OPEN" if event_type == EV_RX_WINDOW_OPEN else "CLOSED",
+                self._rx_window_state,
+                new_state,
+            )
+            new_state = 1 if event_type == EV_RX_WINDOW_OPEN else 0
+        self._rx_window_state = new_state
+        return self._rx_window_state
+
+    @property
+    def rx_window_state(self) -> int:
+        return int(self._rx_window_state)
+
     def _handle_frame(self, type_byte:int, data:bytes):
         """Parse one framed message from device and emit events.
 
@@ -360,13 +410,15 @@ class LoRaUSB:
         # USB-only events
         if type_byte in (EV_ERROR, EV_RX_WINDOW_OPEN, EV_RX_WINDOW_CLOSED, EV_TX_DONE):
             if type_byte == EV_RX_WINDOW_OPEN and len(data) >= 2:
-                ev = {"type": type_byte, "window_ms": _u16le(data[:2]), "ts": now}
+                rx_state = self._update_rx_window_state(type_byte)
+                ev = {"type": type_byte, "window_ms": _u16le(data[:2]), "ts": now, "rx_windows": rx_state}
             elif type_byte == EV_RX_WINDOW_CLOSED and len(data) >= 2:
-                ev = {"type": type_byte, "rx_count_delta": _u16le(data[:2]), "ts": now}
+                rx_state = self._update_rx_window_state(type_byte)
+                ev = {"type": type_byte, "rx_count_delta": _u16le(data[:2]), "ts": now, "rx_windows": rx_state}
             elif type_byte == EV_TX_DONE and len(data) >= 1:
-                ev = {"type": type_byte, "last_len": data[0], "ts": now}
+                ev = {"type": type_byte, "last_len": data[0], "ts": now, "rx_windows": self.rx_window_state}
             else:
-                ev = {"type": type_byte, "data": data, "ts": now}
+                ev = {"type": type_byte, "data": data, "ts": now, "rx_windows": self.rx_window_state}
             self._emit(ev)
             return
 
@@ -397,6 +449,7 @@ class LoRaUSB:
             "host_rssi": rssi,
             "host_snr": snr,
             "ts": now,
+            "rx_windows": self.rx_window_state,
         }
 
         # Compatibility parsing for common replies
@@ -414,12 +467,25 @@ class LoRaUSB:
                 ev.update({"reply": "IDENTIFY_REPLY", "body_raw": body})
 
         elif opc == LP.OPC_STATUS:
-            # STATUS_REPLY = 7B: [flags, presetId, brightness, vbat_mV(LE16), rssi_node(i8), snr_node(i8)]
-            if len(body) == 7:
+            # STATUS_REPLY = 8B: [flags, configByte, presetId, brightness, vbat_mV(LE16), rssi_node(i8), snr_node(i8)]
+            if len(body) == 8:
+                flags, config_byte, presetId, brightness, vbat_mV, rssi_node, snr_node = struct.unpack("<BBBBHbb", body)
+                ev.update({
+                    "reply": "STATUS_REPLY",
+                    "flags": flags,
+                    "configByte": config_byte,
+                    "presetId": presetId,
+                    "brightness": brightness,
+                    "vbat_mV": vbat_mV,
+                    "node_rssi": rssi_node,
+                    "node_snr": snr_node,
+                })
+            elif len(body) == 7:
                 flags, presetId, brightness, vbat_mV, rssi_node, snr_node = struct.unpack("<BBBHbb", body)
                 ev.update({
                     "reply": "STATUS_REPLY",
                     "flags": flags,
+                    "configByte": 0,
                     "presetId": presetId,
                     "brightness": brightness,
                     "vbat_mV": vbat_mV,
