@@ -9,17 +9,15 @@ from typing import Dict, Optional, Tuple, Union
 
 from .ui import RaceLinkUIMixin
 from RHUI import UIFieldSelectOption
+from .repositories import ConfigRepository
 from .data import (
     RL_Device,
     RL_DeviceGroup,
     RL_Dev_Type,
-    build_specials_state,
     create_device,
     get_dev_type_info,
     RL_FLAG_HAS_BRI,
     RL_FLAG_POWER_ON,
-    rl_backup_devicelist,
-    rl_backup_grouplist,
     rl_devicelist,
     rl_grouplist,
 )
@@ -135,6 +133,7 @@ class RaceLink_LoRa(RaceLinkUIMixin):
         self.uiDeviceList = None
         self.uiGroupList = None
         self.uiDiscoveryGroupList = None
+        self.config_repository = ConfigRepository(self._rhapi.db)
 
         # Transport-level pending expectation (for online/offline determination).
         self._pending_expect = None  # dict with keys: dev, rule, opcode7, sender_last3, ts
@@ -168,99 +167,14 @@ class RaceLink_LoRa(RaceLinkUIMixin):
 
     def save_to_db(self, args):
         logger.debug("RL: Writing current states to Database")
-        config_str_devices = str([obj.__dict__ for obj in rl_devicelist])
-        self._rhapi.db.option_set("rl_device_config", config_str_devices)
-
-        if len(rl_grouplist) >= len(rl_backup_grouplist):
-            config_str_groups = str([obj.__dict__ for obj in rl_grouplist])
-        else:
-            config_str_groups = str([obj.__dict__ for obj in rl_backup_grouplist])
-        self._rhapi.db.option_set("rl_groups_config", config_str_groups)
+        self.config_repository.save_all(rl_devicelist, rl_grouplist)
 
     def load_from_db(self):
         logger.debug("RL: Applying config from Database")
-        config_str_devices = self._rhapi.db.option("rl_device_config", None)
-        config_str_groups = self._rhapi.db.option("rl_groups_config", None)
-
-        if config_str_devices is None:
-            config_str_devices = str([obj.__dict__ for obj in rl_backup_devicelist])
-            self._rhapi.db.option_set("rl_device_config", config_str_devices)
-
-        if config_str_devices == "":
-            config_str_devices = "[]"
-            self._rhapi.db.option_set("rl_device_config", config_str_devices)
-
-        config_list_devices = list(eval(config_str_devices))
         rl_devicelist.clear()
-
-        for device in config_list_devices:
-            logger.debug(device)
-            try:
-                flags = device.get("flags", None)
-                presetId = device.get("presetId", None)
-
-                if flags is None:
-                    legacy_state = int(device.get("state", 1) or 0)
-                    flags = RL_FLAG_POWER_ON if legacy_state else 0
-                    if "brightness" in device:
-                        flags |= RL_FLAG_HAS_BRI
-
-                if presetId is None:
-                    presetId = int(device.get("effect", 1) or 1)
-
-                brightness = int(device.get("brightness", 70) or 0)
-
-                dev_type = device.get("dev_type", None)
-                if dev_type is None:
-                    dev_type = device.get("device_type", None)
-                if dev_type is None:
-                    dev_type = device.get("caps", device.get("type", 0))
-
-                special_state = build_specials_state(int(dev_type or 0), device)
-                rl_devicelist.append(
-                    create_device(
-                        addr=str(device.get("addr", "")).upper(),
-                        dev_type=int(dev_type or 0),
-                        name=str(device.get("name", "")),
-                        groupId=int(device.get("groupId", 0) or 0),
-                        version=int(device.get("version", 0) or 0),
-                        caps=int(dev_type or 0),
-                        flags=int(flags) & 0xFF,
-                        presetId=int(presetId) & 0xFF,
-                        brightness=brightness & 0xFF,
-                        specials=special_state,
-                    )
-                )
-            except Exception:
-                logger.exception("RL: failed to load device entry from DB: %r", device)
-                continue
-
-        if config_str_groups is None or config_str_groups == "":
-            config_str_groups = str([obj.__dict__ for obj in rl_backup_grouplist])
-            self._rhapi.db.option_set("rl_groups_config", config_str_groups)
-
-        config_list_groups = list(eval(config_str_groups))
+        rl_devicelist.extend(self.config_repository.load_devices())
         rl_grouplist.clear()
-
-        for group in config_list_groups:
-            logger.debug(group)
-            group_dev_type = group.get("dev_type", group.get("device_type", 0))
-            rl_grouplist.append(RL_DeviceGroup(group["name"], group["static_group"], group_dev_type))
-
-        rl_grouplist[:] = [
-            g
-            for g in rl_grouplist
-            if str(getattr(g, "name", "")).strip().lower() not in {"unconfigured", "all wled devices"}
-        ]
-
-        if not any(str(getattr(g, "name", "")).strip().lower() == "all wled nodes" for g in rl_grouplist):
-            rl_grouplist.append(RL_DeviceGroup("All WLED Nodes", static_group=1, dev_type=0))
-        else:
-            for g in rl_grouplist:
-                if str(getattr(g, "name", "")).strip().lower() == "all wled nodes":
-                    g.name = "All WLED Nodes"
-                    g.static_group = 1
-                    g.dev_type = 0
+        rl_grouplist.extend(self.config_repository.load_groups())
 
         self.uiDeviceList = self.createUiDevList()
         self.uiGroupList = self.createUiGroupList()
