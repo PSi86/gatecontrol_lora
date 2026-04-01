@@ -1,4 +1,4 @@
-"""Shared data models and constants for GateControl LoRa."""
+"""Shared data models and constants for RaceLink LoRa."""
 
 from __future__ import annotations
 
@@ -7,14 +7,14 @@ import time
 
 # ---- LoRa/WLED control flags (shared with lora_proto.h / WLED usermod) ----
 # Bit layout must match the firmware.
-GC_FLAG_POWER_ON = 0x01  # node power state (0=off, 1=on)
-GC_FLAG_ARM_ON_SYNC = 0x02  # config/control arms node; node starts/restarts on next SYNC
-GC_FLAG_HAS_BRI = 0x04  # CONTROL brightness field is valid (otherwise keep current / allow SYNC brightness)
-GC_FLAG_FORCE_TT0 = 0x08  # optional: force effect timebase to 0 on apply (client-side)
-GC_FLAG_FORCE_REAPPLY = 0x10  # optional: re-apply preset even if unchanged (client-side)
+RL_FLAG_POWER_ON = 0x01  # node power state (0=off, 1=on)
+RL_FLAG_ARM_ON_SYNC = 0x02  # config/control arms node; node starts/restarts on next SYNC
+RL_FLAG_HAS_BRI = 0x04  # CONTROL brightness field is valid (otherwise keep current / allow SYNC brightness)
+RL_FLAG_FORCE_TT0 = 0x08  # optional: force effect timebase to 0 on apply (client-side)
+RL_FLAG_FORCE_REAPPLY = 0x10  # optional: re-apply preset even if unchanged (client-side)
 
 
-class GC_Device:
+class RL_Device:
     def __init__(
         self,
         addr: str,
@@ -26,7 +26,7 @@ class GC_Device:
         voltage_mV: int = 0,
         node_rssi: int = 0,
         node_snr: int = 0,
-        flags: int = GC_FLAG_POWER_ON,
+        flags: int = RL_FLAG_POWER_ON,
         presetId: int = 1,
         brightness: int = 70,
         configByte: int = 0,
@@ -34,7 +34,7 @@ class GC_Device:
         self.addr: str = addr
         self.dev_type: int = int(dev_type)
         self.name: str = name
-        self.version: int = int(version)  # GateControl FW version -> via IDENTIFY_REPLY
+        self.version: int = int(version)  # RaceLink FW version -> via IDENTIFY_REPLY
         # NOTE: identify reply field "caps" is now used as device type.
         self.caps: int = int(caps)
         self.groupId: int = int(groupId)
@@ -146,20 +146,21 @@ class GC_Device:
         return bool(self.last_ack["ok"])
 
 
-class GC_DeviceGroup:
+class RL_DeviceGroup:
     def __init__(self, name: str, static_group: int = 0, dev_type: int = 0):
         self.name: str = name  # UI Name of Device
         self.static_group: int = static_group  # if static_group is false it needs to be initialized
-        self.dev_type: int = int(dev_type)  # device number in the gc_devicelist
+        self.dev_type: int = int(dev_type)  # device number in the rl_devicelist
 
 
-class GC_Dev_Type:
+class RL_Dev_Type:
     IDENTIFY_COMMUNICATOR = 1
-    WLED_REV3 = 10
-    WLED_REV4 = 11
+    WLED_REV1 = 10
+    WLED_REV3 = 11
+    WLED_REV4 = 12
     WLED_STARTBLOCK_REV3 = 50
 
-GC_DEV_TYPE_CAPS = ["STARTBLOCK", "LEDMATRIX", "WLED"]
+RL_DEV_TYPE_CAPS = ["STARTBLOCK", "LEDMATRIX", "WLED"]
 
 
 def _normalize_select_options(raw_options) -> list[dict]:
@@ -179,15 +180,15 @@ def _normalize_select_options(raw_options) -> list[dict]:
 
 def effect_select_options(*, context=None, **_kwargs) -> list[dict]:
     ctx = context or {}
-    gc_instance = ctx.get("gc_instance") or ctx.get("gc")
+    rl_instance = ctx.get("rl_instance") or ctx.get("gc")
     effect_list = None
-    if gc_instance is not None:
-        effect_list = getattr(gc_instance, "uiEffectList", None)
+    if rl_instance is not None:
+        effect_list = getattr(rl_instance, "uiEffectList", None)
     if effect_list is None:
         effect_list = ctx.get("uiEffectList") or ctx.get("effect_list")
     return _normalize_select_options(effect_list)
 
-GC_SPECIALS = {
+RL_SPECIALS = {
     "STARTBLOCK": {
         "label": "Startblock",
         "options": [
@@ -227,20 +228,21 @@ GC_SPECIALS = {
     "LEDMATRIX": {"label": "Matrix", "options": [], "functions": []},
 }
 
-GC_DEV_TYPE_INFO = {
-    GC_Dev_Type.IDENTIFY_COMMUNICATOR: {"name": "IDENTIFY_COMMUNICATOR"},
-    GC_Dev_Type.WLED_REV3: {"name": "WLED_REV3", "caps": ["WLED"]},
-    GC_Dev_Type.WLED_REV4: {"name": "WLED_REV4", "caps": ["WLED"]},
-    GC_Dev_Type.WLED_STARTBLOCK_REV3: {"name": "WLED_STARTBLOCK_REV3", "caps": ["STARTBLOCK", "WLED"]},
+RL_DEV_TYPE_INFO = {
+    RL_Dev_Type.IDENTIFY_COMMUNICATOR: {"name": "IDENTIFY_COMMUNICATOR"},
+    RL_Dev_Type.WLED_REV1: {"name": "WLED_REV1", "caps": ["WLED"]},
+    RL_Dev_Type.WLED_REV3: {"name": "WLED_REV3", "caps": ["WLED"]},
+    RL_Dev_Type.WLED_REV4: {"name": "WLED_REV4", "caps": ["WLED"]},
+    RL_Dev_Type.WLED_STARTBLOCK_REV3: {"name": "WLED_STARTBLOCK_REV3", "caps": ["STARTBLOCK", "WLED"]},
 }
 
 
 def get_dev_type_info(type_id: int | None) -> dict:
     tid = int(type_id or 0)
-    base = GC_DEV_TYPE_INFO.get(tid, {"name": f"UNKNOWN_{tid}"})
+    base = RL_DEV_TYPE_INFO.get(tid, {"name": f"UNKNOWN_{tid}"})
     caps = set(base.get("caps", []))
     info = {"name": base.get("name", f"UNKNOWN_{tid}"), "caps": sorted(caps)}
-    for cap in GC_DEV_TYPE_CAPS:
+    for cap in RL_DEV_TYPE_CAPS:
         info[cap] = cap in caps
     return info
 
@@ -252,7 +254,7 @@ def is_wled_dev_type(type_id: int | None) -> bool:
 
 def get_specials_config(*, context: dict | None = None, serialize_ui: bool = False) -> dict:
     data = {}
-    for cap, info in GC_SPECIALS.items():
+    for cap, info in RL_SPECIALS.items():
         options = [dict(opt) for opt in info.get("options", [])]
         functions = []
         for fn in info.get("functions", []):
@@ -282,7 +284,7 @@ def get_specials_config(*, context: dict | None = None, serialize_ui: bool = Fal
 def get_special_keys_for_caps(caps: list[str]) -> list[str]:
     keys = []
     for cap in caps:
-        spec = GC_SPECIALS.get(cap, {})
+        spec = RL_SPECIALS.get(cap, {})
         for opt in spec.get("options", []):
             key = opt.get("key")
             if key:
@@ -295,7 +297,7 @@ def build_specials_state(type_id: int | None, stored: dict | None = None) -> dic
     stored = stored or {}
     state: dict[str, int] = {}
     for cap in caps:
-        spec = GC_SPECIALS.get(cap, {})
+        spec = RL_SPECIALS.get(cap, {})
         for opt in spec.get("options", []):
             key = opt.get("key")
             if not key:
@@ -308,14 +310,14 @@ def build_specials_state(type_id: int | None, stored: dict | None = None) -> dic
     return state
 
 
-def create_device(*, dev_type: int, specials: dict | None = None, **kwargs) -> GC_Device:
-    dev = GC_Device(dev_type=dev_type, **kwargs)
+def create_device(*, dev_type: int, specials: dict | None = None, **kwargs) -> RL_Device:
+    dev = RL_Device(dev_type=dev_type, **kwargs)
     dev.specials = build_specials_state(dev_type, specials)
     return dev
 
 
-gc_backup_devicelist = []
-gc_backup_grouplist = [GC_DeviceGroup("All WLED Gates", 1, 0)]
+rl_backup_devicelist = []
+rl_backup_grouplist = [RL_DeviceGroup("All WLED Nodes", 1, 0)]
 
-gc_devicelist: list[GC_Device] = []
-gc_grouplist: list[GC_DeviceGroup] = []
+rl_devicelist: list[RL_Device] = []
+rl_grouplist: list[RL_DeviceGroup] = []

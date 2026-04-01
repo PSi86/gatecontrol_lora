@@ -26,9 +26,9 @@
   }
 
   // Flag bits (must match firmware; kept local for UI only)
-  const GC_FLAG_POWER_ON    = 0x01;
-  const GC_FLAG_ARM_ON_SYNC = 0x02;
-  const GC_FLAG_HAS_BRI     = 0x04;
+  const RL_FLAG_POWER_ON    = 0x01;
+  const RL_FLAG_ARM_ON_SYNC = 0x02;
+  const RL_FLAG_HAS_BRI     = 0x04;
 
   const CONFIG_SETTINGS = [
     { bit: 0, label: "MAC filter" },
@@ -44,7 +44,7 @@
 
   function loadConfigDisplay(){
     try{
-      const raw = localStorage.getItem("gcConfigDisplay");
+      const raw = localStorage.getItem("rlConfigDisplay");
       if(!raw) return new Set(DEFAULT_CONFIG_DISPLAY);
       const arr = JSON.parse(raw);
       if(!Array.isArray(arr)) return new Set(DEFAULT_CONFIG_DISPLAY);
@@ -57,7 +57,7 @@
 
   function saveConfigDisplay(){
     try{
-      localStorage.setItem("gcConfigDisplay", JSON.stringify(Array.from(state.configDisplay)));
+      localStorage.setItem("rlConfigDisplay", JSON.stringify(Array.from(state.configDisplay)));
     }catch{
       // ignore storage errors
     }
@@ -116,7 +116,7 @@
     const disable = state.busy;
 
     // header action buttons
-    $$(".gc-actions button").forEach(b => b.disabled = disable);
+    $$(".rl-actions button").forEach(b => b.disabled = disable);
     // group creation + bulk
     $("#btnNewGroup").disabled = disable;
     $("#btnBulkSetGroup").disabled = disable;
@@ -265,14 +265,14 @@ function renderSpecialTabs(){
   }
   if(options.length){
     const section = document.createElement("h4");
-    section.className = "gc-special-section";
+    section.className = "rl-special-section";
     section.textContent = "Options";
     panel.appendChild(section);
   }
 
   options.forEach(opt => {
     const row = document.createElement("div");
-    row.className = "gc-special-row";
+    row.className = "rl-special-row";
     const label = document.createElement("label");
     label.textContent = opt.label || opt.key;
     const input = document.createElement("input");
@@ -284,7 +284,7 @@ function renderSpecialTabs(){
       input.value = String(currentVal);
     }
     const actions = document.createElement("div");
-    actions.className = "gc-special-actions";
+    actions.className = "rl-special-actions";
     const saveBtn = document.createElement("button");
     saveBtn.type = "button";
     saveBtn.className = "special-save";
@@ -308,7 +308,7 @@ function renderSpecialTabs(){
         return;
       }
       $("#specialHint").textContent = `Saving ${opt.label || opt.key}…`;
-      const r = await apiPost("/gatecontrol/api/specials/config", {
+      const r = await apiPost("/racelink/api/specials/config", {
         mac: state.specialDevice.addr,
         key: opt.key,
         value,
@@ -327,7 +327,7 @@ function renderSpecialTabs(){
 
     refreshBtn.addEventListener("click", async () => {
       $("#specialHint").textContent = "Refreshing is not implemented yet.";
-      await apiPost("/gatecontrol/api/specials/get", {
+      await apiPost("/racelink/api/specials/get", {
         mac: state.specialDevice?.addr,
         key: opt.key,
       }).catch(()=>{});
@@ -336,27 +336,27 @@ function renderSpecialTabs(){
 
   if(functions.length){
     const section = document.createElement("h4");
-    section.className = "gc-special-section";
+    section.className = "rl-special-section";
     section.textContent = "Actions";
     panel.appendChild(section);
   }
 
   functions.forEach(fn => {
     const row = document.createElement("div");
-    row.className = "gc-special-fn-row";
+    row.className = "rl-special-fn-row";
     const label = document.createElement("label");
     label.textContent = fn.label || fn.key || "Action";
     const inputsWrap = document.createElement("div");
-    inputsWrap.className = "gc-special-inputs";
+    inputsWrap.className = "rl-special-inputs";
     const varsList = Array.isArray(fn.vars) ? fn.vars : [];
     const inputMeta = [];
     varsList.forEach(varKey => {
       const varMeta = optionsByKey[varKey] || {};
       const uiMeta = (fn.ui && fn.ui[varKey]) ? fn.ui[varKey] : {};
       const fieldWrap = document.createElement("div");
-      fieldWrap.className = "gc-special-input";
+      fieldWrap.className = "rl-special-input";
       const fieldLabel = document.createElement("span");
-      fieldLabel.className = "gc-special-input-label";
+      fieldLabel.className = "rl-special-input-label";
       fieldLabel.textContent = varMeta.label || varKey;
       const { input } = buildSpecialVarInput({varKey, varMeta, uiMeta, dev});
       fieldWrap.appendChild(fieldLabel);
@@ -365,7 +365,7 @@ function renderSpecialTabs(){
       inputMeta.push({ key: varKey, input, uiMeta });
     });
     const actions = document.createElement("div");
-    actions.className = "gc-special-actions";
+    actions.className = "rl-special-actions";
     const sendBtn = document.createElement("button");
     sendBtn.type = "button";
     sendBtn.className = "special-action";
@@ -394,7 +394,7 @@ function renderSpecialTabs(){
         params[meta.key] = numVal;
       }
       $("#specialHint").textContent = `Sending ${fn.label || fn.key}…`;
-      const r = await apiPost("/gatecontrol/api/specials/action", {
+      const r = await apiPost("/racelink/api/specials/action", {
         mac: state.specialDevice.addr,
         function: fn.key,
         params,
@@ -455,22 +455,22 @@ async function openSpecialsDialog(mac){
   function flagsLabel(flags){
     const f = Number(flags) & 0xFF;
     const parts = [];
-    if(f & GC_FLAG_POWER_ON) parts.push("PWR");
-    if(f & GC_FLAG_ARM_ON_SYNC) parts.push("ARM");
-    if(f & GC_FLAG_HAS_BRI) parts.push("BRI");
+    if(f & RL_FLAG_POWER_ON) parts.push("PWR");
+    if(f & RL_FLAG_ARM_ON_SYNC) parts.push("ARM");
+    if(f & RL_FLAG_HAS_BRI) parts.push("BRI");
     const p = parts.length ? parts.join("+") : "-";
     return `0x${fmt.hex2(f)} ${p}`;
   }
 
   function powerTag(flags){
-    return (Number(flags) & GC_FLAG_POWER_ON)
+    return (Number(flags) & RL_FLAG_POWER_ON)
       ? '<span class="tag ok">On</span>'
       : '<span class="tag off">Off</span>';
   }
 
   // Load initial data (and on refresh)
   async function loadGroups(){
-    const g = await apiGet("/gatecontrol/api/groups");
+    const g = await apiGet("/racelink/api/groups");
     state.groups = (g.groups||[]);
     if(state.selGroupId===null && state.groups.length>0){ state.selGroupId = state.groups[0].id; }
     renderGroups();
@@ -478,13 +478,13 @@ async function openSpecialsDialog(mac){
   }
 
   async function loadDevices(){
-    const d = await apiGet("/gatecontrol/api/devices");
+    const d = await apiGet("/racelink/api/devices");
     state.devices = (d.devices||[]);
     renderTable();
   }
 
   async function loadSpecials(){
-    const s = await apiGet("/gatecontrol/api/specials");
+    const s = await apiGet("/racelink/api/specials");
     state.specials = s.specials || {};
     renderTable();
   }
@@ -494,7 +494,7 @@ async function openSpecialsDialog(mac){
   }
 
   function renderGroups(){
-    const ul = $("#gcGroups");
+    const ul = $("#rlGroups");
     ul.innerHTML = "";
     state.groups.forEach(gr => {
       const li = document.createElement("li");
@@ -524,7 +524,7 @@ async function openSpecialsDialog(mac){
   }
 
   function renderTable(){
-    const body = $("#gcBody");
+    const body = $("#rlBody");
     body.innerHTML = "";
 
     // Apply current filters first
@@ -557,7 +557,7 @@ async function openSpecialsDialog(mac){
       const typeLabel = r.dev_type_name || r.type_name || (isNaN(typeId) ? "" : String(typeId));
       const specials = getSpecialsForDevice(r);
       const typeCell = (specials.length && typeLabel)
-        ? `<button class="gc-link-btn specials-link" data-mac="${r.addr ?? ""}">${typeLabel}</button>`
+        ? `<button class="rl-link-btn specials-link" data-mac="${r.addr ?? ""}">${typeLabel}</button>`
         : typeLabel;
       const configByte = Number(r.configByte ?? 0) & 0xFF;
       const selectedConfigs = [];
@@ -571,7 +571,7 @@ async function openSpecialsDialog(mac){
           tooltipConfigs.push(label);
         }
       });
-      const configCell = selectedConfigs.length ? `<div class="gc-config-tags">${selectedConfigs.join("")}</div>` : "-";
+      const configCell = selectedConfigs.length ? `<div class="rl-config-tags">${selectedConfigs.join("")}</div>` : "-";
       const configTooltip = tooltipConfigs.length ? tooltipConfigs.join(" | ") : "";
       tr.innerHTML = `
         <td><input type="checkbox" ${checked?"checked":""} data-mac="${r.addr}"></td>
@@ -598,7 +598,7 @@ async function openSpecialsDialog(mac){
     });
 
     // Selection handlers
-    $$("#gcBody input[type=checkbox]").forEach(cb => {
+    $$("#rlBody input[type=checkbox]").forEach(cb => {
       cb.addEventListener("change", () => {
         const mac = cb.getAttribute("data-mac");
         if(cb.checked) state.selected.add(mac); else state.selected.delete(mac);
@@ -628,7 +628,7 @@ async function openSpecialsDialog(mac){
 }
 
   // Sorting
-  $$("#gcTable thead th").forEach(th => {
+  $$("#rlTable thead th").forEach(th => {
     const key = th.getAttribute("data-key");
     if(!key) return;
     th.addEventListener("click", ()=>{
@@ -847,7 +847,7 @@ async function openSpecialsDialog(mac){
     sel.innerHTML = "";
     let data = null;
     try{
-      data = await apiGet("/gatecontrol/api/wifi/interfaces");
+      data = await apiGet("/racelink/api/wifi/interfaces");
     }catch{
       data = null;
     }
@@ -871,7 +871,7 @@ async function openSpecialsDialog(mac){
     const fd = new FormData();
     fd.append("file", f);
     fd.append("kind", kind);
-    const r = await apiUpload("/gatecontrol/api/fw/upload", fd);
+    const r = await apiUpload("/racelink/api/fw/upload", fd);
     if(!r.ok){
       alert(r.error || "Upload failed");
       return null;
@@ -909,7 +909,7 @@ async function openSpecialsDialog(mac){
   }
 
   async function loadPresetsList(selectEl){
-    const data = await apiGet("/gatecontrol/api/presets/list");
+    const data = await apiGet("/racelink/api/presets/list");
     const files = data.files || [];
     state.presets.files = files;
     state.presets.current = data.current || "";
@@ -994,7 +994,7 @@ async function openSpecialsDialog(mac){
 
     const wifiSsid = ($("#fwWifiSsid")?.value || "WLED-AP").trim();
     const wifiIface = ($("#fwWifiIface")?.value || "wlan0").trim();
-    const wifiConnName = ($("#fwWifiConnName")?.value || "gatecontrol-wled-ap").trim();
+    const wifiConnName = ($("#fwWifiConnName")?.value || "racelink-wled-ap").trim();
     const wifiTimeoutS = Number($("#fwWifiTimeoutS")?.value || 35) || 35;
 
     const hostWifiEnable = !!($("#fwHostWifiEnable")?.checked);
@@ -1036,7 +1036,7 @@ async function openSpecialsDialog(mac){
       body.cfgId = state.fwUploads.cfgId;
     }
 
-    const r = await apiPost("/gatecontrol/api/fw/start", body);
+    const r = await apiPost("/racelink/api/fw/start", body);
     if(r.busy){
       alert(`Busy: ${r.task?.name || "task"} is running`);
       return;
@@ -1052,7 +1052,7 @@ async function openSpecialsDialog(mac){
   // SSE connection
   function connectEvents(){
     try{
-      const es = new EventSource("/gatecontrol/api/events", {withCredentials:true});
+      const es = new EventSource("/racelink/api/events", {withCredentials:true});
       es.addEventListener("master", (e)=>{ try{ updateMaster(JSON.parse(e.data)); }catch{} });
       es.addEventListener("task", (e)=>{ try{ updateTask(JSON.parse(e.data)); }catch{} });
       es.addEventListener("refresh", async (e)=>{
@@ -1067,7 +1067,7 @@ async function openSpecialsDialog(mac){
       });
       es.onerror = () => {
         // If SSE fails, do a one-shot fetch so UI isn't empty
-        apiGet("/gatecontrol/api/master").then(r=>{
+        apiGet("/racelink/api/master").then(r=>{
           if(r.master) updateMaster(r.master);
           if(r.task) updateTask(r.task);
         }).catch(()=>{});
@@ -1079,17 +1079,17 @@ async function openSpecialsDialog(mac){
 
   // Buttons
   $("#btnSave").addEventListener("click", async ()=>{
-    const r = await apiPost("/gatecontrol/api/save",{});
+    const r = await apiPost("/racelink/api/save",{});
     if(r.busy) return;
   });
 
   $("#btnReload").addEventListener("click", async ()=>{
-    const r = await apiPost("/gatecontrol/api/reload",{});
+    const r = await apiPost("/racelink/api/reload",{});
     if(!r.busy) await loadAll();
   });
 
   $("#btnForce").addEventListener("click", async ()=>{
-    const r = await apiPost("/gatecontrol/api/groups/force",{});
+    const r = await apiPost("/racelink/api/groups/force",{});
     if(r.busy) return;
   });
 
@@ -1126,7 +1126,7 @@ async function openSpecialsDialog(mac){
       dlgPresets.close();
       return;
     }
-    const r = await apiPost("/gatecontrol/api/presets/select", {name: selected});
+    const r = await apiPost("/racelink/api/presets/select", {name: selected});
     if(!r.ok){
       $("#presetsHint").textContent = r.error || "Failed to apply presets.";
       return;
@@ -1148,7 +1148,7 @@ async function openSpecialsDialog(mac){
     }
     const formData = new FormData();
     formData.append("file", file, file.name);
-    const r = await apiUpload("/gatecontrol/api/presets/upload", formData);
+    const r = await apiUpload("/racelink/api/presets/upload", formData);
     if(r.ok){
       infoEl.textContent = `Uploaded ${r.file?.name || file.name}`;
       if(r.files){
@@ -1170,13 +1170,13 @@ async function openSpecialsDialog(mac){
     const baseUrl = ($("#presetsBaseUrl").value || "").trim() || "http://4.3.2.1";
     const wifiSsid = ($("#presetsWifiSsid")?.value || "WLED-AP").trim();
     const wifiIface = ($("#presetsWifiIface")?.value || "wlan0").trim();
-    const wifiConnName = ($("#presetsWifiConnName")?.value || "gatecontrol-wled-ap").trim();
+    const wifiConnName = ($("#presetsWifiConnName")?.value || "racelink-wled-ap").trim();
     const wifiTimeoutS = Number($("#presetsWifiTimeoutS")?.value || 35) || 35;
     const hostWifiEnable = !!($("#presetsHostWifiEnable")?.checked);
     const hostWifiRestore = !!($("#presetsHostWifiRestore")?.checked);
 
     $("#presetsHint").textContent = "Starting presets download…";
-    const r = await apiPost("/gatecontrol/api/presets/download", {
+    const r = await apiPost("/racelink/api/presets/download", {
       mac: macs[0],
       baseUrl,
       hostWifiEnable,
@@ -1196,14 +1196,14 @@ async function openSpecialsDialog(mac){
   $("#btnStatusSel").addEventListener("click", async ()=>{
     const macs = Array.from(state.selected);
     if(macs.length===0) return;
-    const r = await apiPost("/gatecontrol/api/status", {selection: macs});
+    const r = await apiPost("/racelink/api/status", {selection: macs});
     if(r.busy){
       alert(`Busy: ${r.task?.name || "task"} is running`);
     }
   });
 
   $("#btnStatusAll").addEventListener("click", async ()=>{
-    const r = await apiPost("/gatecontrol/api/status", {});
+    const r = await apiPost("/racelink/api/status", {});
     if(r.busy){
       alert(`Busy: ${r.task?.name || "task"} is running`);
     }
@@ -1213,7 +1213,7 @@ async function openSpecialsDialog(mac){
     const macs = Array.from(state.selected);
     const gid = Number($("#bulkGroup").value);
     if(macs.length===0) return;
-    const r = await apiPost("/gatecontrol/api/devices/update-meta", {macs, groupId: gid});
+    const r = await apiPost("/racelink/api/devices/update-meta", {macs, groupId: gid});
     if(!r.busy) { /* refresh happens via SSE */ }
   });
 
@@ -1240,7 +1240,7 @@ $("#btnNodeCfgSend").addEventListener("click", async ()=>{
     if(!confirm("Reboot the selected node now?")) return;
   }
 
-  const r = await apiPost("/gatecontrol/api/config", {mac: macs[0], option, data0, data1, data2, data3});
+  const r = await apiPost("/racelink/api/config", {mac: macs[0], option, data0, data1, data2, data3});
   if(r.busy){
     alert(`Busy: ${r.task?.name || "task"} is running`);
   }
@@ -1258,7 +1258,7 @@ $("#btnNodeCfgSend").addEventListener("click", async ()=>{
     const newGroupName = ($("#discoverNewGroup").value || "").trim() || null;
 
     $("#discoverResult").textContent = "Running…";
-    const r = await apiPost("/gatecontrol/api/discover", {targetGroupId, newGroupName});
+    const r = await apiPost("/racelink/api/discover", {targetGroupId, newGroupName});
 
     // If the API uses "busy" both for "already busy" and "task started",
     // treat an incoming discover task as success and rely on SSE/task polling for progress.
@@ -1278,7 +1278,7 @@ $("#btnNodeCfgSend").addEventListener("click", async ()=>{
     }
 
     // Best-effort immediate sync in case SSE isn't connected yet
-    apiGet("/gatecontrol/api/master").then(m=>{
+    apiGet("/racelink/api/master").then(m=>{
       if(m.master) updateMaster(m.master);
       if(m.task) updateTask(m.task);
     }).catch(()=>{});
@@ -1288,7 +1288,7 @@ $("#btnNodeCfgSend").addEventListener("click", async ()=>{
   $("#selAll").addEventListener("change", (e)=>{
     const c = e.target.checked;
     state.selected.clear();
-    $$("#gcBody input[type=checkbox]").forEach(cb => {
+    $$("#rlBody input[type=checkbox]").forEach(cb => {
       cb.checked = c;
       if(c) state.selected.add(cb.getAttribute("data-mac"));
     });
@@ -1300,7 +1300,7 @@ $("#btnNodeCfgSend").addEventListener("click", async ()=>{
   $("#btnNewGroup").addEventListener("click", async ()=>{
     const name = prompt("New group name:");
     if(!name) return;
-    const r = await apiPost("/gatecontrol/api/groups/create", {name});
+    const r = await apiPost("/racelink/api/groups/create", {name});
     if(r.busy){
       alert(`Busy: ${r.task?.name || "task"} is running`);
     }
@@ -1320,7 +1320,7 @@ $("#btnNodeCfgSend").addEventListener("click", async ()=>{
 
     // One-shot sync of master/task in case SSE is delayed or blocked by proxies
     try{
-      const m = await apiGet("/gatecontrol/api/master");
+      const m = await apiGet("/racelink/api/master");
       if(m.master) updateMaster(m.master);
       if(m.task) updateTask(m.task);
     }catch(e){

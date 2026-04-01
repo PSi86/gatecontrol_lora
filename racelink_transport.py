@@ -1,11 +1,11 @@
 
-# gc_transport.py -- USB transport for LoRaProto host<->communicator (v1.1 framing)
-# Keeps Identify "GateCommunicator_v4" compatible for port discovery.
+# racelink_transport.py -- USB transport for LoRaProto host<->communicator (v1.1 framing)
+# Keeps Identify "RaceLink_Gateway_v4" compatible for port discovery.
 
 import time
 import struct
 import logging
-logger = logging.getLogger('gc_transport')
+logger = logging.getLogger('racelink_transport')
 import serial
 import serial.tools.list_ports
 
@@ -114,7 +114,7 @@ class LoRaUSB:
             pass
         return False
     
-    # Keep legacy ASCII identify "GateCommunicator_v4" for discovery
+    # Keep legacy ASCII identify "RaceLink_Gateway_v4" for discovery
     
     def discover_and_open(self) -> bool:
         # Explizit gesetzter Port? -> direkt öffnen, kein Scan
@@ -137,7 +137,7 @@ class LoRaUSB:
 
         # Kein Port vorgegeben -> nur USB-Ports scannen
         payload = struct.pack(">BBBB", 0x00, 0x01, 1, 0xFF)  # IDENTIFY legacy
-        ident = b"GateCommunicator_v4"
+        ident = b"RaceLink_Gateway_v4"
 
         for p in serial.tools.list_ports.comports():
             if not self._is_usb_port(p):
@@ -154,7 +154,7 @@ class LoRaUSB:
                 time.sleep(0.5)
                 self.ser.reset_input_buffer()
                 self.ser.write(payload)
-                # etwas Puffer, z. B. "GateCommunicator_v4" + MAC (ohne \r\n)
+                # etwas Puffer, z. B. "RaceLink_Gateway_v4" + MAC (ohne \r\n)
                 resp = self.ser.read(len(ident) + 17)
 
                 if not resp:

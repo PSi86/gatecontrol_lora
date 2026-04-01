@@ -1,0 +1,63 @@
+:root{ --gap:12px; --bg:#0e0e11; --card:#17171c; --text:#e7e7ec; --muted:#9aa0a6; --accent:#4c8bf5; --ok:#1faa59; --warn:#f2c037; --err:#e84545; }
+*{ box-sizing:border-box; }
+body{ margin:0; font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif; background:var(--bg); color:var(--text); }
+.rl-header{ display:flex; align-items:center; justify-content:space-between; padding:12px 16px; background:var(--card); position:sticky; top:0; z-index:2; border-bottom:1px solid #2a2a32; gap:12px; flex-wrap:wrap;}
+.rl-header h1{ margin:0; font-size:18px; }
+.rl-actions{ display:flex; flex-wrap:wrap; gap:8px; justify-content:flex-end; }
+.rl-actions button{ margin-left:0; }
+.rl-masterbar{ width:100%; display:flex; align-items:center; gap:10px; padding-top:4px; border-top:1px dashed #2a2a32; margin-top:4px; }
+.rl-taskdetail{ margin-left:auto; text-align:right; }
+.pill{ padding:2px 10px; border-radius:999px; font-size:12px; border:1px solid #2a2a32; letter-spacing:.3px; }
+.pill.idle{ color:#c8f0ff; border-color:#2a4459; background:#12202a; }
+.pill.tx{ color:#e8e7ff; border-color:#36365e; background:#16162a; }
+.pill.rx{ color:#fff3c8; border-color:#6a5630; background:#221f14; }
+.pill.err{ color:#ffd8d8; border-color:#5a2a2a; background:#221314; }
+
+.rl-main{ display:grid; grid-template-columns: 260px 1fr; gap:var(--gap); padding:var(--gap); }
+.rl-sidebar{ background:var(--card); border:1px solid #2a2a32; border-radius:10px; padding:10px; }
+.rl-side-head{ display:flex; align-items:center; justify-content:space-between; margin-bottom:6px; }
+.rl-groups{ list-style:none; padding:0; margin:0; max-height:calc(100vh - 220px); overflow:auto; }
+.rl-groups li{ padding:8px; border-radius:8px; cursor:pointer; display:flex; align-items:center; justify-content:space-between; }
+.rl-groups li:hover{ background:#1f1f26; }
+.rl-groups li.active{ background:#262633; }
+.rl-groups .count{ color:var(--muted); font-size:12px; }
+.rl-content{ background:var(--card); border:1px solid #2a2a32; border-radius:10px; padding:10px; overflow:auto; }
+.rl-toolbar{ display:flex; align-items:center; gap:10px; padding:6px 0 10px; border-bottom:1px dashed #2a2a32; margin-bottom:8px; flex-wrap:wrap; }
+.rl-table{ width:100%; border-collapse:collapse; }
+.rl-table th, .rl-table td{ text-align:left; padding:8px; border-bottom:1px solid #2a2a32; font-size:13px; }
+.rl-table thead th{ position:sticky; top:0; background:#1a1a21; z-index:1; cursor:pointer; }
+.rl-table input[type="checkbox"]{ transform:scale(1.2); }
+.mono{ font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace; font-size:12px; }
+.tag{ padding:2px 6px; border-radius:10px; font-size:12px; border:1px solid #2a2a32; }
+.tag.ok{ color:#b6f5cf; border-color:#2d553f; background:#102017; }
+.tag.off{ color:#ffd8d8; border-color:#5a2a2a; background:#221314; }
+.tag.online{ color:#c8f0ff; border-color:#2a4459; background:#12202a; }
+.rl-config-options{ display:flex; flex-wrap:wrap; gap:10px; }
+.rl-config-options label{ display:inline-flex; align-items:center; gap:6px; font-size:12px; color:var(--muted); }
+.rl-config-tags{ display:flex; flex-direction:column; align-items: flex-start; gap:6px; white-space: nowrap; }
+.muted{ color:var(--muted); }
+button{ background:#232330; border:1px solid #2a2a32; color:var(--text); padding:6px 10px; border-radius:8px; cursor:pointer; }
+button:hover{ border-color:#3b3b44; }
+button:disabled{ opacity:.5; cursor:not-allowed; }
+.rl-link-btn{ background:none; border:none; color:var(--accent); padding:0; cursor:pointer; font:inherit; text-decoration:underline; }
+.rl-link-btn:hover{ color:#76a6ff; }
+select, input{ background:#1a1a23; color:var(--text); border:1px solid #2a2a32; border-radius:8px; padding:6px 8px; }
+dialog{ border:none; border-radius:12px; background:#14141a; color:var(--text); width:min(520px, 96vw); }
+dialog::backdrop{ background:rgba(0,0,0,.4); }
+.row{ display:flex; align-items:center; gap:10px; margin:8px 0; flex-wrap:wrap; }
+.inline{ display:inline-flex; align-items:center; gap:6px; }
+/* Firmware Update dialog helpers */
+.rl-dialog-actions{ display:flex; gap:8px; justify-content:flex-end; margin-top:12px; flex-wrap:wrap; }
+.rl-form h3{ margin:0 0 6px 0; }
+.rl-form code{ font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace; font-size: 12px; }
+.rl-tabs{ display:flex; gap:8px; flex-wrap:wrap; margin:8px 0; }
+.rl-tabs button{ background:#1a1a23; }
+.rl-tabs button.active{ border-color:var(--accent); color:#cfe0ff; }
+.rl-tab-panel{ border:1px solid #2a2a32; border-radius:10px; padding:10px; }
+.rl-special-row{ display:grid; grid-template-columns: minmax(160px, 1fr) 120px auto; gap:8px; align-items:center; margin:8px 0; }
+.rl-special-actions{ display:flex; gap:6px; }
+.rl-special-section{ font-size:13px; margin:12px 0 6px; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; }
+.rl-special-fn-row{ display:grid; grid-template-columns: minmax(140px, 1fr) minmax(160px, 2fr) auto; gap:8px; align-items:start; margin:10px 0; }
+.rl-special-inputs{ display:flex; flex-wrap:wrap; gap:8px; }
+.rl-special-input{ display:flex; flex-direction:column; gap:4px; min-width:120px; }
+.rl-special-input-label{ font-size:12px; color:var(--muted); }

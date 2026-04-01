@@ -3,13 +3,13 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>GateControl</title>
-  <link rel="stylesheet" href="/gatecontrol/static/gc.css">
+  <title>RaceLink</title>
+  <link rel="stylesheet" href="/racelink/static/racelink.css">
 </head>
 <body>
-  <header class="gc-header">
-    <h1>GateControl</h1>
-    <div class="gc-actions">
+  <header class="rl-header">
+    <h1>RaceLink</h1>
+    <div class="rl-actions">
       <button id="btnDiscover">Discover Devices</button>
       <button id="btnStatusSel">Get Status (Selection)</button>
       <button id="btnStatusAll">Get Status (All)</button>
@@ -20,30 +20,30 @@
       <button id="btnReload">Reload</button>
     </div>
 
-    <div class="gc-masterbar">
+    <div class="rl-masterbar">
       <span id="masterPill" class="pill idle">IDLE</span>
       <span id="masterDetail" class="muted"></span>
-      <span id="taskDetail" class="muted gc-taskdetail"></span>
+      <span id="taskDetail" class="muted rl-taskdetail"></span>
     </div>
   </header>
 
-  <main class="gc-main">
-    <aside class="gc-sidebar">
-      <div class="gc-side-head">
+  <main class="rl-main">
+    <aside class="rl-sidebar">
+      <div class="rl-side-head">
         <span>Groups</span>
         <button id="btnNewGroup" title="Create group">+</button>
       </div>
-      <ul id="gcGroups" class="gc-groups"></ul>
+      <ul id="rlGroups" class="rl-groups"></ul>
     </aside>
 
-    <section class="gc-content">
-      <div class="gc-toolbar">
+    <section class="rl-content">
+      <div class="rl-toolbar">
         <label>Bulk set Group:</label>
         <select id="bulkGroup"></select>
         <button id="btnBulkSetGroup">Apply</button>
       </div>
 
-<div class="gc-toolbar">
+<div class="rl-toolbar">
   <label>Node Config:</label>
   <select id="nodeCfgCmd">
     <option value="04:1">WLAN AP open</option>
@@ -59,13 +59,13 @@
   <span id="nodeCfgHint" class="muted">Select exactly one device</span>
 </div>
 
-<div class="gc-toolbar">
+<div class="rl-toolbar">
   <label>Config Anzeige:</label>
-  <div id="configDisplayOptions" class="gc-config-options"></div>
+  <div id="configDisplayOptions" class="rl-config-options"></div>
 </div>
 
 
-      <table class="gc-table" id="gcTable">
+      <table class="rl-table" id="rlTable">
         <thead>
           <tr>
             <th data-sort="none"><input type="checkbox" id="selAll"></th>
@@ -86,7 +86,7 @@
             <th data-key="online">Online</th>
           </tr>
         </thead>
-        <tbody id="gcBody"></tbody>
+        <tbody id="rlBody"></tbody>
       </table>
     </section>
   </main>
@@ -114,7 +114,7 @@
 
 
   <dialog id="dlgFwUpdate">
-    <form method="dialog" class="gc-form">
+    <form method="dialog" class="rl-form">
       <h3>Firmware Update</h3>
       <p class="muted">
         Der Updater aktiviert den AP pro Node nacheinander via LoRa, verbindet den RotorHazard-Host per <code>nmcli</code> (NetworkManager) zum Node-AP und prüft die volle MAC per <code>/json/info</code>, bevor das OTA-Update ausgeführt wird.
@@ -137,7 +137,7 @@
       
       <div class="row">
         <label>Host WiFi (nmcli profile):</label>
-        <input id="fwWifiConnName" value="gatecontrol-wled-ap" style="width: 190px;" />
+        <input id="fwWifiConnName" value="racelink-wled-ap" style="width: 190px;" />
         <select id="fwWifiIface" style="width: 140px;"></select>
         <input id="fwWifiSsid" value="WLED-AP" style="width: 160px;" />
         <span class="muted">Activate a pre-created NetworkManager connection profile</span>
@@ -182,7 +182,7 @@
         <span id="fwCfgInfo" class="muted"></span>
       </div>
 
-      <div class="gc-dialog-actions">
+      <div class="rl-dialog-actions">
         <button id="btnFwStart" type="button">Start Update</button>
         <button value="cancel">Close</button>
       </div>
@@ -192,7 +192,7 @@
   </dialog>
 
   <dialog id="dlgPresets">
-    <form method="dialog" class="gc-form">
+    <form method="dialog" class="rl-form">
       <h3>WLED Presets</h3>
       <p class="muted">Upload and select the presets.json file used for RotorHazard UI synchronization.</p>
 
@@ -211,7 +211,7 @@
 
       <div class="row">
         <label>Host WiFi (nmcli profile):</label>
-        <input id="presetsWifiConnName" value="gatecontrol-wled-ap" style="width: 190px;" />
+        <input id="presetsWifiConnName" value="racelink-wled-ap" style="width: 190px;" />
         <select id="presetsWifiIface" style="width: 140px;"></select>
         <input id="presetsWifiSsid" value="WLED-AP" style="width: 160px;" />
       </div>
@@ -240,7 +240,7 @@
         <span id="presetsCurrentInfo" class="muted"></span>
       </div>
 
-      <div class="gc-dialog-actions">
+      <div class="rl-dialog-actions">
         <button id="btnPresetsSave" type="button">Save</button>
         <button value="cancel">Close</button>
       </div>
@@ -250,13 +250,13 @@
   </dialog>
 
   <dialog id="dlgSpecials">
-    <form method="dialog" class="gc-form">
+    <form method="dialog" class="rl-form">
       <h3>Device Options</h3>
 
-      <div class="gc-tabs" id="specialTabs"></div>
-      <div id="specialPanel" class="gc-tab-panel"></div>
+      <div class="rl-tabs" id="specialTabs"></div>
+      <div id="specialPanel" class="rl-tab-panel"></div>
 
-      <div class="gc-dialog-actions">
+      <div class="rl-dialog-actions">
         <button value="cancel">Cancel</button>
       </div>
 
@@ -265,6 +265,6 @@
   </dialog>
 
 
-  <script src="/gatecontrol/static/gc.js"></script>
+  <script src="/racelink/static/racelink.js"></script>
 </body>
 </html>

@@ -1,8 +1,8 @@
 """
-GateControl WebUI (importable module)
+RaceLink WebUI (importable module)
 -------------------------------------
 
-This module registers a Flask blueprint for the GateControl LoRa plugin.
+This module registers a Flask blueprint for the RaceLink LoRa plugin.
 
 Key goals:
 - No periodic polling required (uses Server-Sent Events / SSE for live UI state)
@@ -12,20 +12,20 @@ Key goals:
 
 Usage in your plugin's __init__.py:
 
-    from .gatecontrol_webui import register_gc_blueprint
+    from .racelink_webui import register_rl_blueprint
 
     def initialize(rhapi):
         ...
-        register_gc_blueprint(
+        register_rl_blueprint(
             rhapi,
-            gc_instance=gc_instance,
-            gc_devicelist=gc_devicelist,
-            gc_grouplist=gc_grouplist,
-            GC_DeviceGroup=GC_DeviceGroup,
+            rl_instance=rl_instance,
+            rl_devicelist=rl_devicelist,
+            rl_grouplist=rl_grouplist,
+            RL_DeviceGroup=RL_DeviceGroup,
             logger=logger
         )
 
-This registers the page at /gatecontrol and JSON endpoints under /gatecontrol/api/*.
+This registers the page at /racelink and JSON endpoints under /racelink/api/*.
 """
 
 from __future__ import annotations
@@ -55,40 +55,40 @@ except Exception:  # pragma: no cover
 
 # Use gevent lock/queue if available, otherwise fallback to threading primitives
 try:
-    from gevent.lock import Semaphore as _GCLock  # type: ignore
-    _DefaultLock = _GCLock
+    from gevent.lock import Semaphore as _RLLock  # type: ignore
+    _DefaultLock = _RLLock
 except Exception:  # pragma: no cover
     try:
-        from gevent.lock import RLock as _GCLock  # type: ignore
-        _DefaultLock = _GCLock
+        from gevent.lock import RLock as _RLLock  # type: ignore
+        _DefaultLock = _RLLock
     except Exception:  # pragma: no cover
         _DefaultLock = threading.Lock
 
 try:
-    from gevent.queue import Queue as _GCQueue  # type: ignore
+    from gevent.queue import Queue as _RLQueue  # type: ignore
 except Exception:  # pragma: no cover
     try:
-        from queue import Queue as _GCQueue  # type: ignore
+        from queue import Queue as _RLQueue  # type: ignore
     except Exception:  # pragma: no cover
-        _GCQueue = None  # should never happen
+        _RLQueue = None  # should never happen
 
 
-def register_gc_blueprint(
+def register_rl_blueprint(
     rhapi,
     *,
-    gc_instance,
-    gc_devicelist,
-    gc_grouplist,
-    GC_DeviceGroup,
+    rl_instance,
+    rl_devicelist,
+    rl_grouplist,
+    RL_DeviceGroup,
     logger=None
 ):
     """
-    Register the GateControl blueprint with RotorHazard.
+    Register the RaceLink blueprint with RotorHazard.
 
     All references are passed explicitly to avoid tight coupling with __init__.py globals.
     """
 
-    _gc_lock = _DefaultLock()
+    _rl_lock = _DefaultLock()
     _clients_lock = _DefaultLock()
     _task_lock = _DefaultLock()
 
@@ -209,7 +209,7 @@ def register_gc_blueprint(
         if _hooked_lora["ok"]:
             return
 
-        lora = getattr(gc_instance, "lora", None)
+        lora = getattr(rl_instance, "lora", None)
         if not lora:
             return
 
@@ -218,10 +218,10 @@ def register_gc_blueprint(
             try:
                 lora.add_listener(_on_transport_event)  # type: ignore[attr-defined]
                 _hooked_lora["ok"] = True
-                _log("GateControl: transport event listener installed (add_listener)")
+                _log("RaceLink: transport event listener installed (add_listener)")
                 return
             except Exception as ex:
-                _log(f"GateControl: add_listener failed, falling back to on_event: {ex}")
+                _log(f"RaceLink: add_listener failed, falling back to on_event: {ex}")
 
         # Legacy transport: single on_event callback
         if not hasattr(lora, "on_event"):
@@ -245,16 +245,16 @@ def register_gc_blueprint(
         try:
             lora.on_event = _mux
             _hooked_lora["ok"] = True
-            _log("GateControl: transport event hook installed")
+            _log("RaceLink: transport event hook installed")
         except Exception as ex:
-            _log(f"GateControl: transport hook failed: {ex}")
+            _log(f"RaceLink: transport hook failed: {ex}")
 
-    # Event type constants from gc_transport (optional)
+    # Event type constants from racelink_transport (optional)
     try:
-        from .gc_transport import EV_ERROR, EV_RX_WINDOW_OPEN, EV_RX_WINDOW_CLOSED, EV_TX_DONE  # type: ignore
+        from .racelink_transport import EV_ERROR, EV_RX_WINDOW_OPEN, EV_RX_WINDOW_CLOSED, EV_TX_DONE  # type: ignore
     except Exception:
         try:
-            from gc_transport import EV_ERROR, EV_RX_WINDOW_OPEN, EV_RX_WINDOW_CLOSED, EV_TX_DONE  # type: ignore
+            from racelink_transport import EV_ERROR, EV_RX_WINDOW_OPEN, EV_RX_WINDOW_CLOSED, EV_TX_DONE  # type: ignore
         except Exception:
             EV_ERROR = 0xF0
             EV_RX_WINDOW_OPEN = 0xF1
@@ -356,8 +356,8 @@ def register_gc_blueprint(
         _set_master(last_event=reply, last_error=None)
 
     # --- Serialization ---
-    def _gc_serialize_device(dev):
-        """Make GC_Device JSON-serializable for the UI table."""
+    def _rl_serialize_device(dev):
+        """Make RL_Device JSON-serializable for the UI table."""
         # Online status (central link logic): always boolean, no timestamp gating.
         # Devices become online only when an expected reply is received; otherwise offline.
         online = bool(getattr(dev, "link_online", False))
@@ -398,20 +398,20 @@ def register_gc_blueprint(
                 d[key] = specials[key]
         return d
 
-    def _gc_group_counts():
+    def _rl_group_counts():
         counts = {}
         try:
-            for dev in gc_devicelist:
+            for dev in rl_devicelist:
                 gid = int(getattr(dev, "groupId", 0) or 0)
                 counts[gid] = counts.get(gid, 0) + 1
         except Exception:
             pass
         return counts
 
-    def _gc_wled_count():
+    def _rl_wled_count():
         count = 0
         try:
-            for dev in gc_devicelist:
+            for dev in rl_devicelist:
                 dtype = int(getattr(dev, "dev_type", getattr(dev, "caps", 0)) or 0)
                 if is_wled_dev_type(dtype):
                     count += 1
@@ -420,21 +420,21 @@ def register_gc_blueprint(
         return count
 
     bp = Blueprint(
-        "gatecontrol",
+        "racelink",
         __name__,
         template_folder="pages",
         static_folder="static",
-        static_url_path="/gatecontrol/static"
+        static_url_path="/racelink/static"
     )
 
     # -----------------------
     # Page
     # -----------------------
-    @bp.route("/gatecontrol")
-    def gc_render():
+    @bp.route("/racelink")
+    def rl_render():
         _ensure_transport_hooked()
         return templating.render_template(
-            "gatecontrol.html",
+            "racelink.html",
             serverInfo=None,
             getOption=rhapi.db.option,
             __=rhapi.__
@@ -443,11 +443,11 @@ def register_gc_blueprint(
     # -----------------------
     # SSE Events
     # -----------------------
-    @bp.route("/gatecontrol/api/events")
+    @bp.route("/racelink/api/events")
     def api_events():
         _ensure_transport_hooked()
 
-        q = _GCQueue()
+        q = _RLQueue()
         with _clients_lock:
             _clients.add(q)
 
@@ -498,26 +498,26 @@ def register_gc_blueprint(
     # -----------------------
     # JSON API: Read
     # -----------------------
-    @bp.route("/gatecontrol/api/devices", methods=["GET"])
+    @bp.route("/racelink/api/devices", methods=["GET"])
     def api_devices():
-        with _gc_lock:
-            rows = [_gc_serialize_device(d) for d in gc_devicelist]
+        with _rl_lock:
+            rows = [_rl_serialize_device(d) for d in rl_devicelist]
         return jsonify({"ok": True, "devices": rows})
 
-    @bp.route("/gatecontrol/api/specials", methods=["GET"])
+    @bp.route("/racelink/api/specials", methods=["GET"])
     def api_specials():
-        context = {"gc_instance": gc_instance}
+        context = {"rl_instance": rl_instance}
         return jsonify({
             "ok": True,
             "specials": get_specials_config(context=context, serialize_ui=True),
         })
 
-    @bp.route("/gatecontrol/api/groups", methods=["GET"])
+    @bp.route("/racelink/api/groups", methods=["GET"])
     def api_groups():
-        with _gc_lock:
+        with _rl_lock:
             group_rows = []
-            counts = _gc_group_counts()
-            wled_count = _gc_wled_count()
+            counts = _rl_group_counts()
+            wled_count = _rl_wled_count()
             group_rows.append({
                 "id": 0,
                 "name": "Unconfigured",
@@ -525,11 +525,11 @@ def register_gc_blueprint(
                 "dev_type": 0,
                 "device_count": int(counts.get(0, 0)),
             })
-            for i, g in enumerate(gc_grouplist):
+            for i, g in enumerate(rl_grouplist):
                 name = getattr(g, "name", f"Group {i}")
                 if str(name).strip().lower() == "unconfigured":
                     continue
-                if str(name).strip().lower() in {"all wled gates", "all wled devices"}:
+                if str(name).strip().lower() in {"all wled nodes", "all wled devices"}:
                     continue
                 gid = i
                 device_count = int(counts.get(i, 0))
@@ -542,18 +542,18 @@ def register_gc_blueprint(
                 })
         return jsonify({"ok": True, "groups": group_rows})
 
-    @bp.route("/gatecontrol/api/master", methods=["GET"])
+    @bp.route("/racelink/api/master", methods=["GET"])
     def api_master():
         return jsonify({"ok": True, "master": _master_snapshot(), "task": _task_snapshot()})
 
-    @bp.route("/gatecontrol/api/task", methods=["GET"])
+    @bp.route("/racelink/api/task", methods=["GET"])
     def api_task():
         return jsonify({"ok": True, "task": _task_snapshot()})
 
-    @bp.route("/gatecontrol/api/options", methods=["GET"])
+    @bp.route("/racelink/api/options", methods=["GET"])
     def api_options():
         # still called "effects" for UI legacy; values can represent preset ids
-        opts = effect_select_options(context={"gc_instance": gc_instance})
+        opts = effect_select_options(context={"rl_instance": rl_instance})
         return jsonify({"ok": True, "effects": opts})
 
     # -----------------------
@@ -602,7 +602,7 @@ def register_gc_blueprint(
         th.start()
         return _task_snapshot()
 
-    @bp.route("/gatecontrol/api/discover", methods=["POST"])
+    @bp.route("/racelink/api/discover", methods=["POST"])
     def api_discover():
         _ensure_transport_hooked()
         if _task_is_running():
@@ -614,12 +614,12 @@ def register_gc_blueprint(
 
         # group creation is cheap; do it before starting the radio task
         created_gid = None
-        with _gc_lock:
+        with _rl_lock:
             if new_group_name:
-                g = GC_DeviceGroup(str(new_group_name), static_group=0, dev_type=0)
-                gc_grouplist.append(g)
-                created_gid = len(gc_grouplist) - 1
-                _log(f"GateControl: Created group '{new_group_name}' (id={created_gid})")
+                g = RL_DeviceGroup(str(new_group_name), static_group=0, dev_type=0)
+                rl_grouplist.append(g)
+                created_gid = len(rl_grouplist) - 1
+                _log(f"RaceLink: Created group '{new_group_name}' (id={created_gid})")
             if target_gid is None and created_gid is not None:
                 target_gid = created_gid
 
@@ -628,7 +628,7 @@ def register_gc_blueprint(
             add_to_group = -1
             if target_gid not in (None, 0, "0"):
                 add_to_group = int(target_gid)
-            n_found = int(gc_instance.getDevices(groupFilter=0, addToGroup=add_to_group) or 0)
+            n_found = int(rl_instance.getDevices(groupFilter=0, addToGroup=add_to_group) or 0)
             return {"found": n_found, "createdGroupId": created_gid, "targetGroupId": target_gid}
 
         t = _start_task("discover", do_discover, meta={"createdGroupId": created_gid, "targetGroupId": target_gid})
@@ -636,7 +636,7 @@ def register_gc_blueprint(
             return _task_busy_response()
         return jsonify({"ok": True, "task": t})
 
-    @bp.route("/gatecontrol/api/status", methods=["POST"])
+    @bp.route("/racelink/api/status", methods=["POST"])
     def api_status():
         _ensure_transport_hooked()
         if _task_is_running():
@@ -650,17 +650,17 @@ def register_gc_blueprint(
             updated = 0
             if selection:
                 # If plugin has getStatusSelection(selection) prefer it
-                if hasattr(gc_instance, "getStatusSelection"):
-                    updated = int(gc_instance.getStatusSelection(selection) or 0)
+                if hasattr(rl_instance, "getStatusSelection"):
+                    updated = int(rl_instance.getStatusSelection(selection) or 0)
                 else:
                     for mac in selection:
-                        dev = gc_instance.getDeviceFromAddress(mac)
+                        dev = rl_instance.getDeviceFromAddress(mac)
                         if dev:
-                            updated += int(gc_instance.getStatus(targetDevice=dev) or 0)
+                            updated += int(rl_instance.getStatus(targetDevice=dev) or 0)
             elif group_id is not None:
-                updated = int(gc_instance.getStatus(groupFilter=int(group_id)) or 0)
+                updated = int(rl_instance.getStatus(groupFilter=int(group_id)) or 0)
             else:
-                updated = int(gc_instance.getStatus(groupFilter=255) or 0)
+                updated = int(rl_instance.getStatus(groupFilter=255) or 0)
             return {"updated": updated, "groupId": group_id, "selectionCount": len(selection) if selection else 0}
 
         meta = {"groupId": group_id, "selectionCount": len(selection) if selection else 0}
@@ -672,7 +672,7 @@ def register_gc_blueprint(
     # -----------------------
     # JSON API: Meta updates (group/name)
     # -----------------------
-    @bp.route("/gatecontrol/api/devices/update-meta", methods=["POST"])
+    @bp.route("/racelink/api/devices/update-meta", methods=["POST"])
     def api_devices_update_meta():
         body = request.get_json(silent=True) or {}
         macs = body.get("macs") or []
@@ -682,9 +682,9 @@ def register_gc_blueprint(
         changed = 0
         if new_group is not None:
             _ensure_transport_hooked()
-        with _gc_lock:
+        with _rl_lock:
             for mac in macs:
-                dev = gc_instance.getDeviceFromAddress(mac)
+                dev = rl_instance.getDeviceFromAddress(mac)
                 if not dev:
                     continue
                 if new_name and isinstance(new_name, str) and macs and len(macs) == 1:
@@ -693,12 +693,12 @@ def register_gc_blueprint(
                 if new_group is not None:
                     try:
                         dev.groupId = int(new_group)
-                        gc_instance.setGateGroupId(dev)
+                        rl_instance.setNodeGroupId(dev)
                         changed += 1
                     except Exception as ex:
-                        _log(f"GateControl: setGateGroupId failed for {mac}: {ex}")
+                        _log(f"RaceLink: setNodeGroupId failed for {mac}: {ex}")
         try:
-            gc_instance.save_to_db({"manual": True})
+            rl_instance.save_to_db({"manual": True})
         except Exception:
             pass
 
@@ -708,71 +708,71 @@ def register_gc_blueprint(
     # -----------------------
     # JSON API: Groups
     # -----------------------
-    @bp.route("/gatecontrol/api/groups/create", methods=["POST"])
+    @bp.route("/racelink/api/groups/create", methods=["POST"])
     def api_groups_create():
         body = request.get_json(silent=True) or {}
         name = str(body.get("name", "")).strip()
         dev_type = int(body.get("dev_type", body.get("device_type", 0)) or 0)
         if not name:
             return jsonify({"ok": False, "error": "name required"}), 400
-        with _gc_lock:
-            gc_grouplist.append(GC_DeviceGroup(name, static_group=0, dev_type=dev_type))
-            gid = len(gc_grouplist) - 1
+        with _rl_lock:
+            rl_grouplist.append(RL_DeviceGroup(name, static_group=0, dev_type=dev_type))
+            gid = len(rl_grouplist) - 1
             try:
-                gc_instance.save_to_db({"manual": True})
+                rl_instance.save_to_db({"manual": True})
             except Exception:
                 pass
         _broadcast("refresh", {"what": ["groups"]})
         return jsonify({"ok": True, "id": gid})
 
-    @bp.route("/gatecontrol/api/groups/rename", methods=["POST"])
+    @bp.route("/racelink/api/groups/rename", methods=["POST"])
     def api_groups_rename():
         body = request.get_json(silent=True) or {}
         gid = int(body.get("id"))
         name = str(body.get("name", "")).strip()
-        with _gc_lock:
-            if gid < 0 or gid >= len(gc_grouplist):
+        with _rl_lock:
+            if gid < 0 or gid >= len(rl_grouplist):
                 return jsonify({"ok": False, "error": "invalid group id"}), 400
-            g = gc_grouplist[gid]
+            g = rl_grouplist[gid]
             if getattr(g, "static_group", 0):
                 return jsonify({"ok": False, "error": "static group"}), 400
             g.name = name or g.name
             try:
-                gc_instance.save_to_db({"manual": True})
+                rl_instance.save_to_db({"manual": True})
             except Exception:
                 pass
         _broadcast("refresh", {"what": ["groups"]})
         return jsonify({"ok": True})
 
-    @bp.route("/gatecontrol/api/groups/delete", methods=["POST"])
+    @bp.route("/racelink/api/groups/delete", methods=["POST"])
     def api_groups_delete():
         body = request.get_json(silent=True) or {}
         gid = int(body.get("id"))
-        with _gc_lock:
-            if gid < 0 or gid >= len(gc_grouplist):
+        with _rl_lock:
+            if gid < 0 or gid >= len(rl_grouplist):
                 return jsonify({"ok": False, "error": "invalid group id"}), 400
-            g = gc_grouplist[gid]
+            g = rl_grouplist[gid]
             if getattr(g, "static_group", 0):
                 return jsonify({"ok": False, "error": "static group"}), 400
-            for d in gc_devicelist:
+            for d in rl_devicelist:
                 if int(getattr(d, "groupId", -1)) == gid:
                     return jsonify({"ok": False, "error": "group not empty"}), 400
-            del gc_grouplist[gid]
+            del rl_grouplist[gid]
             try:
-                gc_instance.save_to_db({"manual": True})
+                rl_instance.save_to_db({"manual": True})
             except Exception:
                 pass
         _broadcast("refresh", {"what": ["groups"]})
         return jsonify({"ok": True})
 
-    @bp.route("/gatecontrol/api/groups/force", methods=["POST"])
+    @bp.route("/racelink/api/groups/force", methods=["POST"])
     def api_groups_force():
         if _task_is_running():
             return _task_busy_response()
         try:
-            gc_instance.forceGroups(args=None, sanityCheck=True)
+            rl_instance.forceGroups(args=None, sanityCheck=True)
         except Exception as ex:
-            _log(f"GateControl: forceGroups failed: {ex}")
+            _log(f"RaceLink: forceGroups failed: {ex}")
             return jsonify({"ok": False, "error": str(ex)}), 500
         _broadcast("refresh", {"what": ["groups", "devices"]})
         return jsonify({"ok": True})
@@ -780,22 +780,22 @@ def register_gc_blueprint(
     # -----------------------
     # JSON API: Save/Reload
     # -----------------------
-    @bp.route("/gatecontrol/api/save", methods=["POST"])
+    @bp.route("/racelink/api/save", methods=["POST"])
     def api_save():
         if _task_is_running():
             return _task_busy_response()
         try:
-            gc_instance.save_to_db({"manual": True})
+            rl_instance.save_to_db({"manual": True})
         except Exception as ex:
             return jsonify({"ok": False, "error": str(ex)}), 500
         return jsonify({"ok": True})
 
-    @bp.route("/gatecontrol/api/reload", methods=["POST"])
+    @bp.route("/racelink/api/reload", methods=["POST"])
     def api_reload():
         if _task_is_running():
             return _task_busy_response()
         try:
-            gc_instance.load_from_db()
+            rl_instance.load_from_db()
         except Exception as ex:
             return jsonify({"ok": False, "error": str(ex)}), 500
         _broadcast("refresh", {"what": ["groups", "devices"]})
@@ -805,7 +805,7 @@ def register_gc_blueprint(
     # JSON API: CONTROL (flags/presetId)
     # -----------------------
 
-    @bp.route("/gatecontrol/api/config", methods=["POST"])
+    @bp.route("/racelink/api/config", methods=["POST"])
     def api_config():
         """Send unicast CONFIG packet to exactly one node (no broadcast)."""
         if _task_is_running():
@@ -847,12 +847,12 @@ def register_gc_blueprint(
 
         try:
             # Prefer instance helper if present
-            if hasattr(gc_instance, "sendConfig"):
-                gc_instance.sendConfig(option=option, data0=data0, data1=data1, data2=data2, data3=data3, recv3=recv3)
+            if hasattr(rl_instance, "sendConfig"):
+                rl_instance.sendConfig(option=option, data0=data0, data1=data1, data2=data2, data3=data3, recv3=recv3)
             else:
-                gc_instance.lora.send_config(recv3=recv3, option=option, data0=data0, data1=data1, data2=data2, data3=data3)
+                rl_instance.lora.send_config(recv3=recv3, option=option, data0=data0, data1=data1, data2=data2, data3=data3)
         except Exception as ex:
-            _log(f"GateControl: config failed: {ex}")
+            _log(f"RaceLink: config failed: {ex}")
             return jsonify({"ok": False, "error": str(ex)}), 500
 
         _set_master(state="TX", tx_pending=True, last_event="CONFIG_SENT")
@@ -870,7 +870,7 @@ def register_gc_blueprint(
     # -----------------------
     # JSON API: Specials config (device-specific options)
     # -----------------------
-    @bp.route("/gatecontrol/api/specials/config", methods=["POST"])
+    @bp.route("/racelink/api/specials/config", methods=["POST"])
     def api_specials_config():
         if _task_is_running():
             return _task_busy_response()
@@ -894,12 +894,12 @@ def register_gc_blueprint(
             return jsonify({"ok": False, "error": "invalid value"}), 400
 
         mac_str = str(mac).upper()
-        with _gc_lock:
-            dev = gc_instance.getDeviceFromAddress(mac_str)
+        with _rl_lock:
+            dev = rl_instance.getDeviceFromAddress(mac_str)
             if not dev:
                 return jsonify({"ok": False, "error": "device not found"}), 404
             dev_caps = set(get_dev_type_info(getattr(dev, "dev_type", 0)).get("caps", []))
-            specials = get_specials_config(context={"gc_instance": gc_instance})
+            specials = get_specials_config(context={"rl_instance": rl_instance})
             option_info = None
             for cap in dev_caps:
                 spec = specials.get(cap, {})
@@ -928,7 +928,7 @@ def register_gc_blueprint(
 
         def do_special_config():
             _task_update(meta={"mac": mac_str, "key": key, "message": f"Sending {key} (0x{int(option):02X})"})
-            ok = gc_instance.sendConfig(
+            ok = rl_instance.sendConfig(
                 option=int(option) & 0xFF,
                 data0=value_int,
                 recv3=recv3,
@@ -938,15 +938,15 @@ def register_gc_blueprint(
             if not ok:
                 raise RuntimeError(f"ACK timeout for option 0x{int(option):02X}")
 
-            with _gc_lock:
-                dev = gc_instance.getDeviceFromAddress(mac_str)
+            with _rl_lock:
+                dev = rl_instance.getDeviceFromAddress(mac_str)
                 if not dev:
                     raise RuntimeError("device not found")
                 if not hasattr(dev, "specials") or dev.specials is None:
                     dev.specials = {}
                 dev.specials[key] = int(value_int) & 0xFF
                 try:
-                    gc_instance.save_to_db({"manual": True})
+                    rl_instance.save_to_db({"manual": True})
                 except Exception:
                     pass
 
@@ -958,7 +958,7 @@ def register_gc_blueprint(
             return _task_busy_response()
         return jsonify({"ok": True, "task": t})
 
-    @bp.route("/gatecontrol/api/specials/action", methods=["POST"])
+    @bp.route("/racelink/api/specials/action", methods=["POST"])
     def api_specials_action():
         if _task_is_running():
             return _task_busy_response()
@@ -977,12 +977,12 @@ def register_gc_blueprint(
             return jsonify({"ok": False, "error": "broadcast not allowed for action"}), 400
 
         mac_str = str(mac).upper()
-        with _gc_lock:
-            dev = gc_instance.getDeviceFromAddress(mac_str)
+        with _rl_lock:
+            dev = rl_instance.getDeviceFromAddress(mac_str)
             if not dev:
                 return jsonify({"ok": False, "error": "device not found"}), 404
             dev_caps = set(get_dev_type_info(getattr(dev, "dev_type", 0)).get("caps", []))
-            specials = get_specials_config(context={"gc_instance": gc_instance})
+            specials = get_specials_config(context={"rl_instance": rl_instance})
             fn_info = None
             cap_key = None
             options_by_key = {}
@@ -1008,7 +1008,7 @@ def register_gc_blueprint(
         comm_name = fn_info.get("comm")
         if not comm_name:
             return jsonify({"ok": False, "error": "missing comm handler"}), 400
-        comm_fn = getattr(gc_instance, comm_name, None)
+        comm_fn = getattr(rl_instance, comm_name, None)
         if not callable(comm_fn):
             return jsonify({"ok": False, "error": "comm handler not found"}), 400
 
@@ -1033,8 +1033,8 @@ def register_gc_blueprint(
 
         _ensure_transport_hooked()
 
-        with _gc_lock:
-            dev = gc_instance.getDeviceFromAddress(mac_str)
+        with _rl_lock:
+            dev = rl_instance.getDeviceFromAddress(mac_str)
         if not dev:
             return jsonify({"ok": False, "error": "device not found"}), 404
 
@@ -1045,11 +1045,11 @@ def register_gc_blueprint(
         _set_master(state="TX", tx_pending=True, last_event="SPECIAL_SENT")
         return jsonify({"ok": True, "result": res, "function": fn_key, "params": params_coerced})
 
-    @bp.route("/gatecontrol/api/specials/get", methods=["POST"])
+    @bp.route("/racelink/api/specials/get", methods=["POST"])
     def api_specials_get():
         return jsonify({"ok": False, "error": "not implemented"}), 501
 
-    @bp.route("/gatecontrol/api/devices/control", methods=["POST"])
+    @bp.route("/racelink/api/devices/control", methods=["POST"])
     def api_devices_control():
         """
         CONTROL message:
@@ -1085,24 +1085,24 @@ def register_gc_blueprint(
             if group_id is not None:
                 # Prefer new signature sendGroupControl(groupId, flags, presetId, brightness)
                 try:
-                    gc_instance.sendGroupControl(int(group_id), flags, presetId, brightness)
+                    rl_instance.sendGroupControl(int(group_id), flags, presetId, brightness)
                 except TypeError:
                     # fallback old signature if user hasn't applied proto patch (state/effect)
-                    gc_instance.sendGroupControl(int(group_id), int(bool(flags & 0x01)), presetId, brightness)
+                    rl_instance.sendGroupControl(int(group_id), int(bool(flags & 0x01)), presetId, brightness)
                 changed = 1
             elif macs:
                 for mac in macs:
-                    dev = gc_instance.getDeviceFromAddress(mac)
+                    dev = rl_instance.getDeviceFromAddress(mac)
                     if dev:
                         try:
-                            gc_instance.sendGateControl(dev, flags, presetId, brightness)
+                            rl_instance.sendRaceLink(dev, flags, presetId, brightness)
                         except TypeError:
-                            gc_instance.sendGateControl(dev, int(bool(flags & 0x01)), presetId, brightness)
+                            rl_instance.sendRaceLink(dev, int(bool(flags & 0x01)), presetId, brightness)
                         changed += 1
             else:
                 return jsonify({"ok": False, "error": "missing macs or groupId"}), 400
         except Exception as ex:
-            _log(f"GateControl: control failed: {ex}")
+            _log(f"RaceLink: control failed: {ex}")
             return jsonify({"ok": False, "error": str(ex)}), 500
 
         _set_master(state="TX", tx_pending=True, last_event="CONTROL_SENT")
@@ -1115,10 +1115,10 @@ def register_gc_blueprint(
 
     _upload_lock = _DefaultLock()
     _uploads = {}  # id -> {id, kind, path, name, size, sha256, uploaded_ts}
-    _presets_option_key = "esp_gc_wled_presets_file"
+    _presets_option_key = "rl_wled_presets_file"
 
     def _presets_dir() -> str:
-        d = os.path.join(os.path.expanduser("~"), ".gatecontrol_lora", "presets")
+        d = os.path.join(os.path.expanduser("~"), ".racelink_lora", "presets")
         os.makedirs(d, exist_ok=True)
         return d
 
@@ -1180,7 +1180,7 @@ def register_gc_blueprint(
             pass
 
     def _uploads_dir() -> str:
-        d = os.path.join(tempfile.gettempdir(), "gatecontrol_lora_uploads")
+        d = os.path.join(tempfile.gettempdir(), "racelink_lora_uploads")
         os.makedirs(d, exist_ok=True)
         return d
 
@@ -1240,13 +1240,13 @@ def register_gc_blueprint(
 
     def _apply_presets_options(parsed: List[Tuple[int, str]]) -> None:
         if not parsed:
-            gc_instance.uiEffectList = [UIFieldSelectOption("0", "No presets.json found")]
+            rl_instance.uiEffectList = [UIFieldSelectOption("0", "No presets.json found")]
         else:
-            gc_instance.uiEffectList = [UIFieldSelectOption(str(pid), name) for pid, name in parsed]
+            rl_instance.uiEffectList = [UIFieldSelectOption(str(pid), name) for pid, name in parsed]
         try:
-            gc_instance.register_quickset_ui()
-            gc_instance.registerActions()
-            gc_instance._rhapi.ui.broadcast_ui("run")
+            rl_instance.register_quickset_ui()
+            rl_instance.registerActions()
+            rl_instance._rhapi.ui.broadcast_ui("run")
         except Exception:
             pass
 
@@ -1345,8 +1345,8 @@ def register_gc_blueprint(
         if not want:
             return 0
         try:
-            with _gc_lock:
-                for dev in gc_devicelist:
+            with _rl_lock:
+                for dev in rl_devicelist:
                     have = _expected_mac_hex(str(getattr(dev, "addr", "") or ""))
                     if have and have.lower() == want.lower():
                         return int(getattr(dev, "groupId", 0) or 0)
@@ -1433,11 +1433,11 @@ def register_gc_blueprint(
         """Activate a pre-configured NetworkManager connection profile (preferred).
 
         Example (one-time, as root):
-            nmcli con add type wifi ifname wlan0 con-name gatecontrol-wled-ap ssid "WLED-AP" \
+            nmcli con add type wifi ifname wlan0 con-name racelink-wled-ap ssid "WLED-AP" \
               wifi-sec.key-mgmt wpa-psk wifi-sec.psk "wled1234" connection.autoconnect no connection.permissions ""
 
         Then activate as unprivileged user:
-            nmcli con up id gatecontrol-wled-ap ifname wlan0
+            nmcli con up id racelink-wled-ap ifname wlan0
         """
         conn_name = str(conn_name or "").strip()
         iface = str(iface or "wlan0").strip()
@@ -1732,7 +1732,7 @@ def register_gc_blueprint(
             "path": dst,
         }
 
-    @bp.route("/gatecontrol/api/fw/upload", methods=["POST"])
+    @bp.route("/racelink/api/fw/upload", methods=["POST"])
     def api_fw_upload():
         if _task_is_running():
             return _task_busy_response()
@@ -1746,7 +1746,7 @@ def register_gc_blueprint(
         except Exception as ex:
             return jsonify({"ok": False, "error": str(ex)}), 400
 
-    @bp.route("/gatecontrol/api/presets/upload", methods=["POST"])
+    @bp.route("/racelink/api/presets/upload", methods=["POST"])
     def api_presets_upload():
         if _task_is_running():
             return _task_busy_response()
@@ -1779,7 +1779,7 @@ def register_gc_blueprint(
         except Exception as ex:
             return jsonify({"ok": False, "error": str(ex)}), 400
 
-    @bp.route("/gatecontrol/api/presets/download", methods=["POST"])
+    @bp.route("/racelink/api/presets/download", methods=["POST"])
     def api_presets_download():
         _ensure_transport_hooked()
         if _task_is_running():
@@ -1795,7 +1795,7 @@ def register_gc_blueprint(
         wifi = body.get("wifi") or {}
         wifi_ssid = str(wifi.get("ssid") or body.get("wifiSsid") or "WLED-AP")
         wifi_iface = str(wifi.get("iface") or body.get("wifiIface") or "wlan0")
-        wifi_conn_name = str(wifi.get("connName") or body.get("wifiConnName") or "gatecontrol-wled-ap")
+        wifi_conn_name = str(wifi.get("connName") or body.get("wifiConnName") or "racelink-wled-ap")
         wifi_bssid = str(wifi.get("bssid") or body.get("wifiBssid") or "")
         wifi_timeout_s = float(wifi.get("timeoutS") or body.get("wifiTimeoutS") or 35.0)
 
@@ -1850,7 +1850,7 @@ def register_gc_blueprint(
 
                 _step("LORA_AP_ON", "Enable WLED AP via LoRa (waiting for ACK)")
                 recv3 = _recv3_bytes_from_addr(mac)
-                ok_ap = gc_instance.sendConfig(0x04, data0=1, recv3=recv3, wait_for_ack=True, timeout_s=8.0)
+                ok_ap = rl_instance.sendConfig(0x04, data0=1, recv3=recv3, wait_for_ack=True, timeout_s=8.0)
                 if not ok_ap:
                     raise RuntimeError(f"Timeout waiting for CONFIG ACK from {mac}")
 
@@ -1894,7 +1894,7 @@ def register_gc_blueprint(
                 _step("LORA_AP_OFF", "Disable WLED AP via LoRa")
                 try:
                     recv3 = _recv3_bytes_from_addr(mac)
-                    gc_instance.sendConfig(0x04, data0=0, recv3=recv3, wait_for_ack=True, timeout_s=6.0)
+                    rl_instance.sendConfig(0x04, data0=0, recv3=recv3, wait_for_ack=True, timeout_s=6.0)
                 except Exception:
                     pass
 
@@ -1931,7 +1931,7 @@ def register_gc_blueprint(
             return _task_busy_response()
         return jsonify({"ok": True, "task": t})
 
-    @bp.route("/gatecontrol/api/presets/list", methods=["GET"])
+    @bp.route("/racelink/api/presets/list", methods=["GET"])
     def api_presets_list():
         files = _list_preset_files()
         current = _get_current_preset_name()
@@ -1941,7 +1941,7 @@ def register_gc_blueprint(
             current = files[0]["name"]
         return jsonify({"ok": True, "files": files, "current": current})
 
-    @bp.route("/gatecontrol/api/presets/select", methods=["POST"])
+    @bp.route("/racelink/api/presets/select", methods=["POST"])
     def api_presets_select():
         if _task_is_running():
             return _task_busy_response()
@@ -1955,7 +1955,7 @@ def register_gc_blueprint(
         _set_current_preset_name(name)
         return jsonify({"ok": True, "current": name})
 
-    @bp.route("/gatecontrol/api/fw/uploads", methods=["GET"])
+    @bp.route("/racelink/api/fw/uploads", methods=["GET"])
     def api_fw_uploads():
         with _upload_lock:
             rows = [
@@ -1966,12 +1966,12 @@ def register_gc_blueprint(
         rows.sort(key=lambda r: r.get("uploaded_ts", 0), reverse=True)
         return jsonify({"ok": True, "files": rows})
 
-    @bp.route("/gatecontrol/api/wifi/interfaces", methods=["GET"])
+    @bp.route("/racelink/api/wifi/interfaces", methods=["GET"])
     def api_wifi_interfaces():
         ifaces = _wifi_interfaces()
         return jsonify({"ok": True, "ifaces": ifaces})
 
-    @bp.route("/gatecontrol/api/fw/start", methods=["POST"])
+    @bp.route("/racelink/api/fw/start", methods=["POST"])
     def api_fw_start():
         _ensure_transport_hooked()
         if _task_is_running():
@@ -2023,7 +2023,7 @@ def register_gc_blueprint(
         wifi = body.get("wifi") or {}
         wifi_ssid = str(wifi.get("ssid") or body.get("wifiSsid") or "WLED-AP")
         wifi_iface = str(wifi.get("iface") or body.get("wifiIface") or "wlan0")
-        wifi_conn_name = str(wifi.get("connName") or body.get("wifiConnName") or "gatecontrol-wled-ap")
+        wifi_conn_name = str(wifi.get("connName") or body.get("wifiConnName") or "racelink-wled-ap")
         # Optional: connect to a specific BSSID/AP (rarely needed; only makes sense if multiple APs share same SSID)
         wifi_bssid = str(wifi.get("bssid") or body.get("wifiBssid") or "")
         wifi_timeout_s = float(wifi.get("timeoutS") or body.get("wifiTimeoutS") or 35.0)
@@ -2094,7 +2094,7 @@ def register_gc_blueprint(
                     })
                     try:
                         recv3 = _recv3_bytes_from_addr(str(addr))
-                        gc_instance.sendConfig(0x04, data0=1, recv3=recv3)
+                        rl_instance.sendConfig(0x04, data0=1, recv3=recv3)
                     except Exception as ex:
                         dev_res["error"] = f"LoRa AP enable failed: {ex}"
                         results["errors"].append(dev_res["error"])
@@ -2220,7 +2220,7 @@ def register_gc_blueprint(
                         })
                         try:
                             recv3 = _recv3_bytes_from_addr(str(addr))
-                            gc_instance.sendConfig(0x04, data0=0, recv3=recv3)
+                            rl_instance.sendConfig(0x04, data0=0, recv3=recv3)
                         except Exception:
                             pass
                         continue
@@ -2278,21 +2278,21 @@ def register_gc_blueprint(
                         "message": f"Re-applying Group ID {dev_res.get('groupId', 0)} via LoRa",
                     })
                     try:
-                        # IMPORTANT: Setting the group must use setGateGroupId(), not sendConfig(),
+                        # IMPORTANT: Setting the group must use setNodeGroupId(), not sendConfig(),
                         # because the node will only accept further LoRa commands after SET_GROUP
                         # is ACKed (your firmware behavior).
                         target_dev = None
                         want = _expected_mac_hex(str(addr))
-                        with _gc_lock:
-                            for d in gc_devicelist:
+                        with _rl_lock:
+                            for d in rl_devicelist:
                                 have = _expected_mac_hex(str(getattr(d, "addr", "") or ""))
                                 if have and want and have.lower() == want.lower():
                                     target_dev = d
                                     break
                         if not target_dev:
-                            raise RuntimeError(f"Device {addr} not found in gc_devicelist")
+                            raise RuntimeError(f"Device {addr} not found in rl_devicelist")
 
-                        ok_set = gc_instance.setGateGroupId(target_dev, forceSet=True, wait_for_ack=True)
+                        ok_set = rl_instance.setNodeGroupId(target_dev, forceSet=True, wait_for_ack=True)
                         if not ok_set:
                             raise RuntimeError("No ACK_OK for SET_GROUP")
                     except Exception as ex:
@@ -2313,7 +2313,7 @@ def register_gc_blueprint(
                     })
                     try:
                         recv3 = _recv3_bytes_from_addr(str(addr))
-                        gc_instance.sendConfig(0x04, data0=1, recv3=recv3)
+                        rl_instance.sendConfig(0x04, data0=1, recv3=recv3)
                     except Exception:
                         # best-effort; even if this fails, the HTTP wait below will time out
                         pass
@@ -2392,7 +2392,7 @@ def register_gc_blueprint(
                             "message": "Disable WLED AP via LoRa (best-effort)",
                         })
                         recv3 = _recv3_bytes_from_addr(str(addr))
-                        gc_instance.sendConfig(0x04, data0=0, recv3=recv3)
+                        rl_instance.sendConfig(0x04, data0=0, recv3=recv3)
                     except Exception:
                         pass
 
@@ -2441,4 +2441,4 @@ def register_gc_blueprint(
 # Finally register blueprint
     _ensure_presets_loaded()
     rhapi.ui.blueprint_add(bp)
-    _log("GateControl UI blueprint registered at /gatecontrol")
+    _log("RaceLink UI blueprint registered at /racelink")

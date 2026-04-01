@@ -1,4 +1,4 @@
-"""Created by Peter Simandl "psi" in 2025.
+"""Created by Peter Simandl "PSi86" in 2026.
 Works with Rotorhazard 4.0.
 """
 
@@ -6,68 +6,68 @@ import logging
 
 from eventmanager import Evt
 
-from .gatecontrol_webui import register_gc_blueprint
-from .controller import GateControl_LoRa
+from .racelink_webui import register_rl_blueprint
+from .controller import RaceLink_LoRa
 from .data import (
-    GC_Device,
-    GC_DeviceGroup,
-    GC_Dev_Type,
-    GC_FLAG_POWER_ON,
-    GC_FLAG_ARM_ON_SYNC,
-    GC_FLAG_HAS_BRI,
-    GC_FLAG_FORCE_TT0,
-    GC_FLAG_FORCE_REAPPLY,
-    gc_backup_devicelist,
-    gc_backup_grouplist,
-    gc_devicelist,
-    gc_grouplist,
+    RL_Device,
+    RL_DeviceGroup,
+    RL_Dev_Type,
+    RL_FLAG_POWER_ON,
+    RL_FLAG_ARM_ON_SYNC,
+    RL_FLAG_HAS_BRI,
+    RL_FLAG_FORCE_TT0,
+    RL_FLAG_FORCE_REAPPLY,
+    rl_backup_devicelist,
+    rl_backup_grouplist,
+    rl_devicelist,
+    rl_grouplist,
 )
 
 logger = logging.getLogger(__name__)
 
 
 def initialize(rhapi):
-    global gc_instance
+    global rl_instance
 
-    gc_instance = GateControl_LoRa(
+    rl_instance = RaceLink_LoRa(
         rhapi,
-        "GateControl_LoRa",
-        "GateControl",
+        "RaceLink_LoRa",
+        "RaceLink",
     )
 
-    register_gc_blueprint(
+    register_rl_blueprint(
         rhapi,
-        gc_instance=gc_instance,
-        gc_devicelist=gc_devicelist,
-        gc_grouplist=gc_grouplist,
-        GC_DeviceGroup=GC_DeviceGroup,
+        rl_instance=rl_instance,
+        rl_devicelist=rl_devicelist,
+        rl_grouplist=rl_grouplist,
+        RL_DeviceGroup=RL_DeviceGroup,
         logger=logger,
     )
 
-    rhapi.events.on(Evt.DATA_IMPORT_INITIALIZE, gc_instance.register_gc_dataimporter)
-    rhapi.events.on(Evt.DATA_EXPORT_INITIALIZE, gc_instance.register_gc_dataexporter)
-    rhapi.events.on(Evt.ACTIONS_INITIALIZE, gc_instance.registerActions)
+    rhapi.events.on(Evt.DATA_IMPORT_INITIALIZE, rl_instance.register_rl_dataimporter)
+    rhapi.events.on(Evt.DATA_EXPORT_INITIALIZE, rl_instance.register_rl_dataexporter)
+    rhapi.events.on(Evt.ACTIONS_INITIALIZE, rl_instance.registerActions)
 
-    rhapi.events.on(Evt.STARTUP, gc_instance.onStartup)
+    rhapi.events.on(Evt.STARTUP, rl_instance.onStartup)
 
-    rhapi.events.on(Evt.RACE_START, gc_instance.onRaceStart)
-    rhapi.events.on(Evt.RACE_FINISH, gc_instance.onRaceFinish)
-    rhapi.events.on(Evt.RACE_STOP, gc_instance.onRaceStop)
+    rhapi.events.on(Evt.RACE_START, rl_instance.onRaceStart)
+    rhapi.events.on(Evt.RACE_FINISH, rl_instance.onRaceFinish)
+    rhapi.events.on(Evt.RACE_STOP, rl_instance.onRaceStop)
 
 
 __all__ = [
-    "GC_Device",
-    "GC_DeviceGroup",
-    "GC_Dev_Type",
-    "GC_FLAG_POWER_ON",
-    "GC_FLAG_ARM_ON_SYNC",
-    "GC_FLAG_HAS_BRI",
-    "GC_FLAG_FORCE_TT0",
-    "GC_FLAG_FORCE_REAPPLY",
-    "GateControl_LoRa",
-    "gc_backup_devicelist",
-    "gc_backup_grouplist",
-    "gc_devicelist",
-    "gc_grouplist",
+    "RL_Device",
+    "RL_DeviceGroup",
+    "RL_Dev_Type",
+    "RL_FLAG_POWER_ON",
+    "RL_FLAG_ARM_ON_SYNC",
+    "RL_FLAG_HAS_BRI",
+    "RL_FLAG_FORCE_TT0",
+    "RL_FLAG_FORCE_REAPPLY",
+    "RaceLink_LoRa",
+    "rl_backup_devicelist",
+    "rl_backup_grouplist",
+    "rl_devicelist",
+    "rl_grouplist",
     "initialize",
 ]
