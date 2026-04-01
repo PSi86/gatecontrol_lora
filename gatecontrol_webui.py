@@ -30,14 +30,16 @@ This registers the page at /gatecontrol and JSON endpoints under /gatecontrol/ap
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import json
 import time
 import threading
+from datetime import datetime
 
 import os
 import re
+from RHUI import UIFieldSelectOption
 import tempfile
 import hashlib
 import uuid
@@ -45,6 +47,11 @@ import subprocess
 import shutil
 
 from flask import Blueprint, request, jsonify, templating, Response, stream_with_context
+
+try:
+    from .data import effect_select_options, get_dev_type_info, get_specials_config, get_special_keys_for_caps, is_wled_dev_type  # type: ignore
+except Exception:  # pragma: no cover
+    from data import effect_select_options, get_dev_type_info, get_specials_config, get_special_keys_for_caps, is_wled_dev_type
 
 # Use gevent lock/queue if available, otherwise fallback to threading primitives
 try:
@@ -100,6 +107,7 @@ def register_gc_blueprint(
         "state": "IDLE",              # IDLE | TX | RX | ERROR
         "tx_pending": False,
         "rx_window_open": False,
+        "rx_windows": 0,
         "rx_window_ms": 0,
         "last_event": None,
         "last_event_ts": 0.0,
@@ -168,6 +176,24 @@ def register_gc_blueprint(
     def _task_busy_response():
         snap = _task_snapshot()
         return jsonify({"ok": False, "busy": True, "task": snap}), 409
+
+    def _parse_recv3_from_addr(addr_str) -> Optional[bytes]:
+        """Parse address string (3B or 6B, with/without separators) and return last3 bytes."""
+        if addr_str is None:
+            return None
+        try:
+            s = str(addr_str)
+        except Exception:
+            return None
+        hexchars = "0123456789abcdefABCDEF"
+        s = "".join(ch for ch in s if ch in hexchars)
+        if len(s) < 6:
+            return None
+        s = s[-6:]
+        try:
+            return bytes.fromhex(s)
+        except Exception:
+            return None
 
     # --- Transport event hookup (LoRaUSB.on_event) ---
     _hooked_lora = {"ok": False}
@@ -243,23 +269,29 @@ def register_gc_blueprint(
 
         # USB-only events
         if t == EV_RX_WINDOW_OPEN:
+            rx_state = int(ev.get("rx_windows", 1) or 0)
+            rx_open = rx_state == 1
             _set_master(
-                state="RX",
-                rx_window_open=True,
+                state="RX" if rx_open else ("TX" if _master.get("tx_pending") else "IDLE"),
+                rx_windows=rx_state,
+                rx_window_open=rx_open,
                 rx_window_ms=int(ev.get("window_ms", 0) or 0),
                 last_event="RX_WINDOW_OPEN",
                 last_error=None,
             )
             if _task_is_running():
-                _task_update(rx_windows=int((_task_snapshot() or {}).get("rx_windows", 0)) + 1)
+                snap = _task_snapshot() or {}
+                _task_update(rx_window_events=int(snap.get("rx_window_events", 0)) + 1)
             return
 
         if t == EV_RX_WINDOW_CLOSED:
             delta = int(ev.get("rx_count_delta", 0) or 0)
-            # If no TX pending, fall back to IDLE. (TX_DONE will override if needed.)
+            rx_state = int(ev.get("rx_windows", 0) or 0)
+            rx_open = rx_state == 1
             _set_master(
-                state="TX" if _master.get("tx_pending") else "IDLE",
-                rx_window_open=False,
+                state="RX" if rx_open else ("TX" if _master.get("tx_pending") else "IDLE"),
+                rx_windows=rx_state,
+                rx_window_open=rx_open,
                 rx_window_ms=0,
                 last_event="RX_WINDOW_CLOSED",
                 last_rx_count_delta=delta,
@@ -269,7 +301,7 @@ def register_gc_blueprint(
                 snap = _task_snapshot() or {}
                 _task_update(
                     rx_count_delta_total=int(snap.get("rx_count_delta_total", 0)) + delta,
-                    rx_windows=int(snap.get("rx_windows", 0)) + 1,
+                    rx_window_events=int(snap.get("rx_window_events", 0)) + 1,
                 )
             return
 
@@ -305,6 +337,12 @@ def register_gc_blueprint(
         if not reply:
             return
 
+        if reply == "ACK":
+            with _clients_lock:
+                has_clients = bool(_clients)
+            if has_clients:
+                _broadcast("refresh", {"what": ["devices"]})
+
         # Track replies for running tasks
         if _task_is_running():
             snap = _task_snapshot() or {}
@@ -323,17 +361,21 @@ def register_gc_blueprint(
         # Online status (central link logic): always boolean, no timestamp gating.
         # Devices become online only when an expected reply is received; otherwise offline.
         online = bool(getattr(dev, "link_online", False))
+        dev_type = int(getattr(dev, "dev_type", getattr(dev, "caps", 0)) or 0)
+        type_info = get_dev_type_info(dev_type)
 
         d = {
             "addr": getattr(dev, "addr", None),
             "name": getattr(dev, "name", None),
-            "type": int(getattr(dev, "type", 0) or 0),
+            "dev_type": dev_type,
             "groupId": int(getattr(dev, "groupId", 0) or 0),
 
             # new proto v1.2 fields
             "flags": int(getattr(dev, "flags", 0) or 0),
+            "configByte": int(getattr(dev, "configByte", 0) or 0),
             "presetId": int(getattr(dev, "presetId", 0) or 0),
             "brightness": int(getattr(dev, "brightness", 0) or 0),
+            "specials": dict(getattr(dev, "specials", {}) or {}),
 
             "voltage_mV": int(getattr(dev, "voltage_mV", 0) or 0),
             "node_rssi": int(getattr(dev, "node_rssi", 0) or 0),
@@ -342,11 +384,18 @@ def register_gc_blueprint(
             "host_snr": int(getattr(dev, "host_snr", 0) or 0),
 
             "version": int(getattr(dev, "version", 0) or 0),
-            "caps": int(getattr(dev, "caps", 0) or 0),
+            "caps": int(getattr(dev, "caps", dev_type) or 0),
+            "dev_type_name": type_info.get("name"),
+            "dev_type_caps": type_info.get("caps", []),
             "last_seen_ts": float(getattr(dev, "last_seen_ts", 0.0) or 0.0),
             "last_ack": getattr(dev, "last_ack", None),
             "online": online,
         }
+        special_keys = get_special_keys_for_caps(type_info.get("caps", []))
+        specials = getattr(dev, "specials", {}) or {}
+        for key in special_keys:
+            if key in specials:
+                d[key] = specials[key]
         return d
 
     def _gc_group_counts():
@@ -358,6 +407,17 @@ def register_gc_blueprint(
         except Exception:
             pass
         return counts
+
+    def _gc_wled_count():
+        count = 0
+        try:
+            for dev in gc_devicelist:
+                dtype = int(getattr(dev, "dev_type", getattr(dev, "caps", 0)) or 0)
+                if is_wled_dev_type(dtype):
+                    count += 1
+        except Exception:
+            pass
+        return count
 
     bp = Blueprint(
         "gatecontrol",
@@ -444,18 +504,41 @@ def register_gc_blueprint(
             rows = [_gc_serialize_device(d) for d in gc_devicelist]
         return jsonify({"ok": True, "devices": rows})
 
+    @bp.route("/gatecontrol/api/specials", methods=["GET"])
+    def api_specials():
+        context = {"gc_instance": gc_instance}
+        return jsonify({
+            "ok": True,
+            "specials": get_specials_config(context=context, serialize_ui=True),
+        })
+
     @bp.route("/gatecontrol/api/groups", methods=["GET"])
     def api_groups():
         with _gc_lock:
             group_rows = []
             counts = _gc_group_counts()
+            wled_count = _gc_wled_count()
+            group_rows.append({
+                "id": 0,
+                "name": "Unconfigured",
+                "static": False,
+                "dev_type": 0,
+                "device_count": int(counts.get(0, 0)),
+            })
             for i, g in enumerate(gc_grouplist):
+                name = getattr(g, "name", f"Group {i}")
+                if str(name).strip().lower() == "unconfigured":
+                    continue
+                if str(name).strip().lower() in {"all wled gates", "all wled devices"}:
+                    continue
+                gid = i
+                device_count = int(counts.get(i, 0))
                 group_rows.append({
-                    "id": i,
-                    "name": getattr(g, "name", f"Group {i}"),
+                    "id": gid,
+                    "name": name,
                     "static": bool(getattr(g, "static_group", 0)),
-                    "device_type": int(getattr(g, "device_type", 0) or 0),
-                    "device_count": int(counts.get(i, 0)),
+                    "dev_type": int(getattr(g, "dev_type", 0) or 0),
+                    "device_count": device_count,
                 })
         return jsonify({"ok": True, "groups": group_rows})
 
@@ -470,16 +553,7 @@ def register_gc_blueprint(
     @bp.route("/gatecontrol/api/options", methods=["GET"])
     def api_options():
         # still called "effects" for UI legacy; values can represent preset ids
-        opts = []
-        try:
-            for opt in gc_instance.uiEffectList:
-                val = getattr(opt, "value", None)
-                lab = getattr(opt, "label", None) or getattr(opt, "name", None) or str(opt)
-                if val is None:
-                    continue
-                opts.append({"value": str(val), "label": str(lab)})
-        except Exception:
-            opts = []
+        opts = effect_select_options(context={"gc_instance": gc_instance})
         return jsonify({"ok": True, "effects": opts})
 
     # -----------------------
@@ -500,7 +574,7 @@ def register_gc_blueprint(
                 "ended_ts": None,
                 "meta": meta or {},
                 "rx_replies": 0,
-                "rx_windows": 0,
+                "rx_window_events": 0,
                 "rx_count_delta_total": 0,
                 "last_error": None,
                 "result": None,
@@ -542,7 +616,7 @@ def register_gc_blueprint(
         created_gid = None
         with _gc_lock:
             if new_group_name:
-                g = GC_DeviceGroup(str(new_group_name), static_group=0, device_type=0)
+                g = GC_DeviceGroup(str(new_group_name), static_group=0, dev_type=0)
                 gc_grouplist.append(g)
                 created_gid = len(gc_grouplist) - 1
                 _log(f"GateControl: Created group '{new_group_name}' (id={created_gid})")
@@ -551,7 +625,10 @@ def register_gc_blueprint(
 
         def do_discover():
             # Discovery: ask nodes with groupId=0 and assign to group
-            n_found = int(gc_instance.getDevices(groupFilter=0, addToGroup=int(target_gid) if target_gid is not None else -1) or 0)
+            add_to_group = -1
+            if target_gid not in (None, 0, "0"):
+                add_to_group = int(target_gid)
+            n_found = int(gc_instance.getDevices(groupFilter=0, addToGroup=add_to_group) or 0)
             return {"found": n_found, "createdGroupId": created_gid, "targetGroupId": target_gid}
 
         t = _start_task("discover", do_discover, meta={"createdGroupId": created_gid, "targetGroupId": target_gid})
@@ -603,6 +680,8 @@ def register_gc_blueprint(
         new_name = body.get("name", None)
 
         changed = 0
+        if new_group is not None:
+            _ensure_transport_hooked()
         with _gc_lock:
             for mac in macs:
                 dev = gc_instance.getDeviceFromAddress(mac)
@@ -613,7 +692,8 @@ def register_gc_blueprint(
                     changed += 1
                 if new_group is not None:
                     try:
-                        gc_instance.setGateGroupId(dev, int(new_group))
+                        dev.groupId = int(new_group)
+                        gc_instance.setGateGroupId(dev)
                         changed += 1
                     except Exception as ex:
                         _log(f"GateControl: setGateGroupId failed for {mac}: {ex}")
@@ -632,11 +712,11 @@ def register_gc_blueprint(
     def api_groups_create():
         body = request.get_json(silent=True) or {}
         name = str(body.get("name", "")).strip()
-        device_type = int(body.get("device_type", 0) or 0)
+        dev_type = int(body.get("dev_type", body.get("device_type", 0)) or 0)
         if not name:
             return jsonify({"ok": False, "error": "name required"}), 400
         with _gc_lock:
-            gc_grouplist.append(GC_DeviceGroup(name, static_group=0, device_type=device_type))
+            gc_grouplist.append(GC_DeviceGroup(name, static_group=0, dev_type=dev_type))
             gid = len(gc_grouplist) - 1
             try:
                 gc_instance.save_to_db({"manual": True})
@@ -740,24 +820,6 @@ def register_gc_blueprint(
         if len(macs) != 1:
             return jsonify({"ok": False, "error": "select exactly one device"}), 400
 
-        def _parse_recv3_from_addr(addr_str) -> Optional[bytes]:
-            """Parse address string (3B or 6B, with/without separators) and return last3 bytes."""
-            if addr_str is None:
-                return None
-            try:
-                s = str(addr_str)
-            except Exception:
-                return None
-            hexchars = "0123456789abcdefABCDEF"
-            s = "".join(ch for ch in s if ch in hexchars)
-            if len(s) < 6:
-                return None
-            s = s[-6:]
-            try:
-                return bytes.fromhex(s)
-            except Exception:
-                return None
-
         recv3 = _parse_recv3_from_addr(macs[0])
         if not recv3:
             return jsonify({"ok": False, "error": "invalid mac/address"}), 400
@@ -766,25 +828,226 @@ def register_gc_blueprint(
 
         try:
             option = int(body.get("option", 0)) & 0xFF
-            flags  = int(body.get("flags", 0)) & 0xFF
+            data0 = int(body.get("data0", body.get("flags", 0))) & 0xFF
+            data1 = int(body.get("data1", 0)) & 0xFF
+            data2 = int(body.get("data2", 0)) & 0xFF
+            data3 = int(body.get("data3", 0)) & 0xFF
         except Exception:
-            return jsonify({"ok": False, "error": "invalid option/flags"}), 400
+            return jsonify({"ok": False, "error": "invalid option/data"}), 400
 
-        if option not in (0x01, 0x02, 0x03, 0x04, 0x05):
+        config_options = {
+            0x01,  # MAC filter enabled
+            0x03,  # MAC filter persistency
+            0x04,  # WLAN AP open
+            0x80,  # forget master MAC
+            0x81,  # reboot
+        }
+        if option not in config_options:
             return jsonify({"ok": False, "error": "unknown config option"}), 400
 
         try:
             # Prefer instance helper if present
             if hasattr(gc_instance, "sendConfig"):
-                gc_instance.sendConfig(option=option, flags=flags, recv3=recv3)
+                gc_instance.sendConfig(option=option, data0=data0, data1=data1, data2=data2, data3=data3, recv3=recv3)
             else:
-                gc_instance.lora.send_config(recv3=recv3, option=option, flags=flags)
+                gc_instance.lora.send_config(recv3=recv3, option=option, data0=data0, data1=data1, data2=data2, data3=data3)
         except Exception as ex:
             _log(f"GateControl: config failed: {ex}")
             return jsonify({"ok": False, "error": str(ex)}), 500
 
         _set_master(state="TX", tx_pending=True, last_event="CONFIG_SENT")
-        return jsonify({"ok": True, "sent": 1, "recv3": recv3.hex().upper(), "option": option, "flags": flags})
+        return jsonify({
+            "ok": True,
+            "sent": 1,
+            "recv3": recv3.hex().upper(),
+            "option": option,
+            "data0": data0,
+            "data1": data1,
+            "data2": data2,
+            "data3": data3,
+        })
+
+    # -----------------------
+    # JSON API: Specials config (device-specific options)
+    # -----------------------
+    @bp.route("/gatecontrol/api/specials/config", methods=["POST"])
+    def api_specials_config():
+        if _task_is_running():
+            return _task_busy_response()
+
+        body = request.get_json(silent=True) or {}
+        mac = body.get("mac", None)
+        key = body.get("key", None)
+        value = body.get("value", None)
+        if not mac or not key:
+            return jsonify({"ok": False, "error": "missing mac/key"}), 400
+
+        recv3 = _parse_recv3_from_addr(mac)
+        if not recv3:
+            return jsonify({"ok": False, "error": "invalid mac/address"}), 400
+        if recv3 == b"\xFF\xFF\xFF":
+            return jsonify({"ok": False, "error": "broadcast not allowed for config"}), 400
+
+        try:
+            value_int = int(value)
+        except Exception:
+            return jsonify({"ok": False, "error": "invalid value"}), 400
+
+        mac_str = str(mac).upper()
+        with _gc_lock:
+            dev = gc_instance.getDeviceFromAddress(mac_str)
+            if not dev:
+                return jsonify({"ok": False, "error": "device not found"}), 404
+            dev_caps = set(get_dev_type_info(getattr(dev, "dev_type", 0)).get("caps", []))
+            specials = get_specials_config(context={"gc_instance": gc_instance})
+            option_info = None
+            for cap in dev_caps:
+                spec = specials.get(cap, {})
+                for opt in spec.get("options", []):
+                    if opt.get("key") == key:
+                        option_info = opt
+                        break
+                if option_info:
+                    break
+
+        if not option_info:
+            return jsonify({"ok": False, "error": "option not supported for device"}), 400
+
+        option = option_info.get("option", None)
+        if option is None:
+            return jsonify({"ok": False, "error": "option not writable"}), 400
+
+        min_v = option_info.get("min")
+        max_v = option_info.get("max")
+        if min_v is not None and value_int < int(min_v):
+            return jsonify({"ok": False, "error": f"value must be >= {min_v}"}), 400
+        if max_v is not None and value_int > int(max_v):
+            return jsonify({"ok": False, "error": f"value must be <= {max_v}"}), 400
+
+        _ensure_transport_hooked()
+
+        def do_special_config():
+            _task_update(meta={"mac": mac_str, "key": key, "message": f"Sending {key} (0x{int(option):02X})"})
+            ok = gc_instance.sendConfig(
+                option=int(option) & 0xFF,
+                data0=value_int,
+                recv3=recv3,
+                wait_for_ack=True,
+                timeout_s=6.0,
+            )
+            if not ok:
+                raise RuntimeError(f"ACK timeout for option 0x{int(option):02X}")
+
+            with _gc_lock:
+                dev = gc_instance.getDeviceFromAddress(mac_str)
+                if not dev:
+                    raise RuntimeError("device not found")
+                if not hasattr(dev, "specials") or dev.specials is None:
+                    dev.specials = {}
+                dev.specials[key] = int(value_int) & 0xFF
+                try:
+                    gc_instance.save_to_db({"manual": True})
+                except Exception:
+                    pass
+
+            return {"mac": mac_str, "key": key, "value": value_int}
+
+        meta = {"mac": mac_str, "key": key, "message": "Preparing special config"}
+        t = _start_task("special_config", do_special_config, meta=meta)
+        if not t:
+            return _task_busy_response()
+        return jsonify({"ok": True, "task": t})
+
+    @bp.route("/gatecontrol/api/specials/action", methods=["POST"])
+    def api_specials_action():
+        if _task_is_running():
+            return _task_busy_response()
+
+        body = request.get_json(silent=True) or {}
+        mac = body.get("mac", None)
+        fn_key = body.get("function", None) or body.get("fn", None)
+        params = body.get("params", None) or {}
+        if not mac or not fn_key:
+            return jsonify({"ok": False, "error": "missing mac/function"}), 400
+
+        recv3 = _parse_recv3_from_addr(mac)
+        if not recv3:
+            return jsonify({"ok": False, "error": "invalid mac/address"}), 400
+        if recv3 == b"\xFF\xFF\xFF":
+            return jsonify({"ok": False, "error": "broadcast not allowed for action"}), 400
+
+        mac_str = str(mac).upper()
+        with _gc_lock:
+            dev = gc_instance.getDeviceFromAddress(mac_str)
+            if not dev:
+                return jsonify({"ok": False, "error": "device not found"}), 404
+            dev_caps = set(get_dev_type_info(getattr(dev, "dev_type", 0)).get("caps", []))
+            specials = get_specials_config(context={"gc_instance": gc_instance})
+            fn_info = None
+            cap_key = None
+            options_by_key = {}
+            for cap in dev_caps:
+                spec = specials.get(cap, {})
+                for opt in spec.get("options", []):
+                    key = opt.get("key")
+                    if key:
+                        options_by_key[key] = opt
+                for fn in spec.get("functions", []):
+                    if fn.get("key") == fn_key:
+                        fn_info = fn
+                        cap_key = cap
+                        break
+                if fn_info:
+                    break
+
+        if not fn_info:
+            return jsonify({"ok": False, "error": "function not supported for device"}), 400
+        if not fn_info.get("unicast", False):
+            return jsonify({"ok": False, "error": "function does not support unicast"}), 400
+
+        comm_name = fn_info.get("comm")
+        if not comm_name:
+            return jsonify({"ok": False, "error": "missing comm handler"}), 400
+        comm_fn = getattr(gc_instance, comm_name, None)
+        if not callable(comm_fn):
+            return jsonify({"ok": False, "error": "comm handler not found"}), 400
+
+        vars_list = fn_info.get("vars", []) or []
+        params_coerced = {}
+        for var in vars_list:
+            raw_val = params.get(var, None)
+            if raw_val is None:
+                raw_val = options_by_key.get(var, {}).get("min", 0)
+            try:
+                value_int = int(raw_val)
+            except Exception:
+                return jsonify({"ok": False, "error": f"invalid value for {var}"}), 400
+            opt_meta = options_by_key.get(var, {})
+            min_v = opt_meta.get("min")
+            max_v = opt_meta.get("max")
+            if min_v is not None and value_int < int(min_v):
+                return jsonify({"ok": False, "error": f"{var} must be >= {min_v}"}), 400
+            if max_v is not None and value_int > int(max_v):
+                return jsonify({"ok": False, "error": f"{var} must be <= {max_v}"}), 400
+            params_coerced[var] = value_int
+
+        _ensure_transport_hooked()
+
+        with _gc_lock:
+            dev = gc_instance.getDeviceFromAddress(mac_str)
+        if not dev:
+            return jsonify({"ok": False, "error": "device not found"}), 404
+
+        res = comm_fn(targetDevice=dev, targetGroup=None, params=params_coerced)
+        if res is False:
+            return jsonify({"ok": False, "error": "action failed"}), 500
+
+        _set_master(state="TX", tx_pending=True, last_event="SPECIAL_SENT")
+        return jsonify({"ok": True, "result": res, "function": fn_key, "params": params_coerced})
+
+    @bp.route("/gatecontrol/api/specials/get", methods=["POST"])
+    def api_specials_get():
+        return jsonify({"ok": False, "error": "not implemented"}), 501
 
     @bp.route("/gatecontrol/api/devices/control", methods=["POST"])
     def api_devices_control():
@@ -852,11 +1115,92 @@ def register_gc_blueprint(
 
     _upload_lock = _DefaultLock()
     _uploads = {}  # id -> {id, kind, path, name, size, sha256, uploaded_ts}
+    _presets_option_key = "esp_gc_wled_presets_file"
+
+    def _presets_dir() -> str:
+        d = os.path.join(os.path.expanduser("~"), ".gatecontrol_lora", "presets")
+        os.makedirs(d, exist_ok=True)
+        return d
+
+    def _preset_filename(ts: Optional[float] = None) -> str:
+        dt = datetime.fromtimestamp(ts or time.time())
+        return dt.strftime("presets_%Y%m%d_%H%M%S.json")
+
+    def _preset_path_for_name(name: str) -> Optional[str]:
+        base = os.path.basename(name or "")
+        if not base:
+            return None
+        path = os.path.join(_presets_dir(), base)
+        if not os.path.isfile(path):
+            return None
+        return path
+
+    def _preset_file_info(path: str, name: Optional[str] = None) -> dict:
+        if not name:
+            name = os.path.basename(path)
+        st = os.stat(path)
+        return {
+            "name": name,
+            "size": int(st.st_size),
+            "sha256": _sha256_file(path),
+            "saved_ts": float(st.st_mtime),
+            "path": path,
+        }
+
+    def _list_preset_files() -> List[dict]:
+        rows: List[dict] = []
+        try:
+            for name in os.listdir(_presets_dir()):
+                if name.startswith(".") or not name.endswith(".json"):
+                    continue
+                path = os.path.join(_presets_dir(), name)
+                if not os.path.isfile(path):
+                    continue
+                st = os.stat(path)
+                rows.append({
+                    "name": name,
+                    "size": int(st.st_size),
+                    "saved_ts": float(st.st_mtime),
+                })
+        except Exception:
+            return []
+        rows.sort(key=lambda r: r.get("saved_ts", 0), reverse=True)
+        return rows
+
+    def _get_current_preset_name() -> str:
+        try:
+            return str(rhapi.db.option(_presets_option_key, "") or "")
+        except Exception:
+            return ""
+
+    def _set_current_preset_name(name: str) -> None:
+        try:
+            rhapi.db.option_set(_presets_option_key, name or "")
+        except Exception:
+            pass
 
     def _uploads_dir() -> str:
         d = os.path.join(tempfile.gettempdir(), "gatecontrol_lora_uploads")
         os.makedirs(d, exist_ok=True)
         return d
+
+    def _wifi_interfaces() -> List[str]:
+        base = "/sys/class/net"
+        ifaces: List[str] = []
+        try:
+            for name in os.listdir(base):
+                if name.startswith("."):
+                    continue
+                if os.path.isdir(os.path.join(base, name, "wireless")):
+                    ifaces.append(name)
+        except Exception:
+            ifaces = []
+        if not ifaces:
+            try:
+                ifaces = [name for name in os.listdir(base) if not name.startswith(".")]
+            except Exception:
+                ifaces = []
+        return sorted(set(ifaces))
 
     def _sha256_file(path: str) -> str:
         h = hashlib.sha256()
@@ -864,6 +1208,75 @@ def register_gc_blueprint(
             for chunk in iter(lambda: f.read(1024 * 256), b""):
                 h.update(chunk)
         return h.hexdigest()
+
+    def _parse_wled_presets_minimal(presets: Union[str, bytes, Dict[str, Any]]) -> List[Tuple[int, str]]:
+        if isinstance(presets, (str, bytes)):
+            data = json.loads(presets)
+        elif isinstance(presets, dict):
+            data = presets
+        else:
+            raise TypeError("presets must be dict, str, or bytes")
+
+        out: List[Tuple[int, str]] = []
+        for key, preset_obj in data.items():
+            try:
+                preset_id = int(key)
+            except (TypeError, ValueError):
+                continue
+            if preset_id == 0:
+                continue
+
+            if not isinstance(preset_obj, dict):
+                continue
+
+            raw_name = preset_obj.get("n", "")
+            name = raw_name.strip() if isinstance(raw_name, str) else ""
+            if not name:
+                name = f"Preset ID {preset_id}"
+            out.append((preset_id, name))
+
+        out.sort(key=lambda t: t[0])
+        return out
+
+    def _apply_presets_options(parsed: List[Tuple[int, str]]) -> None:
+        if not parsed:
+            gc_instance.uiEffectList = [UIFieldSelectOption("0", "No presets.json found")]
+        else:
+            gc_instance.uiEffectList = [UIFieldSelectOption(str(pid), name) for pid, name in parsed]
+        try:
+            gc_instance.register_quickset_ui()
+            gc_instance.registerActions()
+            gc_instance._rhapi.ui.broadcast_ui("run")
+        except Exception:
+            pass
+
+    def _apply_presets_from_path(path: str) -> bool:
+        try:
+            with open(path, "rb") as fh:
+                payload = fh.read()
+            parsed = _parse_wled_presets_minimal(payload or b"{}")
+            _apply_presets_options(parsed)
+            return True
+        except Exception:
+            return False
+
+    def _ensure_presets_loaded() -> None:
+        files = _list_preset_files()
+        if not files:
+            _apply_presets_options([])
+            _set_current_preset_name("")
+            return
+        current = _get_current_preset_name()
+        if current:
+            current_path = _preset_path_for_name(current)
+            if current_path and _apply_presets_from_path(current_path):
+                return
+        current = files[0]["name"]
+        path = _preset_path_for_name(current)
+        if path and _apply_presets_from_path(path):
+            _set_current_preset_name(current)
+            return
+        _apply_presets_options([])
 
     def _store_upload(file_storage, kind: str) -> dict:
         # kind: firmware | presets | cfg
@@ -1161,6 +1574,14 @@ def register_gc_blueprint(
             raw = r.read()
         return json.loads(raw.decode("utf-8", errors="replace") or "{}")
 
+    def _http_get_bytes(url: str, timeout_s: float = 10.0) -> bytes:
+        import urllib.request
+        import urllib.error
+
+        req = urllib.request.Request(url, method="GET", headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=timeout_s) as r:
+            return r.read()
+
     def _http_post_json(url: str, payload: dict, timeout_s: float = 6.0) -> dict:
         import urllib.request
         import urllib.error
@@ -1182,12 +1603,18 @@ def register_gc_blueprint(
         except Exception:
             return {}
 
-    def _http_post_multipart_file(url: str, field_name: str, file_path: str, timeout_s: float = 90.0) -> int:
+    def _http_post_multipart_file(
+        url: str,
+        field_name: str,
+        file_path: str,
+        timeout_s: float = 90.0,
+        filename_override: Optional[str] = None,
+    ) -> int:
         import urllib.request
         import urllib.error
 
         boundary = "----gc" + uuid.uuid4().hex
-        filename = os.path.basename(file_path)
+        filename = filename_override or os.path.basename(file_path)
         with open(file_path, "rb") as f:
             content = f.read()
 
@@ -1256,9 +1683,15 @@ def register_gc_blueprint(
                 raise RuntimeError("HTTP 401 from /update (Unauthorized). Likely WLED OTA lock is enabled. Disable OTA lock in WLED: Settings → Security & Updates → OTA locked (enter passphrase, Save, Reboot).")
             raise RuntimeError(f"HTTP {status} from /update")
 
-    def _wled_upload_file(base_url: str, file_path: str, timeout_s: float = 45.0) -> None:
+    def _wled_upload_file(base_url: str, file_path: str, timeout_s: float = 45.0, dest_name: Optional[str] = None) -> None:
         # WLED exposes filesystem upload endpoint: POST /upload with multipart field name "data"
-        status = _http_post_multipart_file(f"{base_url}/upload", "data", file_path, timeout_s=timeout_s)
+        status = _http_post_multipart_file(
+            f"{base_url}/upload",
+            "data",
+            file_path,
+            timeout_s=timeout_s,
+            filename_override=dest_name,
+        )
         if status >= 400:
             if status == 401:
                 raise RuntimeError("HTTP 401 from /upload (Unauthorized). Likely WLED OTA lock is enabled. Disable OTA lock in WLED: Settings → Security & Updates → OTA locked (enter passphrase, Save, Reboot).")
@@ -1267,6 +1700,37 @@ def register_gc_blueprint(
     def _wled_reboot(base_url: str, timeout_s: float = 6.0) -> None:
         # JSON API supports immediate reboot via {"rb":true} on /json/state 
         _http_post_json(f"{base_url}/json/state", {"rb": True}, timeout_s=timeout_s)
+
+    def _wled_download_presets(base_url: str, timeout_s: float = 10.0) -> bytes:
+        payload = _http_get_bytes(f"{base_url}/presets.json", timeout_s=timeout_s)
+        if not payload:
+            raise RuntimeError("Empty presets.json response")
+        try:
+            json.loads(payload.decode("utf-8", errors="replace") or "{}")
+        except Exception as ex:
+            raise RuntimeError(f"Invalid presets.json payload: {ex}")
+        return payload
+
+    def _save_presets_payload(payload: bytes) -> dict:
+        ts = time.time()
+        name = _preset_filename(ts)
+        dst = os.path.join(_presets_dir(), name)
+        if os.path.exists(dst):
+            for i in range(1, 100):
+                alt = name.replace(".json", f"_{i}.json")
+                dst = os.path.join(_presets_dir(), alt)
+                if not os.path.exists(dst):
+                    name = alt
+                    break
+        with open(dst, "wb") as f:
+            f.write(payload)
+        os.utime(dst, (ts, ts))
+        return {
+            "name": name,
+            "size": int(os.path.getsize(dst)),
+            "saved_ts": ts,
+            "path": dst,
+        }
 
     @bp.route("/gatecontrol/api/fw/upload", methods=["POST"])
     def api_fw_upload():
@@ -1282,6 +1746,215 @@ def register_gc_blueprint(
         except Exception as ex:
             return jsonify({"ok": False, "error": str(ex)}), 400
 
+    @bp.route("/gatecontrol/api/presets/upload", methods=["POST"])
+    def api_presets_upload():
+        if _task_is_running():
+            return _task_busy_response()
+
+        f = request.files.get("file", None)
+        try:
+            if not f or not getattr(f, "filename", ""):
+                raise ValueError("missing file")
+            ts = time.time()
+            name = _preset_filename(ts)
+            dst = os.path.join(_presets_dir(), name)
+            if os.path.exists(dst):
+                for i in range(1, 100):
+                    alt = name.replace(".json", f"_{i}.json")
+                    dst = os.path.join(_presets_dir(), alt)
+                    if not os.path.exists(dst):
+                        name = alt
+                        break
+            f.save(dst)
+            info = {
+                "name": name,
+                "size": int(os.path.getsize(dst)),
+                "saved_ts": ts,
+            }
+            return jsonify({
+                "ok": True,
+                "file": info,
+                "files": _list_preset_files(),
+            })
+        except Exception as ex:
+            return jsonify({"ok": False, "error": str(ex)}), 400
+
+    @bp.route("/gatecontrol/api/presets/download", methods=["POST"])
+    def api_presets_download():
+        _ensure_transport_hooked()
+        if _task_is_running():
+            return _task_busy_response()
+
+        body = request.get_json(silent=True) or {}
+        mac = str(body.get("mac") or "").strip()
+        if not mac:
+            return jsonify({"ok": False, "error": "missing mac"}), 400
+
+        base_url = _wled_base_url(body.get("baseUrl") or "")
+
+        wifi = body.get("wifi") or {}
+        wifi_ssid = str(wifi.get("ssid") or body.get("wifiSsid") or "WLED-AP")
+        wifi_iface = str(wifi.get("iface") or body.get("wifiIface") or "wlan0")
+        wifi_conn_name = str(wifi.get("connName") or body.get("wifiConnName") or "gatecontrol-wled-ap")
+        wifi_bssid = str(wifi.get("bssid") or body.get("wifiBssid") or "")
+        wifi_timeout_s = float(wifi.get("timeoutS") or body.get("wifiTimeoutS") or 35.0)
+
+        host_wifi_enable = bool(wifi.get("hostWifiEnable") if "hostWifiEnable" in wifi else body.get("hostWifiEnable", True))
+        host_wifi_restore = bool(wifi.get("hostWifiRestore") if "hostWifiRestore" in wifi else body.get("hostWifiRestore", True))
+
+        expected_mac = _expected_mac_hex(mac)
+        if not expected_mac:
+            return jsonify({"ok": False, "error": "invalid mac"}), 400
+
+        def do_presets_download():
+            results = {
+                "ok": True,
+                "baseUrl": base_url,
+                "addr": mac,
+                "file": None,
+                "errors": [],
+            }
+
+            host_wifi_initial = _host_wifi_radio_enabled()
+            host_wifi_changed = False
+            results["hostWifi"] = {"wasEnabled": host_wifi_initial, "enabled": host_wifi_initial, "restored": False}
+
+            steps = []
+            if host_wifi_enable and not host_wifi_initial:
+                steps.append("HOST_WIFI_ON")
+            steps += ["LORA_AP_ON", "CONNECT_WIFI", "WAIT_HTTP", "DOWNLOAD_PRESETS", "LORA_AP_OFF"]
+            if host_wifi_restore and (host_wifi_initial is False):
+                steps.append("HOST_WIFI_RESTORE")
+            total_steps = len(steps)
+            step_order = {stage: idx for idx, stage in enumerate(steps, start=1)}
+
+            def _step(stage: str, message: str) -> None:
+                step_num = step_order.get(stage)
+                if not step_num:
+                    return
+                _task_update(meta={
+                    "stage": stage,
+                    "step": step_num,
+                    "steps": total_steps,
+                    "addr": mac,
+                    "message": message,
+                })
+
+            try:
+                if host_wifi_enable and not host_wifi_initial:
+                    _step("HOST_WIFI_ON", "Enabling host WiFi radio…")
+                    _host_wifi_set_radio(True)
+                    host_wifi_changed = True
+                    _host_wifi_wait_iface_ready(wifi_iface, timeout_s=15.0)
+                    results["hostWifi"]["enabled"] = True
+
+                _step("LORA_AP_ON", "Enable WLED AP via LoRa (waiting for ACK)")
+                recv3 = _recv3_bytes_from_addr(mac)
+                ok_ap = gc_instance.sendConfig(0x04, data0=1, recv3=recv3, wait_for_ack=True, timeout_s=8.0)
+                if not ok_ap:
+                    raise RuntimeError(f"Timeout waiting for CONFIG ACK from {mac}")
+
+                _step("CONNECT_WIFI", f'Connecting host WiFi via profile "{wifi_conn_name}" (iface {wifi_iface}) to SSID "{wifi_ssid}"')
+                try:
+                    _wifi_connect_host_profile(
+                        wifi_conn_name,
+                        wifi_ssid,
+                        iface=wifi_iface,
+                        bssid=wifi_bssid,
+                        timeout_s=wifi_timeout_s
+                    )
+                except Exception as ex1:
+                    msg1 = str(ex1)
+                    if host_wifi_enable and (not host_wifi_changed) and ("Wi-Fi is disabled" in msg1 or "wireless is disabled" in msg1.lower()):
+                        _step("HOST_WIFI_ON", f"Host WiFi appears disabled; enabling on {wifi_iface}…")
+                        _host_wifi_set_radio(True)
+                        host_wifi_changed = True
+                        results["hostWifi"]["enabled"] = True
+                        _host_wifi_wait_iface_ready(wifi_iface, timeout_s=15.0)
+                        _wifi_connect_host_profile(
+                            wifi_conn_name,
+                            wifi_ssid,
+                            iface=wifi_iface,
+                            bssid=wifi_bssid,
+                            timeout_s=wifi_timeout_s
+                        )
+                    else:
+                        raise
+
+                _step("WAIT_HTTP", f"Waiting for WLED /json/info mac to match {expected_mac}")
+                info = _wait_for_expected_node(base_url, expected_mac, timeout_s=90.0, poll_s=1.0)
+                if not info:
+                    raise RuntimeError(f"Timeout waiting for node (baseUrl={base_url}) to report expected mac {expected_mac}")
+
+                _step("DOWNLOAD_PRESETS", "Downloading presets.json")
+                payload = _wled_download_presets(base_url, timeout_s=15.0)
+                saved = _save_presets_payload(payload)
+                results["file"] = {k: saved[k] for k in ("name", "size", "saved_ts")}
+
+                _step("LORA_AP_OFF", "Disable WLED AP via LoRa")
+                try:
+                    recv3 = _recv3_bytes_from_addr(mac)
+                    gc_instance.sendConfig(0x04, data0=0, recv3=recv3, wait_for_ack=True, timeout_s=6.0)
+                except Exception:
+                    pass
+
+                results["files"] = _list_preset_files()
+            except Exception as ex:
+                results["ok"] = False
+                results["errors"].append(str(ex))
+            finally:
+                if host_wifi_restore and (host_wifi_initial is False) and _host_wifi_radio_enabled():
+                    try:
+                        _step("HOST_WIFI_RESTORE", "Restoring host WiFi radio (off)…")
+                        try:
+                            _wifi_profile_down(wifi_conn_name, timeout_s=10.0)
+                        except Exception:
+                            pass
+                        _host_wifi_set_radio(False)
+                        results["hostWifi"]["enabled"] = False
+                        results["hostWifi"]["restored"] = True
+                    except Exception as ex2:
+                        results["errors"].append(f"Host WiFi restore failed: {ex2}")
+                        results["ok"] = False
+
+            return results
+
+        t = _start_task("presets_download", do_presets_download, meta={
+            "stage": "INIT",
+            "step": 0,
+            "steps": 1,
+            "addr": mac,
+            "message": "Preset download started",
+            "baseUrl": base_url,
+        })
+        if not t:
+            return _task_busy_response()
+        return jsonify({"ok": True, "task": t})
+
+    @bp.route("/gatecontrol/api/presets/list", methods=["GET"])
+    def api_presets_list():
+        files = _list_preset_files()
+        current = _get_current_preset_name()
+        if current and not _preset_path_for_name(current):
+            current = ""
+        if not current and files:
+            current = files[0]["name"]
+        return jsonify({"ok": True, "files": files, "current": current})
+
+    @bp.route("/gatecontrol/api/presets/select", methods=["POST"])
+    def api_presets_select():
+        if _task_is_running():
+            return _task_busy_response()
+        body = request.get_json(silent=True) or {}
+        name = str(body.get("name") or "").strip()
+        path = _preset_path_for_name(name)
+        if not path:
+            return jsonify({"ok": False, "error": "presets file not found"}), 404
+        if not _apply_presets_from_path(path):
+            return jsonify({"ok": False, "error": "failed to parse presets.json"}), 400
+        _set_current_preset_name(name)
+        return jsonify({"ok": True, "current": name})
+
     @bp.route("/gatecontrol/api/fw/uploads", methods=["GET"])
     def api_fw_uploads():
         with _upload_lock:
@@ -1292,6 +1965,11 @@ def register_gc_blueprint(
             ]
         rows.sort(key=lambda r: r.get("uploaded_ts", 0), reverse=True)
         return jsonify({"ok": True, "files": rows})
+
+    @bp.route("/gatecontrol/api/wifi/interfaces", methods=["GET"])
+    def api_wifi_interfaces():
+        ifaces = _wifi_interfaces()
+        return jsonify({"ok": True, "ifaces": ifaces})
 
     @bp.route("/gatecontrol/api/fw/start", methods=["POST"])
     def api_fw_start():
@@ -1304,15 +1982,33 @@ def register_gc_blueprint(
         if not isinstance(macs, list) or not macs:
             return jsonify({"ok": False, "error": "missing macs"}), 400
 
-        fw_id = str(body.get("fwId") or "").strip()
-        fw_info = _get_upload(fw_id, expect_kind="firmware")
-        if not fw_info:
-            return jsonify({"ok": False, "error": "firmware file not uploaded (fwId)"}), 400
+        do_firmware = bool(body.get("doFirmware", True))
+        do_presets = bool(body.get("doPresets", False))
+        do_cfg = bool(body.get("doCfg", False))
 
-        presets_id = str(body.get("presetsId") or "").strip()
-        cfg_id = str(body.get("cfgId") or "").strip()
-        presets_info = _get_upload(presets_id, expect_kind="presets") if presets_id else None
-        cfg_info = _get_upload(cfg_id, expect_kind="cfg") if cfg_id else None
+        if not (do_firmware or do_presets or do_cfg):
+            return jsonify({"ok": False, "error": "no operations selected"}), 400
+
+        fw_info = None
+        if do_firmware:
+            fw_id = str(body.get("fwId") or "").strip()
+            fw_info = _get_upload(fw_id, expect_kind="firmware")
+            if not fw_info:
+                return jsonify({"ok": False, "error": "firmware file not uploaded (fwId)"}), 400
+
+        presets_info = None
+        cfg_info = None
+        if do_presets:
+            presets_name = str(body.get("presetsName") or "").strip()
+            presets_path = _preset_path_for_name(presets_name) if presets_name else None
+            if not presets_path:
+                return jsonify({"ok": False, "error": "presets file not found"}), 400
+            presets_info = _preset_file_info(presets_path, name=presets_name)
+        if do_cfg:
+            cfg_id = str(body.get("cfgId") or "").strip()
+            cfg_info = _get_upload(cfg_id, expect_kind="cfg") if cfg_id else None
+            if not cfg_info:
+                return jsonify({"ok": False, "error": "cfg file not uploaded (cfgId)"}), 400
 
         try:
             retries = int(body.get("retries") or 3)
@@ -1341,8 +2037,8 @@ def register_gc_blueprint(
             results = {
                 "ok": True,
                 "baseUrl": base_url,
-                "fw": {k: fw_info[k] for k in ("id", "name", "size", "sha256")},
-                "presets": ({k: presets_info[k] for k in ("id", "name", "size", "sha256")} if presets_info else None),
+                "fw": ({k: fw_info[k] for k in ("id", "name", "size", "sha256")} if fw_info else None),
+                "presets": ({k: presets_info[k] for k in ("name", "size", "sha256")} if presets_info else None),
                 "cfg": ({k: cfg_info[k] for k in ("id", "name", "size", "sha256")} if cfg_info else None),
                 "devices": [],
                 "errors": [],
@@ -1398,7 +2094,7 @@ def register_gc_blueprint(
                     })
                     try:
                         recv3 = _recv3_bytes_from_addr(str(addr))
-                        gc_instance.sendConfig(0x04, 1, recv3)
+                        gc_instance.sendConfig(0x04, data0=1, recv3=recv3)
                     except Exception as ex:
                         dev_res["error"] = f"LoRa AP enable failed: {ex}"
                         results["errors"].append(dev_res["error"])
@@ -1480,7 +2176,7 @@ def register_gc_blueprint(
                         continue
                     dev_res["info_before"] = {k: info.get(k) for k in ("mac", "ver", "arch", "name")}
 
-                    # 4) Optional: upload presets/cfg files to filesystem BEFORE firmware (firmware update will reboot the device).
+                    # 4) Optional: upload presets/cfg files to filesystem.
                     try:
                         if presets_info:
                             _task_update(meta={
@@ -1492,7 +2188,7 @@ def register_gc_blueprint(
                                 "retries": retries,
                                 "message": "Uploading presets.json",
                             })
-                            _wled_upload_file(base_url, presets_info["path"], timeout_s=45.0)
+                            _wled_upload_file(base_url, presets_info["path"], timeout_s=45.0, dest_name="presets.json")
                         if cfg_info:
                             _task_update(meta={
                                 "stage": "UPLOAD_CFG",
@@ -1503,13 +2199,31 @@ def register_gc_blueprint(
                                 "retries": retries,
                                 "message": "Uploading cfg.json",
                             })
-                            _wled_upload_file(base_url, cfg_info["path"], timeout_s=45.0)
+                            _wled_upload_file(base_url, cfg_info["path"], timeout_s=45.0, dest_name="cfg.json")
                     except Exception as ex:
                         dev_res["error"] = f"Config upload failed: {ex}"
                         results["errors"].append(dev_res["error"])
                         if stop_on_error:
                             raise RuntimeError(dev_res["error"])
                         # keep going to firmware update even if optional config failed
+
+                    if not fw_info:
+                        dev_res["ok"] = True
+                        _task_update(meta={
+                            "stage": "LORA_AP_OFF",
+                            "index": idx,
+                            "total": total,
+                            "addr": addr,
+                            "attempt": 0,
+                            "retries": retries,
+                            "message": "Disable WLED AP via LoRa after upload",
+                        })
+                        try:
+                            recv3 = _recv3_bytes_from_addr(str(addr))
+                            gc_instance.sendConfig(0x04, data0=0, recv3=recv3)
+                        except Exception:
+                            pass
+                        continue
 
                     # 5) Firmware upload with retries (WLED reboots automatically after successful OTA)
                     ok = False
@@ -1525,7 +2239,7 @@ def register_gc_blueprint(
                             "message": f"Uploading firmware (try {attempt}/{retries})",
                         })
                         try:
-                            _wled_upload_firmware(base_url, fw_info["path"], timeout_s=180.0)
+                            _wled_upload_firmware(base_url, fw_info["path"], timeout_s=30.0)
                             ok = True
                             break
                         except Exception as ex:
@@ -1599,7 +2313,7 @@ def register_gc_blueprint(
                     })
                     try:
                         recv3 = _recv3_bytes_from_addr(str(addr))
-                        gc_instance.sendConfig(0x04, 1, recv3)
+                        gc_instance.sendConfig(0x04, data0=1, recv3=recv3)
                     except Exception:
                         # best-effort; even if this fails, the HTTP wait below will time out
                         pass
@@ -1678,7 +2392,7 @@ def register_gc_blueprint(
                             "message": "Disable WLED AP via LoRa (best-effort)",
                         })
                         recv3 = _recv3_bytes_from_addr(str(addr))
-                        gc_instance.sendConfig(0x04, 0, recv3)
+                        gc_instance.sendConfig(0x04, data0=0, recv3=recv3)
                     except Exception:
                         pass
 
@@ -1725,5 +2439,6 @@ def register_gc_blueprint(
 
 
 # Finally register blueprint
+    _ensure_presets_loaded()
     rhapi.ui.blueprint_add(bp)
     _log("GateControl UI blueprint registered at /gatecontrol")
