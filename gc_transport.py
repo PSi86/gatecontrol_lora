@@ -322,11 +322,9 @@ class LoRaUSB:
         self._send_m2n(LP.make_type(LP.DIR_M2N, LP.OPC_SYNC), recv3, body)
 
     def send_stream(self, recv3:bytes, ctrl:int, data:bytes):
-        """Send STREAM_M2N (9B): ctrl byte + 8 data bytes."""
+        """Send STREAM_M2N: ctrl byte + data payload (variable length)."""
         if not isinstance(data, (bytes, bytearray)):
             raise ValueError("data must be bytes")
-        if len(data) != 8:
-            raise ValueError("data must be exactly 8 bytes")
         body = struct.pack("<B", int(ctrl) & 0xFF) + bytes(data)
         self._send_m2n(LP.make_type(LP.DIR_M2N, LP.OPC_STREAM), recv3, body)
 
