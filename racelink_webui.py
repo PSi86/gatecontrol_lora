@@ -19,8 +19,7 @@ Usage in your plugin's __init__.py:
         register_rl_blueprint(
             rhapi,
             rl_instance=rl_instance,
-            rl_devicelist=rl_devicelist,
-            rl_grouplist=rl_grouplist,
+            state=rl_state,
             RL_DeviceGroup=RL_DeviceGroup,
             logger=logger
         )
@@ -77,8 +76,7 @@ def register_rl_blueprint(
     rhapi,
     *,
     rl_instance,
-    rl_devicelist,
-    rl_grouplist,
+    state,
     RL_DeviceGroup,
     logger=None
 ):
@@ -119,6 +117,11 @@ def register_rl_blueprint(
     # --- Task state (one at a time) ---
     _task = None  # dict or None
     _task_seq = 0
+
+    # Shared state (explicit injection; keep local aliases for compatibility).
+    rl_devicelist = state.devices
+    rl_grouplist = state.groups
+
 
     # --- SSE clients ---
     _clients = set()  # set[Queue]
@@ -618,6 +621,7 @@ def register_rl_blueprint(
             if new_group_name:
                 g = RL_DeviceGroup(str(new_group_name), static_group=0, dev_type=0)
                 rl_grouplist.append(g)
+                state.update_group_cache()
                 created_gid = len(rl_grouplist) - 1
                 _log(f"RaceLink: Created group '{new_group_name}' (id={created_gid})")
             if target_gid is None and created_gid is not None:
@@ -717,6 +721,7 @@ def register_rl_blueprint(
             return jsonify({"ok": False, "error": "name required"}), 400
         with _rl_lock:
             rl_grouplist.append(RL_DeviceGroup(name, static_group=0, dev_type=dev_type))
+            state.update_group_cache()
             gid = len(rl_grouplist) - 1
             try:
                 rl_instance.save_to_db({"manual": True})
@@ -758,6 +763,7 @@ def register_rl_blueprint(
                 if int(getattr(d, "groupId", -1)) == gid:
                     return jsonify({"ok": False, "error": "group not empty"}), 400
             del rl_grouplist[gid]
+            state.update_group_cache()
             try:
                 rl_instance.save_to_db({"manual": True})
             except Exception:

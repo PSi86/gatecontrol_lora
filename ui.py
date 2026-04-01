@@ -15,8 +15,6 @@ from .data import (
     RL_FLAG_POWER_ON,
     get_dev_type_info,
     get_specials_config,
-    rl_devicelist,
-    rl_grouplist,
 )
 
 logger = logging.getLogger(__name__)
@@ -98,7 +96,7 @@ class RaceLinkUIMixin:
     def createUiDevList(self):
         logger.debug("RL: Creating UI Device Select Options")
         temp_ui_devlist = []
-        for device in rl_devicelist:
+        for device in self.state.devices:
             temp_ui_devlist.append(UIFieldSelectOption(device.addr, device.name))
         return temp_ui_devlist
 
@@ -122,7 +120,7 @@ class RaceLinkUIMixin:
                     return False
             return True
 
-        selected_devs = [dev for dev in rl_devicelist if _matches_device(dev)]
+        selected_devs = [dev for dev in self.state.devices if _matches_device(dev)]
         output = {"devices": [], "groups": []}
 
         if outputDevices:
@@ -131,7 +129,15 @@ class RaceLinkUIMixin:
         if outputGroups:
             group_ids = {int(getattr(dev, "groupId", 0) or 0) for dev in selected_devs}
             temp_groups = []
-            for i, group in enumerate(rl_grouplist):
+            capability_groups = None
+            if cap_set and len(cap_set) == 1:
+                cap = next(iter(cap_set))
+                capability_groups = set(self.state.groups_for_capability(cap))
+            for i, group in enumerate(self.state.groups):
+                if capability_groups is not None and group not in capability_groups and not (
+                    group.static_group and str(getattr(group, "name", "")) == "All WLED Nodes"
+                ):
+                    continue
                 if group.static_group and str(getattr(group, "name", "")) == "All WLED Nodes":
                     if cap_set and "WLED" not in cap_set:
                         continue
@@ -147,7 +153,7 @@ class RaceLinkUIMixin:
     def createUiGroupList(self, exclude_static=False):
         logger.debug("RL: Creating UI Device Select Options")
         temp_ui_grouplist = []
-        for i, group in enumerate(rl_grouplist):
+        for i, group in enumerate(self.state.groups):
             if exclude_static is False or (exclude_static is True and group.static_group == 0):
                 if group.static_group and str(getattr(group, "name", "")) == "All WLED Nodes":
                     value = 255
@@ -467,12 +473,13 @@ class RaceLinkUIMixin:
                 new_group_str = "New Group"
 
             new_group_str += " " + datetime.now().strftime("%Y%m%d_%H%M%S")
-            group_selected = len(rl_grouplist)
+            group_selected = len(self.state.groups)
 
         num_found = self.getDevices(groupFilter=0, addToGroup=group_selected)
 
-        if num_found > 0 and group_selected == len(rl_grouplist):
-            rl_grouplist.append(RL_DeviceGroup(new_group_str))
+        if num_found > 0 and group_selected == len(self.state.groups):
+            self.state.groups.append(RL_DeviceGroup(new_group_str))
+            self.state.update_group_cache()
             self.uiGroupList = self.createUiGroupList()
             self.uiDiscoveryGroupList = self.createUiGroupList(True)
             self.register_settings()
@@ -495,8 +502,8 @@ class RaceLinkUIMixin:
         payload = {}
         payload["help"] = ["See help tags below current configuration elements"]
 
-        payload["rl_devices"] = [obj.__dict__ for obj in rl_devicelist]
-        payload["rl_groups"] = [obj.__dict__ for obj in rl_grouplist]
+        payload["rl_devices"] = [obj.__dict__ for obj in self.state.devices]
+        payload["rl_groups"] = [obj.__dict__ for obj in self.state.groups]
 
         payload["help/rl_devices"] = ["Device List of known devices"]
         payload["help/rl_devices/addr"] = ["MAC of the device without ':' as separator"]

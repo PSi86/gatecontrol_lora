@@ -20,8 +20,7 @@ from .data import (
     RL_FLAG_POWER_ON,
     rl_backup_devicelist,
     rl_backup_grouplist,
-    rl_devicelist,
-    rl_grouplist,
+    rl_state,
 )
 
 # ---- lora proto registry (auto-generated from lora_proto.h) ----
@@ -123,11 +122,12 @@ def build_startblock_payload_v1(
 
 
 class RaceLink_LoRa(RaceLinkUIMixin):
-    def __init__(self, rhapi, name, label):
+    def __init__(self, rhapi, name, label, state=None):
         self._rhapi = rhapi
         self.name = name
         self.label = label
         self.lora = None
+        self.state = state or rl_state
         self.ready = False
         self.action_reg_fn = None
         self.deviceCfgValid = False
@@ -168,11 +168,11 @@ class RaceLink_LoRa(RaceLinkUIMixin):
 
     def save_to_db(self, args):
         logger.debug("RL: Writing current states to Database")
-        config_str_devices = str([obj.__dict__ for obj in rl_devicelist])
+        config_str_devices = str([obj.__dict__ for obj in self.state.devices])
         self._rhapi.db.option_set("rl_device_config", config_str_devices)
 
-        if len(rl_grouplist) >= len(rl_backup_grouplist):
-            config_str_groups = str([obj.__dict__ for obj in rl_grouplist])
+        if len(self.state.groups) >= len(rl_backup_grouplist):
+            config_str_groups = str([obj.__dict__ for obj in self.state.groups])
         else:
             config_str_groups = str([obj.__dict__ for obj in rl_backup_grouplist])
         self._rhapi.db.option_set("rl_groups_config", config_str_groups)
@@ -191,7 +191,7 @@ class RaceLink_LoRa(RaceLinkUIMixin):
             self._rhapi.db.option_set("rl_device_config", config_str_devices)
 
         config_list_devices = list(eval(config_str_devices))
-        rl_devicelist.clear()
+        self.state.devices.clear()
 
         for device in config_list_devices:
             logger.debug(device)
@@ -217,7 +217,7 @@ class RaceLink_LoRa(RaceLinkUIMixin):
                     dev_type = device.get("caps", device.get("type", 0))
 
                 special_state = build_specials_state(int(dev_type or 0), device)
-                rl_devicelist.append(
+                self.state.devices.append(
                     create_device(
                         addr=str(device.get("addr", "")).upper(),
                         dev_type=int(dev_type or 0),
@@ -240,28 +240,29 @@ class RaceLink_LoRa(RaceLinkUIMixin):
             self._rhapi.db.option_set("rl_groups_config", config_str_groups)
 
         config_list_groups = list(eval(config_str_groups))
-        rl_grouplist.clear()
+        self.state.groups.clear()
 
         for group in config_list_groups:
             logger.debug(group)
             group_dev_type = group.get("dev_type", group.get("device_type", 0))
-            rl_grouplist.append(RL_DeviceGroup(group["name"], group["static_group"], group_dev_type))
+            self.state.groups.append(RL_DeviceGroup(group["name"], group["static_group"], group_dev_type))
 
-        rl_grouplist[:] = [
+        self.state.groups[:] = [
             g
-            for g in rl_grouplist
+            for g in self.state.groups
             if str(getattr(g, "name", "")).strip().lower() not in {"unconfigured", "all wled devices"}
         ]
 
-        if not any(str(getattr(g, "name", "")).strip().lower() == "all wled nodes" for g in rl_grouplist):
-            rl_grouplist.append(RL_DeviceGroup("All WLED Nodes", static_group=1, dev_type=0))
+        if not any(str(getattr(g, "name", "")).strip().lower() == "all wled nodes" for g in self.state.groups):
+            self.state.groups.append(RL_DeviceGroup("All WLED Nodes", static_group=1, dev_type=0))
         else:
-            for g in rl_grouplist:
+            for g in self.state.groups:
                 if str(getattr(g, "name", "")).strip().lower() == "all wled nodes":
                     g.name = "All WLED Nodes"
                     g.static_group = 1
                     g.dev_type = 0
 
+        self.state.update_group_cache()
         self.uiDeviceList = self.createUiDevList()
         self.uiGroupList = self.createUiGroupList()
         self.uiDiscoveryGroupList = self.createUiGroupList(True)
@@ -439,9 +440,9 @@ class RaceLink_LoRa(RaceLinkUIMixin):
                         pass
             else:
                 if groupFilter == 255:
-                    targets = list(rl_devicelist)
+                    targets = list(self.state.devices)
                 else:
-                    targets = [dev for dev in rl_devicelist if int(getattr(dev, "groupId", 0)) == int(groupFilter)]
+                    targets = [dev for dev in self.state.devices if int(getattr(dev, "groupId", 0)) == int(groupFilter)]
                 for dev in targets:
                     try:
                         mac = (dev.addr or "").upper()
@@ -493,9 +494,9 @@ class RaceLink_LoRa(RaceLinkUIMixin):
 
     def forceGroups(self, args=None, sanityCheck: bool = True):
         logger.debug("Forcing all known devices to their stored groups.")
-        num_groups = len(rl_grouplist)
+        num_groups = len(self.state.groups)
 
-        for device in rl_devicelist:
+        for device in self.state.devices:
             if sanityCheck is True and device.groupId >= num_groups:
                 device.groupId = 0
             self.setNodeGroupId(device, forceSet=True)
@@ -515,9 +516,8 @@ class RaceLink_LoRa(RaceLinkUIMixin):
             brightness = fallback.brightness if brightness is None else brightness
         return int(flags) & 0xFF, int(preset_id) & 0xFF, int(brightness) & 0xFF
 
-    @staticmethod
-    def _update_group_control_cache(group_id: int, flags: int, preset_id: int, brightness: int) -> None:
-        for device in rl_devicelist:
+    def _update_group_control_cache(self, group_id: int, flags: int, preset_id: int, brightness: int) -> None:
+        for device in self.state.devices:
             try:
                 if (int(getattr(device, "groupId", 0)) & 0xFF) != group_id:
                     continue
@@ -631,11 +631,11 @@ class RaceLink_LoRa(RaceLinkUIMixin):
             gid = int(targetGroup)
             return [
                 dev
-                for dev in rl_devicelist
+                for dev in self.state.devices
                 if self._is_startblock_device(dev) and int(getattr(dev, "groupId", 0) or 0) == gid
             ]
 
-        return [dev for dev in rl_devicelist if self._is_startblock_device(dev)]
+        return [dev for dev in self.state.devices if self._is_startblock_device(dev)]
 
     def get_current_heat_slot_list(self):
         """
@@ -946,7 +946,7 @@ class RaceLink_LoRa(RaceLinkUIMixin):
 
         if device is None:
             targets = [
-                dev for dev in rl_devicelist if int(getattr(dev, "groupId", 0) or 0) == int(groupId)
+                dev for dev in self.state.devices if int(getattr(dev, "groupId", 0) or 0) == int(groupId)
             ]
         else:
             targets = [device]
@@ -1292,7 +1292,7 @@ class RaceLink_LoRa(RaceLinkUIMixin):
                     if not dev:
                         dev_type = ev.get("caps", 0)
                         dev = create_device(addr=mac12, dev_type=int(dev_type or 0), name=f"WLED {mac12}")
-                        rl_devicelist.append(dev)
+                        self.state.devices.append(dev)
                         try:
                             if hasattr(self, "createUiDevList"):
                                 self.uiDeviceList = self.createUiDevList()
@@ -1388,12 +1388,9 @@ class RaceLink_LoRa(RaceLinkUIMixin):
             return None
         s = str(addr).strip().upper()
         if len(s) == 12:
-            for d in rl_devicelist:
-                if (d.addr or "").upper() == s:
-                    return d
-            return None
+            return self.state.find_device_by_addr(s)
         if len(s) == 6:
-            for d in rl_devicelist:
+            for d in self.state.devices:
                 if (d.addr or "").upper().endswith(s):
                     return d
             return None

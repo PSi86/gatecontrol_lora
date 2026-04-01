@@ -5,6 +5,8 @@ from __future__ import annotations
 from typing import Optional
 import time
 
+from .state.store import RaceLinkState
+
 # ---- LoRa/WLED control flags (shared with lora_proto.h / WLED usermod) ----
 # Bit layout must match the firmware.
 RL_FLAG_POWER_ON = 0x01  # node power state (0=off, 1=on)
@@ -316,8 +318,13 @@ def create_device(*, dev_type: int, specials: dict | None = None, **kwargs) -> R
     return dev
 
 
-rl_backup_devicelist = []
-rl_backup_grouplist = [RL_DeviceGroup("All WLED Nodes", 1, 0)]
+rl_state = RaceLinkState(
+    backup_devices=[],
+    backup_groups=[RL_DeviceGroup("All WLED Nodes", 1, 0)],
+)
 
-rl_devicelist: list[RL_Device] = []
-rl_grouplist: list[RL_DeviceGroup] = []
+# Compatibility views for gradual migration.
+rl_backup_devicelist = rl_state.backup_devices
+rl_backup_grouplist = rl_state.backup_groups
+rl_devicelist: list[RL_Device] = rl_state.devices
+rl_grouplist: list[RL_DeviceGroup] = rl_state.groups

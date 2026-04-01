@@ -21,6 +21,7 @@ from .data import (
     rl_backup_grouplist,
     rl_devicelist,
     rl_grouplist,
+    rl_state,
 )
 
 logger = logging.getLogger(__name__)
@@ -33,13 +34,13 @@ def initialize(rhapi):
         rhapi,
         "RaceLink_LoRa",
         "RaceLink",
+        state=rl_state,
     )
 
     register_rl_blueprint(
         rhapi,
         rl_instance=rl_instance,
-        rl_devicelist=rl_devicelist,
-        rl_grouplist=rl_grouplist,
+        state=rl_state,
         RL_DeviceGroup=RL_DeviceGroup,
         logger=logger,
     )
