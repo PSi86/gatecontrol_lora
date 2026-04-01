@@ -48,6 +48,11 @@ import shutil
 
 from flask import Blueprint, request, jsonify, templating, Response, stream_with_context
 
+try:
+    from .data import effect_select_options, get_dev_type_info, get_specials_config, get_special_keys_for_caps, is_wled_dev_type  # type: ignore
+except Exception:  # pragma: no cover
+    from data import effect_select_options, get_dev_type_info, get_specials_config, get_special_keys_for_caps, is_wled_dev_type
+
 # Use gevent lock/queue if available, otherwise fallback to threading primitives
 try:
     from gevent.lock import Semaphore as _GCLock  # type: ignore
@@ -171,6 +176,24 @@ def register_gc_blueprint(
     def _task_busy_response():
         snap = _task_snapshot()
         return jsonify({"ok": False, "busy": True, "task": snap}), 409
+
+    def _parse_recv3_from_addr(addr_str) -> Optional[bytes]:
+        """Parse address string (3B or 6B, with/without separators) and return last3 bytes."""
+        if addr_str is None:
+            return None
+        try:
+            s = str(addr_str)
+        except Exception:
+            return None
+        hexchars = "0123456789abcdefABCDEF"
+        s = "".join(ch for ch in s if ch in hexchars)
+        if len(s) < 6:
+            return None
+        s = s[-6:]
+        try:
+            return bytes.fromhex(s)
+        except Exception:
+            return None
 
     # --- Transport event hookup (LoRaUSB.on_event) ---
     _hooked_lora = {"ok": False}
@@ -338,11 +361,13 @@ def register_gc_blueprint(
         # Online status (central link logic): always boolean, no timestamp gating.
         # Devices become online only when an expected reply is received; otherwise offline.
         online = bool(getattr(dev, "link_online", False))
+        dev_type = int(getattr(dev, "dev_type", getattr(dev, "caps", 0)) or 0)
+        type_info = get_dev_type_info(dev_type)
 
         d = {
             "addr": getattr(dev, "addr", None),
             "name": getattr(dev, "name", None),
-            "type": int(getattr(dev, "type", 0) or 0),
+            "dev_type": dev_type,
             "groupId": int(getattr(dev, "groupId", 0) or 0),
 
             # new proto v1.2 fields
@@ -350,6 +375,7 @@ def register_gc_blueprint(
             "configByte": int(getattr(dev, "configByte", 0) or 0),
             "presetId": int(getattr(dev, "presetId", 0) or 0),
             "brightness": int(getattr(dev, "brightness", 0) or 0),
+            "specials": dict(getattr(dev, "specials", {}) or {}),
 
             "voltage_mV": int(getattr(dev, "voltage_mV", 0) or 0),
             "node_rssi": int(getattr(dev, "node_rssi", 0) or 0),
@@ -358,11 +384,18 @@ def register_gc_blueprint(
             "host_snr": int(getattr(dev, "host_snr", 0) or 0),
 
             "version": int(getattr(dev, "version", 0) or 0),
-            "caps": int(getattr(dev, "caps", 0) or 0),
+            "caps": int(getattr(dev, "caps", dev_type) or 0),
+            "dev_type_name": type_info.get("name"),
+            "dev_type_caps": type_info.get("caps", []),
             "last_seen_ts": float(getattr(dev, "last_seen_ts", 0.0) or 0.0),
             "last_ack": getattr(dev, "last_ack", None),
             "online": online,
         }
+        special_keys = get_special_keys_for_caps(type_info.get("caps", []))
+        specials = getattr(dev, "specials", {}) or {}
+        for key in special_keys:
+            if key in specials:
+                d[key] = specials[key]
         return d
 
     def _gc_group_counts():
@@ -374,6 +407,17 @@ def register_gc_blueprint(
         except Exception:
             pass
         return counts
+
+    def _gc_wled_count():
+        count = 0
+        try:
+            for dev in gc_devicelist:
+                dtype = int(getattr(dev, "dev_type", getattr(dev, "caps", 0)) or 0)
+                if is_wled_dev_type(dtype):
+                    count += 1
+        except Exception:
+            pass
+        return count
 
     bp = Blueprint(
         "gatecontrol",
@@ -460,18 +504,41 @@ def register_gc_blueprint(
             rows = [_gc_serialize_device(d) for d in gc_devicelist]
         return jsonify({"ok": True, "devices": rows})
 
+    @bp.route("/gatecontrol/api/specials", methods=["GET"])
+    def api_specials():
+        context = {"gc_instance": gc_instance}
+        return jsonify({
+            "ok": True,
+            "specials": get_specials_config(context=context, serialize_ui=True),
+        })
+
     @bp.route("/gatecontrol/api/groups", methods=["GET"])
     def api_groups():
         with _gc_lock:
             group_rows = []
             counts = _gc_group_counts()
+            wled_count = _gc_wled_count()
+            group_rows.append({
+                "id": 0,
+                "name": "Unconfigured",
+                "static": False,
+                "dev_type": 0,
+                "device_count": int(counts.get(0, 0)),
+            })
             for i, g in enumerate(gc_grouplist):
+                name = getattr(g, "name", f"Group {i}")
+                if str(name).strip().lower() == "unconfigured":
+                    continue
+                if str(name).strip().lower() in {"all wled gates", "all wled devices"}:
+                    continue
+                gid = i
+                device_count = int(counts.get(i, 0))
                 group_rows.append({
-                    "id": i,
-                    "name": getattr(g, "name", f"Group {i}"),
+                    "id": gid,
+                    "name": name,
                     "static": bool(getattr(g, "static_group", 0)),
-                    "device_type": int(getattr(g, "device_type", 0) or 0),
-                    "device_count": int(counts.get(i, 0)),
+                    "dev_type": int(getattr(g, "dev_type", 0) or 0),
+                    "device_count": device_count,
                 })
         return jsonify({"ok": True, "groups": group_rows})
 
@@ -486,16 +553,7 @@ def register_gc_blueprint(
     @bp.route("/gatecontrol/api/options", methods=["GET"])
     def api_options():
         # still called "effects" for UI legacy; values can represent preset ids
-        opts = []
-        try:
-            for opt in gc_instance.uiEffectList:
-                val = getattr(opt, "value", None)
-                lab = getattr(opt, "label", None) or getattr(opt, "name", None) or str(opt)
-                if val is None:
-                    continue
-                opts.append({"value": str(val), "label": str(lab)})
-        except Exception:
-            opts = []
+        opts = effect_select_options(context={"gc_instance": gc_instance})
         return jsonify({"ok": True, "effects": opts})
 
     # -----------------------
@@ -558,7 +616,7 @@ def register_gc_blueprint(
         created_gid = None
         with _gc_lock:
             if new_group_name:
-                g = GC_DeviceGroup(str(new_group_name), static_group=0, device_type=0)
+                g = GC_DeviceGroup(str(new_group_name), static_group=0, dev_type=0)
                 gc_grouplist.append(g)
                 created_gid = len(gc_grouplist) - 1
                 _log(f"GateControl: Created group '{new_group_name}' (id={created_gid})")
@@ -567,7 +625,10 @@ def register_gc_blueprint(
 
         def do_discover():
             # Discovery: ask nodes with groupId=0 and assign to group
-            n_found = int(gc_instance.getDevices(groupFilter=0, addToGroup=int(target_gid) if target_gid is not None else -1) or 0)
+            add_to_group = -1
+            if target_gid not in (None, 0, "0"):
+                add_to_group = int(target_gid)
+            n_found = int(gc_instance.getDevices(groupFilter=0, addToGroup=add_to_group) or 0)
             return {"found": n_found, "createdGroupId": created_gid, "targetGroupId": target_gid}
 
         t = _start_task("discover", do_discover, meta={"createdGroupId": created_gid, "targetGroupId": target_gid})
@@ -619,6 +680,8 @@ def register_gc_blueprint(
         new_name = body.get("name", None)
 
         changed = 0
+        if new_group is not None:
+            _ensure_transport_hooked()
         with _gc_lock:
             for mac in macs:
                 dev = gc_instance.getDeviceFromAddress(mac)
@@ -629,7 +692,8 @@ def register_gc_blueprint(
                     changed += 1
                 if new_group is not None:
                     try:
-                        gc_instance.setGateGroupId(dev, int(new_group))
+                        dev.groupId = int(new_group)
+                        gc_instance.setGateGroupId(dev)
                         changed += 1
                     except Exception as ex:
                         _log(f"GateControl: setGateGroupId failed for {mac}: {ex}")
@@ -648,11 +712,11 @@ def register_gc_blueprint(
     def api_groups_create():
         body = request.get_json(silent=True) or {}
         name = str(body.get("name", "")).strip()
-        device_type = int(body.get("device_type", 0) or 0)
+        dev_type = int(body.get("dev_type", body.get("device_type", 0)) or 0)
         if not name:
             return jsonify({"ok": False, "error": "name required"}), 400
         with _gc_lock:
-            gc_grouplist.append(GC_DeviceGroup(name, static_group=0, device_type=device_type))
+            gc_grouplist.append(GC_DeviceGroup(name, static_group=0, dev_type=dev_type))
             gid = len(gc_grouplist) - 1
             try:
                 gc_instance.save_to_db({"manual": True})
@@ -756,24 +820,6 @@ def register_gc_blueprint(
         if len(macs) != 1:
             return jsonify({"ok": False, "error": "select exactly one device"}), 400
 
-        def _parse_recv3_from_addr(addr_str) -> Optional[bytes]:
-            """Parse address string (3B or 6B, with/without separators) and return last3 bytes."""
-            if addr_str is None:
-                return None
-            try:
-                s = str(addr_str)
-            except Exception:
-                return None
-            hexchars = "0123456789abcdefABCDEF"
-            s = "".join(ch for ch in s if ch in hexchars)
-            if len(s) < 6:
-                return None
-            s = s[-6:]
-            try:
-                return bytes.fromhex(s)
-            except Exception:
-                return None
-
         recv3 = _parse_recv3_from_addr(macs[0])
         if not recv3:
             return jsonify({"ok": False, "error": "invalid mac/address"}), 400
@@ -820,6 +866,188 @@ def register_gc_blueprint(
             "data2": data2,
             "data3": data3,
         })
+
+    # -----------------------
+    # JSON API: Specials config (device-specific options)
+    # -----------------------
+    @bp.route("/gatecontrol/api/specials/config", methods=["POST"])
+    def api_specials_config():
+        if _task_is_running():
+            return _task_busy_response()
+
+        body = request.get_json(silent=True) or {}
+        mac = body.get("mac", None)
+        key = body.get("key", None)
+        value = body.get("value", None)
+        if not mac or not key:
+            return jsonify({"ok": False, "error": "missing mac/key"}), 400
+
+        recv3 = _parse_recv3_from_addr(mac)
+        if not recv3:
+            return jsonify({"ok": False, "error": "invalid mac/address"}), 400
+        if recv3 == b"\xFF\xFF\xFF":
+            return jsonify({"ok": False, "error": "broadcast not allowed for config"}), 400
+
+        try:
+            value_int = int(value)
+        except Exception:
+            return jsonify({"ok": False, "error": "invalid value"}), 400
+
+        mac_str = str(mac).upper()
+        with _gc_lock:
+            dev = gc_instance.getDeviceFromAddress(mac_str)
+            if not dev:
+                return jsonify({"ok": False, "error": "device not found"}), 404
+            dev_caps = set(get_dev_type_info(getattr(dev, "dev_type", 0)).get("caps", []))
+            specials = get_specials_config(context={"gc_instance": gc_instance})
+            option_info = None
+            for cap in dev_caps:
+                spec = specials.get(cap, {})
+                for opt in spec.get("options", []):
+                    if opt.get("key") == key:
+                        option_info = opt
+                        break
+                if option_info:
+                    break
+
+        if not option_info:
+            return jsonify({"ok": False, "error": "option not supported for device"}), 400
+
+        option = option_info.get("option", None)
+        if option is None:
+            return jsonify({"ok": False, "error": "option not writable"}), 400
+
+        min_v = option_info.get("min")
+        max_v = option_info.get("max")
+        if min_v is not None and value_int < int(min_v):
+            return jsonify({"ok": False, "error": f"value must be >= {min_v}"}), 400
+        if max_v is not None and value_int > int(max_v):
+            return jsonify({"ok": False, "error": f"value must be <= {max_v}"}), 400
+
+        _ensure_transport_hooked()
+
+        def do_special_config():
+            _task_update(meta={"mac": mac_str, "key": key, "message": f"Sending {key} (0x{int(option):02X})"})
+            ok = gc_instance.sendConfig(
+                option=int(option) & 0xFF,
+                data0=value_int,
+                recv3=recv3,
+                wait_for_ack=True,
+                timeout_s=6.0,
+            )
+            if not ok:
+                raise RuntimeError(f"ACK timeout for option 0x{int(option):02X}")
+
+            with _gc_lock:
+                dev = gc_instance.getDeviceFromAddress(mac_str)
+                if not dev:
+                    raise RuntimeError("device not found")
+                if not hasattr(dev, "specials") or dev.specials is None:
+                    dev.specials = {}
+                dev.specials[key] = int(value_int) & 0xFF
+                try:
+                    gc_instance.save_to_db({"manual": True})
+                except Exception:
+                    pass
+
+            return {"mac": mac_str, "key": key, "value": value_int}
+
+        meta = {"mac": mac_str, "key": key, "message": "Preparing special config"}
+        t = _start_task("special_config", do_special_config, meta=meta)
+        if not t:
+            return _task_busy_response()
+        return jsonify({"ok": True, "task": t})
+
+    @bp.route("/gatecontrol/api/specials/action", methods=["POST"])
+    def api_specials_action():
+        if _task_is_running():
+            return _task_busy_response()
+
+        body = request.get_json(silent=True) or {}
+        mac = body.get("mac", None)
+        fn_key = body.get("function", None) or body.get("fn", None)
+        params = body.get("params", None) or {}
+        if not mac or not fn_key:
+            return jsonify({"ok": False, "error": "missing mac/function"}), 400
+
+        recv3 = _parse_recv3_from_addr(mac)
+        if not recv3:
+            return jsonify({"ok": False, "error": "invalid mac/address"}), 400
+        if recv3 == b"\xFF\xFF\xFF":
+            return jsonify({"ok": False, "error": "broadcast not allowed for action"}), 400
+
+        mac_str = str(mac).upper()
+        with _gc_lock:
+            dev = gc_instance.getDeviceFromAddress(mac_str)
+            if not dev:
+                return jsonify({"ok": False, "error": "device not found"}), 404
+            dev_caps = set(get_dev_type_info(getattr(dev, "dev_type", 0)).get("caps", []))
+            specials = get_specials_config(context={"gc_instance": gc_instance})
+            fn_info = None
+            cap_key = None
+            options_by_key = {}
+            for cap in dev_caps:
+                spec = specials.get(cap, {})
+                for opt in spec.get("options", []):
+                    key = opt.get("key")
+                    if key:
+                        options_by_key[key] = opt
+                for fn in spec.get("functions", []):
+                    if fn.get("key") == fn_key:
+                        fn_info = fn
+                        cap_key = cap
+                        break
+                if fn_info:
+                    break
+
+        if not fn_info:
+            return jsonify({"ok": False, "error": "function not supported for device"}), 400
+        if not fn_info.get("unicast", False):
+            return jsonify({"ok": False, "error": "function does not support unicast"}), 400
+
+        comm_name = fn_info.get("comm")
+        if not comm_name:
+            return jsonify({"ok": False, "error": "missing comm handler"}), 400
+        comm_fn = getattr(gc_instance, comm_name, None)
+        if not callable(comm_fn):
+            return jsonify({"ok": False, "error": "comm handler not found"}), 400
+
+        vars_list = fn_info.get("vars", []) or []
+        params_coerced = {}
+        for var in vars_list:
+            raw_val = params.get(var, None)
+            if raw_val is None:
+                raw_val = options_by_key.get(var, {}).get("min", 0)
+            try:
+                value_int = int(raw_val)
+            except Exception:
+                return jsonify({"ok": False, "error": f"invalid value for {var}"}), 400
+            opt_meta = options_by_key.get(var, {})
+            min_v = opt_meta.get("min")
+            max_v = opt_meta.get("max")
+            if min_v is not None and value_int < int(min_v):
+                return jsonify({"ok": False, "error": f"{var} must be >= {min_v}"}), 400
+            if max_v is not None and value_int > int(max_v):
+                return jsonify({"ok": False, "error": f"{var} must be <= {max_v}"}), 400
+            params_coerced[var] = value_int
+
+        _ensure_transport_hooked()
+
+        with _gc_lock:
+            dev = gc_instance.getDeviceFromAddress(mac_str)
+        if not dev:
+            return jsonify({"ok": False, "error": "device not found"}), 404
+
+        res = comm_fn(targetDevice=dev, targetGroup=None, params=params_coerced)
+        if res is False:
+            return jsonify({"ok": False, "error": "action failed"}), 500
+
+        _set_master(state="TX", tx_pending=True, last_event="SPECIAL_SENT")
+        return jsonify({"ok": True, "result": res, "function": fn_key, "params": params_coerced})
+
+    @bp.route("/gatecontrol/api/specials/get", methods=["POST"])
+    def api_specials_get():
+        return jsonify({"ok": False, "error": "not implemented"}), 501
 
     @bp.route("/gatecontrol/api/devices/control", methods=["POST"])
     def api_devices_control():
@@ -2011,7 +2239,7 @@ def register_gc_blueprint(
                             "message": f"Uploading firmware (try {attempt}/{retries})",
                         })
                         try:
-                            _wled_upload_firmware(base_url, fw_info["path"], timeout_s=180.0)
+                            _wled_upload_firmware(base_url, fw_info["path"], timeout_s=30.0)
                             ok = True
                             break
                         except Exception as ex:

@@ -82,7 +82,7 @@
             <th data-key="host_rssi">Host RSSI</th>
             <th data-key="host_snr">Host SNR</th>
             <th data-key="version">FW</th>
-            <th data-key="caps">Caps</th>
+            <th data-key="dev_type">Type</th>
             <th data-key="online">Online</th>
           </tr>
         </thead>
@@ -246,6 +246,21 @@
       </div>
 
       <p id="presetsHint" class="muted"></p>
+    </form>
+  </dialog>
+
+  <dialog id="dlgSpecials">
+    <form method="dialog" class="gc-form">
+      <h3>Device Options</h3>
+
+      <div class="gc-tabs" id="specialTabs"></div>
+      <div id="specialPanel" class="gc-tab-panel"></div>
+
+      <div class="gc-dialog-actions">
+        <button value="cancel">Cancel</button>
+      </div>
+
+      <p id="specialHint" class="muted"></p>
     </form>
   </dialog>
 

@@ -11,7 +11,7 @@ from .controller import GateControl_LoRa
 from .data import (
     GC_Device,
     GC_DeviceGroup,
-    GC_Type,
+    GC_Dev_Type,
     GC_FLAG_POWER_ON,
     GC_FLAG_ARM_ON_SYNC,
     GC_FLAG_HAS_BRI,
@@ -58,7 +58,7 @@ def initialize(rhapi):
 __all__ = [
     "GC_Device",
     "GC_DeviceGroup",
-    "GC_Type",
+    "GC_Dev_Type",
     "GC_FLAG_POWER_ON",
     "GC_FLAG_ARM_ON_SYNC",
     "GC_FLAG_HAS_BRI",

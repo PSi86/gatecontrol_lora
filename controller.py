@@ -1,15 +1,20 @@
 from __future__ import annotations
 
 import logging
+import re
+import threading
 import time
-from typing import Optional, Union
+from typing import Dict, Optional, Tuple, Union
 
 from .ui import GateControlUIMixin
 from RHUI import UIFieldSelectOption
 from .data import (
     GC_Device,
     GC_DeviceGroup,
-    GC_Type,
+    GC_Dev_Type,
+    build_specials_state,
+    create_device,
+    get_dev_type_info,
     GC_FLAG_HAS_BRI,
     GC_FLAG_POWER_ON,
     gc_backup_devicelist,
@@ -28,6 +33,7 @@ except Exception:
 try:
     from .gc_transport import (
         LP,
+        EV_ERROR,
         EV_RX_WINDOW_CLOSED,
         EV_RX_WINDOW_OPEN,
         LoRaUSB,
@@ -36,6 +42,7 @@ try:
 except Exception:
     from gc_transport import (
         LP,
+        EV_ERROR,
         EV_RX_WINDOW_CLOSED,
         EV_RX_WINDOW_OPEN,
         LoRaUSB,
@@ -43,6 +50,75 @@ except Exception:
     )
 
 logger = logging.getLogger(__name__)
+
+_STARTBLOCK_VER = 0x01
+
+_DE_UMLAUT_MAP = {
+    "ä": "ae",
+    "ö": "oe",
+    "ü": "ue",
+    "ß": "ss",
+    "Ä": "AE",
+    "Ö": "OE",
+    "Ü": "UE",
+}
+
+_ALLOWED_NAME_RE = re.compile(r"[^A-Z0-9 _\-\.\+]", re.IGNORECASE)
+
+
+def _sanitize_pilot_name(name: str, max_len: int = 32) -> str:
+    if not name:
+        return ""
+    for k, v in _DE_UMLAUT_MAP.items():
+        name = name.replace(k, v)
+    name = name.strip().upper()
+    name = _ALLOWED_NAME_RE.sub(" ", name)
+    name = re.sub(r"\s+", " ", name).strip()
+    return name[:max_len] if max_len > 0 else name
+
+
+def _encode_channel_fixed2(label: str) -> bytes:
+    """
+    Immer exakt 2 Bytes ASCII.
+    - upper()
+    - padding mit '-' falls zu kurz
+    - truncate falls zu lang
+    """
+    lab = (label or "").strip().upper()
+    lab2 = (lab + "--")[:2]
+    return lab2.encode("ascii", errors="replace")
+
+
+def build_startblock_payload_v1(
+    slot: int,
+    channel_label: str,
+    pilot_name: str,
+    max_name_len: int = 32,
+    name_encoding: str = "ascii",
+) -> bytes:
+    """
+    [ver][slot][chan2][name_len u8][name bytes]
+    """
+    slot_b = max(0, min(255, int(slot)))
+    chan2 = _encode_channel_fixed2(channel_label)
+
+    clean_name = _sanitize_pilot_name(pilot_name, max_len=max_name_len)
+
+    if name_encoding.lower() == "utf-8":
+        name_bytes = clean_name.encode("utf-8", errors="replace")
+    else:
+        name_bytes = clean_name.encode("ascii", errors="replace")
+
+    if len(name_bytes) > 255:
+        name_bytes = name_bytes[:255]
+
+    out = bytearray()
+    out.append(_STARTBLOCK_VER)
+    out.append(slot_b)
+    out.extend(chan2)  # 2 bytes
+    out.append(len(name_bytes))  # 1 byte
+    out.extend(name_bytes)
+    return bytes(out)
 
 
 class GateControl_LoRa(GateControlUIMixin):
@@ -64,6 +140,9 @@ class GateControl_LoRa(GateControlUIMixin):
 
         self._transport_hooks_installed = False
         self._pending_config = {}
+        self._reconnect_in_progress = False
+        self._last_reconnect_ts = 0.0
+        self._last_error_notify_ts = 0.0
         # Basic colors: 1-9; Basic effects: 10-19; Special Effects (WLED only): 20-100
         self.uiEffectList = [
             UIFieldSelectOption("01", "Red"),
@@ -130,17 +209,25 @@ class GateControl_LoRa(GateControlUIMixin):
 
                 brightness = int(device.get("brightness", 70) or 0)
 
+                dev_type = device.get("dev_type", None)
+                if dev_type is None:
+                    dev_type = device.get("device_type", None)
+                if dev_type is None:
+                    dev_type = device.get("caps", device.get("type", 0))
+
+                special_state = build_specials_state(int(dev_type or 0), device)
                 gc_devicelist.append(
-                    GC_Device(
+                    create_device(
                         addr=str(device.get("addr", "")).upper(),
-                        type=int(device.get("type", 0) or 0),
+                        dev_type=int(dev_type or 0),
                         name=str(device.get("name", "")),
                         groupId=int(device.get("groupId", 0) or 0),
                         version=int(device.get("version", 0) or 0),
-                        caps=int(device.get("caps", 0) or 0),
+                        caps=int(dev_type or 0),
                         flags=int(flags) & 0xFF,
                         presetId=int(presetId) & 0xFF,
                         brightness=brightness & 0xFF,
+                        specials=special_state,
                     )
                 )
             except Exception:
@@ -156,7 +243,23 @@ class GateControl_LoRa(GateControlUIMixin):
 
         for group in config_list_groups:
             logger.debug(group)
-            gc_grouplist.append(GC_DeviceGroup(group["name"], group["static_group"], group["device_type"]))
+            group_dev_type = group.get("dev_type", group.get("device_type", 0))
+            gc_grouplist.append(GC_DeviceGroup(group["name"], group["static_group"], group_dev_type))
+
+        gc_grouplist[:] = [
+            g
+            for g in gc_grouplist
+            if str(getattr(g, "name", "")).strip().lower() not in {"unconfigured", "all wled devices"}
+        ]
+
+        if not any(str(getattr(g, "name", "")).strip().lower() == "all wled gates" for g in gc_grouplist):
+            gc_grouplist.append(GC_DeviceGroup("All WLED Gates", static_group=1, dev_type=0))
+        else:
+            for g in gc_grouplist:
+                if str(getattr(g, "name", "")).strip().lower() == "all wled gates":
+                    g.name = "All WLED Gates"
+                    g.static_group = 1
+                    g.dev_type = 0
 
         self.uiDeviceList = self.createUiDevList()
         self.uiGroupList = self.createUiGroupList()
@@ -171,6 +274,7 @@ class GateControl_LoRa(GateControlUIMixin):
         """Initialize communicator via LoRaUSB only. No direct serial here."""
         port = self._rhapi.db.option("psi_comms_port", None)
         try:
+            self._transport_hooks_installed = False
             self.lora = LoRaUSB(port=port, on_event=None)
             ok = self.lora.discover_and_open()
             if ok:
@@ -222,12 +326,21 @@ class GateControl_LoRa(GateControlUIMixin):
             groupId = int(targetDevice.groupId) & 0xFF
 
         found = 0
+        responders = set()
 
         def _collect(ev: dict) -> bool:
             nonlocal found
             try:
                 if ev.get("opc") == LP.OPC_DEVICES and ev.get("reply") == "IDENTIFY_REPLY":
                     found += 1
+                    mac6 = ev.get("mac6")
+                    if isinstance(mac6, (bytes, bytearray)) and len(mac6) == 6:
+                        responders.add(bytes(mac6).hex().upper())
+                    else:
+                        sender3 = ev.get("sender3")
+                        sender_hex = self._to_hex_str(sender3)
+                        if sender_hex:
+                            responders.add(sender_hex.upper())
                     return True
             except Exception:
                 pass
@@ -247,15 +360,19 @@ class GateControl_LoRa(GateControlUIMixin):
         )
 
         if addToGroup > 0 and addToGroup < 255:
-            for dev in list(gc_devicelist):
-                if int(getattr(dev, "groupId", 0)) == 0:
-                    dev.groupId = addToGroup
-                    self.setGateGroupId(dev)
+            for addr in responders:
+                dev = self.getDeviceFromAddress(addr)
+                if not dev:
+                    continue
+                dev.groupId = addToGroup
+                self.setGateGroupId(dev)
 
         if hasattr(self, "_rhapi") and hasattr(self._rhapi, "ui"):
-            self._rhapi.ui.message_notify(
-                "Device Discovery finished with {} devices found and added to GroupId: {}".format(found, addToGroup)
-            )
+            if addToGroup > 0 and addToGroup < 255:
+                msg = "Device Discovery finished with {} devices found and added to GroupId: {}".format(found, addToGroup)
+            else:
+                msg = "Device Discovery finished with {} devices found.".format(found)
+            self._rhapi.ui.message_notify(msg)
         return found
 
     def getStatus(self, groupFilter=255, targetDevice=None):
@@ -381,7 +498,7 @@ class GateControl_LoRa(GateControlUIMixin):
             if sanityCheck is True and device.groupId >= num_groups:
                 device.groupId = 0
             self.setGateGroupId(device, forceSet=True)
-            time.sleep(0.2)
+            #time.sleep(0.2)
 
     def _require_lora(self, context: str):
         if getattr(self, "lora", None):
@@ -448,6 +565,206 @@ class GateControl_LoRa(GateControlUIMixin):
             preset_id=p,
             brightness=b,
         )
+
+    def sendWledControl(self, *, targetDevice=None, targetGroup=None, params=None):
+        if params is None:
+            params = {}
+        preset_id = int(params.get("presetId", 1))
+        brightness = int(params.get("brightness", 0))
+        flags = (GC_FLAG_POWER_ON if brightness > 0 else 0) | GC_FLAG_HAS_BRI
+
+        if targetGroup is not None:
+            self.sendGroupControl(int(targetGroup), flags, preset_id, brightness)
+            return True
+        if targetDevice is not None:
+            self.sendGateControl(targetDevice, flags, preset_id, brightness)
+            return True
+        return False
+
+    def sendStartblockConfig(self, *, targetDevice=None, targetGroup=None, params=None):
+        if targetGroup is not None:
+            return False
+        if not targetDevice or not self._require_lora("sendStartblockConfig"):
+            return False
+        if params is None:
+            params = {}
+        slots = int(params.get("startblock_slots", 1))
+        first_slot = int(params.get("startblock_first_slot", 1))
+        recv3 = _mac_last3_from_hex(targetDevice.addr)
+        if not recv3:
+            return False
+        ok_slots = self.sendConfig(option=0x8C, data0=slots, recv3=recv3, wait_for_ack=True)
+        if not ok_slots:
+            return False
+        ok_first = self.sendConfig(option=0x8D, data0=first_slot, recv3=recv3, wait_for_ack=True)
+        if not ok_first:
+            return False
+        targetDevice.specials["startblock_slots"] = slots & 0xFF
+        targetDevice.specials["startblock_first_slot"] = first_slot & 0xFF
+        try:
+            self.save_to_db({"manual": True})
+        except Exception:
+            pass
+        return True
+
+    def sendStartblockControl(self, *, targetDevice=None, targetGroup=None, params=None):
+        if not self._require_lora("sendStartblockControl"):
+            return {}
+        if params is None:
+            params = {}
+        if params.get("startblock_use_current_heat"):
+            return self._send_startblock_current_heat(targetDevice=targetDevice, targetGroup=targetGroup, params=params)
+        slots = int(params.get("startblock_slots", 1)) & 0xFF
+        first_slot = int(params.get("startblock_first_slot", 1)) & 0xFF
+        payload = bytes([slots, first_slot])
+        if targetDevice is not None:
+            return self.sendStream(payload, device=targetDevice)
+        if targetGroup is not None:
+            return self.sendStream(payload, groupId=int(targetGroup))
+        return {}
+
+    def _get_channel_label_for_node(self, node_index: int) -> str:
+        """
+        Best-effort: liefert z.B. 'R1'. Fallback '--'
+        Passe ggf. die Attribute/Pfade an deine RH-Version an.
+        """
+        try:
+            ctx = getattr(self._rhapi, "_racecontext", None)
+            if not ctx:
+                return "--"
+            rhdata = getattr(ctx, "rhdata", None)
+            race = getattr(ctx, "race", None)
+            if not (rhdata and race):
+                return "--"
+
+            # 1) Direkt am race Objekt (je nach RH-Version)
+            for attr in ("node_frequencies", "frequencies", "seat_frequencies"):
+                freqs = getattr(race, attr, None)
+                if isinstance(freqs, (list, tuple)) and 0 <= node_index < len(freqs):
+                    item = freqs[node_index]
+                    if isinstance(item, str) and len(item) >= 2:
+                        return item[:2].upper()
+                    if isinstance(item, dict):
+                        v = item.get("label") or item.get("name") or item.get("channel")
+                        if isinstance(v, str) and len(v) >= 2:
+                            return v[:2].upper()
+
+            # 2) Frequencyset Pfad (falls vorhanden)
+            fs_id = getattr(race, "frequencyset", None)
+            if fs_id is None:
+                fs_id = getattr(race, "frequencyset_id", None)
+
+            if fs_id is not None:
+                get_fs = getattr(rhdata, "get_frequencyset_by_id", None) or getattr(rhdata, "get_frequencyset", None)
+                if callable(get_fs):
+                    fs = get_fs(fs_id)
+                    freqs = None
+                    if isinstance(fs, dict):
+                        freqs = fs.get("frequencies") or fs.get("freqs")
+                    else:
+                        freqs = getattr(fs, "frequencies", None) or getattr(fs, "freqs", None)
+
+                    if isinstance(freqs, (list, tuple)) and 0 <= node_index < len(freqs):
+                        item = freqs[node_index]
+                        if isinstance(item, str) and len(item) >= 2:
+                            return item[:2].upper()
+                        if isinstance(item, dict):
+                            v = item.get("label") or item.get("name") or item.get("channel")
+                            if isinstance(v, str) and len(v) >= 2:
+                                return v[:2].upper()
+
+            return "--"
+        except Exception:
+            return "--"
+
+    def _get_startblock_entries_from_current_heat(self) -> Dict[int, Tuple[str, str]]:
+        """
+        Returns: {slot_num: (channel_label_2chars, pilot_name)}
+        """
+        out: Dict[int, Tuple[str, str]] = {}
+        try:
+            ctx = getattr(self._rhapi, "_racecontext", None)
+            if not ctx:
+                return out
+            rhdata = getattr(ctx, "rhdata", None)
+            race = getattr(ctx, "race", None)
+            if not (rhdata and race):
+                return out
+
+            current_heat = getattr(race, "current_heat", None)
+            if current_heat is None:
+                return out
+
+            heat_nodes = rhdata.get_heatNodes_by_heat(current_heat)
+
+            for hn in heat_nodes or []:
+                pid = getattr(hn, "pilot_id", None)
+                if pid is None:
+                    continue
+
+                node_raw = getattr(hn, "node_index", None)
+                if node_raw is None:
+                    node_raw = getattr(hn, "node", None)
+                if node_raw is None:
+                    continue
+                node_index = int(node_raw)
+
+                slot_num = node_index + 1 if node_index in (0, 1, 2, 3) else node_index
+                if not (1 <= slot_num <= 4):
+                    continue
+
+                # Pilot Name: callsign bevorzugt
+                pilot_name = ""
+                get_pilot = getattr(rhdata, "get_pilot", None)
+                if callable(get_pilot):
+                    p = get_pilot(pid)
+                    if p:
+                        pilot_name = (
+                            getattr(p, "callsign", None)
+                            or getattr(p, "name", None)
+                            or getattr(p, "display_name", None)
+                            or ""
+                        )
+                if not pilot_name:
+                    pilot_name = f"P{pid}"
+
+                channel_label = self._get_channel_label_for_node(node_index)
+                out[slot_num] = (channel_label, pilot_name)
+
+            return out
+        except Exception as e:
+            logger.debug("_get_startblock_entries_from_current_heat failed: %s", e)
+            return out
+
+    def _send_startblock_current_heat(self, *, targetDevice=None, targetGroup=None, params=None) -> dict[str, int]:
+        if params is None:
+            params = {}
+        entries = self._get_startblock_entries_from_current_heat()
+        max_name_len = int(params.get("startblock_max_name_len", 32) or 32)
+        name_encoding = str(params.get("startblock_name_encoding", "ascii"))
+        totals = {"expected": 0, "acked": 0}
+
+        for slot in (1, 2, 3, 4):
+            channel_label, pilot_name = entries.get(slot, ("--", ""))
+            payload = build_startblock_payload_v1(
+                slot=slot,
+                channel_label=channel_label,
+                pilot_name=pilot_name,
+                max_name_len=max_name_len,
+                name_encoding=name_encoding,
+            )
+
+            if targetDevice is not None:
+                result = self.sendStream(payload, device=targetDevice)
+            elif targetGroup is not None:
+                result = self.sendStream(payload, groupId=int(targetGroup))
+            else:
+                result = {}
+
+            totals["expected"] += int(result.get("expected", 0) or 0)
+            totals["acked"] += int(result.get("acked", 0) or 0)
+
+        return totals
 
     def _send_and_wait_for_reply(
         self,
@@ -589,7 +906,7 @@ class GateControl_LoRa(GateControlUIMixin):
         retries: int = 2,
         timeout_s: float = 8.0,
     ) -> dict[str, int]:
-        """Send up to 128 bytes as STREAM packets (8B per packet) to a device or group broadcast."""
+        """Send up to 128 bytes as STREAM payload to the master for downstream splitting."""
         if not getattr(self, "lora", None):
             logger.warning("sendStream: communicator not ready")
             return {}
@@ -604,20 +921,10 @@ class GateControl_LoRa(GateControlUIMixin):
             raise ValueError("sendStream requires groupId or device")
 
         total_packets = max(1, (len(data) + 7) // 8)
-        packets = []
-        for idx in range(total_packets):
-            start = idx == 0
-            stop = idx == total_packets - 1
-            packets_left = (total_packets - idx - 1)
-            if start and stop:
-                packets_left = 0
-            elif start:
-                packets_left = total_packets
-            ctrl = self._stream_ctrl(start, stop, packets_left)
-            chunk = data[idx * 8 : (idx + 1) * 8]
-            if len(chunk) < 8:
-                chunk = chunk + (b"\x00" * (8 - len(chunk)))
-            packets.append((ctrl, chunk, stop))
+        start = True
+        stop = total_packets == 1
+        packets_left = 0 if stop else total_packets
+        ctrl = self._stream_ctrl(start, stop, packets_left)
 
         if device is None:
             targets = [
@@ -641,13 +948,6 @@ class GateControl_LoRa(GateControlUIMixin):
         except Exception:
             pass
 
-        for ctrl, chunk, is_last in packets:
-            if is_last:
-                break
-            self.lora.send_stream(recv3=recv3, ctrl=ctrl, data=chunk)
-            time.sleep(0.02)
-
-        last_ctrl, last_chunk, _ = packets[-1]
         acked = set()
 
         def _collect(ev: dict) -> bool:
@@ -669,7 +969,7 @@ class GateControl_LoRa(GateControlUIMixin):
 
         for attempt in range(max(0, int(retries)) + 1):
             self._wait_rx_window(
-                lambda: self.lora.send_stream(recv3=recv3, ctrl=last_ctrl, data=last_chunk),
+                lambda: self.lora.send_stream(recv3=recv3, ctrl=ctrl, data=data),
                 collect_pred=_collect,
                 fail_safe_s=timeout_s,
             )
@@ -782,13 +1082,16 @@ class GateControl_LoRa(GateControlUIMixin):
         if opc == int(LP.OPC_DEVICES) and ev.get("reply") == "IDENTIFY_REPLY":
             mac6 = ev.get("mac6")
             mac12 = bytes(mac6).hex().upper() if isinstance(mac6, (bytes, bytearray)) and len(mac6) == 6 else None
+            dev_type = ev.get("caps")
+            dtype_name = get_dev_type_info(dev_type).get("name")
             logger.debug(
-                "IDENTIFY from %s: mac=%s group=%s ver=%s caps=%s host_rssi=%s host_snr=%s",
+                "IDENTIFY from %s: mac=%s group=%s ver=%s dev_type=%s (%s) host_rssi=%s host_snr=%s",
                 sender3_hex,
                 mac12 or sender3_hex,
                 ev.get("groupId"),
                 ev.get("version"),
-                ev.get("caps"),
+                dev_type,
+                dtype_name,
                 ev.get("host_rssi"),
                 ev.get("host_snr"),
             )
@@ -918,6 +1221,21 @@ class GateControl_LoRa(GateControlUIMixin):
 
             t = ev.get("type")
 
+            if t == EV_ERROR:
+                reason = str(ev.get("data") or "unknown error")
+                self.ready = False
+                now = time.time()
+                if (now - self._last_error_notify_ts) > 2:
+                    self._last_error_notify_ts = now
+                    try:
+                        self._rhapi.ui.message_notify(
+                            self._rhapi.__("GateControl Communicator disconnected: {}").format(reason)
+                        )
+                    except Exception:
+                        logger.exception("GateControl: failed to notify UI about disconnect")
+                self._schedule_reconnect(reason)
+                return
+
             if t in (EV_RX_WINDOW_OPEN, EV_RX_WINDOW_CLOSED):
                 self._log_rx_window_event(ev)
                 if t == EV_RX_WINDOW_CLOSED:
@@ -954,7 +1272,8 @@ class GateControl_LoRa(GateControlUIMixin):
                     mac12 = bytes(mac6).hex().upper()
                     dev = self.getDeviceFromAddress(mac12)
                     if not dev:
-                        dev = GC_Device(addr=mac12, type=GC_Type.WLED_CUSTOM, name=f"WLED {mac12}")
+                        dev_type = ev.get("caps", 0)
+                        dev = create_device(addr=mac12, dev_type=int(dev_type or 0), name=f"WLED {mac12}")
                         gc_devicelist.append(dev)
                         try:
                             if hasattr(self, "createUiDevList"):
@@ -975,6 +1294,28 @@ class GateControl_LoRa(GateControlUIMixin):
 
         except Exception:
             logger.exception("GateControl: RX hook failed")
+
+    def _schedule_reconnect(self, reason: str) -> None:
+        now = time.time()
+        if self._reconnect_in_progress or (now - self._last_reconnect_ts) < 5:
+            return
+        self._last_reconnect_ts = now
+        self._reconnect_in_progress = True
+
+        def _reconnect():
+            try:
+                logger.warning("GateControl: attempting LoRaUSB reconnect after error: %s", reason)
+                try:
+                    if self.lora:
+                        self.lora.close()
+                except Exception:
+                    pass
+                self.lora = None
+                self.discoverPort({})
+            finally:
+                self._reconnect_in_progress = False
+
+        threading.Thread(target=_reconnect, daemon=True).start()
 
     def _pending_try_match(self, ev: dict) -> None:
         p = self._pending_expect
