@@ -62,3 +62,4 @@ class TransportCoordinatorPort(Protocol):
 
 
 from .host_ui import HostUIPort
+from .host_race_events import HostRaceEventPort

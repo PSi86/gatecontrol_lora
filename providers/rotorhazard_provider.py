@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
-from typing import Callable
 
 from eventmanager import Evt
 
+from ..core.events import HostRaceEvent, HostRaceEventType
+from ..core.ports.host_race_events import HostRaceEventSink
 from ..core.ports.race_provider import RaceProviderPort
 
 
@@ -48,11 +49,33 @@ class RotorHazardRaceProvider(RaceProviderPort):
         channels = freq.get("c", [])
         return ["--" if band is None else f"{band}{channels[i]}" for i, band in enumerate(bands)]
 
-    def on_race_start(self, handler: Callable[[object], None]) -> None:
-        self._rhapi.events.on(Evt.RACE_START, handler)
 
-    def on_race_finish(self, handler: Callable[[object], None]) -> None:
-        self._rhapi.events.on(Evt.RACE_FINISH, handler)
+class RotorHazardRaceEventAdapter:
+    """Maps RotorHazard `Evt.*` events to the internal host-race event model."""
 
-    def on_race_stop(self, handler: Callable[[object], None]) -> None:
-        self._rhapi.events.on(Evt.RACE_STOP, handler)
+    def __init__(self, rhapi):
+        self._rhapi = rhapi
+        self._sink: HostRaceEventSink | None = None
+
+    def start(self, event_sink: HostRaceEventSink) -> None:
+        self._sink = event_sink
+        self._rhapi.events.on(Evt.RACE_START, self._on_race_start)
+        self._rhapi.events.on(Evt.RACE_FINISH, self._on_race_finish)
+        self._rhapi.events.on(Evt.RACE_STOP, self._on_race_stop)
+
+    def stop(self) -> None:
+        self._sink = None
+
+    def _emit(self, event_type: HostRaceEventType, payload: object = None) -> None:
+        if self._sink is None:
+            return
+        self._sink(HostRaceEvent(type=event_type, payload={"source_payload": payload}))
+
+    def _on_race_start(self, payload=None) -> None:
+        self._emit(HostRaceEventType.RACE_STARTED, payload)
+
+    def _on_race_finish(self, payload=None) -> None:
+        self._emit(HostRaceEventType.RACE_FINISHED, payload)
+
+    def _on_race_stop(self, payload=None) -> None:
+        self._emit(HostRaceEventType.RACE_STOPPED, payload)

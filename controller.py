@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 class RaceLink_LoRa:
     """RH-facing controller/facade delegating host-agnostic logic to RaceLinkApp."""
 
-    def __init__(self, rhapi, name, label, repository: InMemoryDeviceRepository | None = None, race_provider=None):
+    def __init__(self, rhapi, name, label, repository: InMemoryDeviceRepository | None = None, race_provider=None, race_event_port=None):
         self._rhapi = rhapi
         self.name = name
         self.label = label
@@ -54,6 +54,7 @@ class RaceLink_LoRa:
             repository=self.repository,
             transport_port=self.transport_adapter,
             race_provider_port=race_provider or MockRaceProvider(),
+            race_event_port=race_event_port,
             notify_fn=self.notify,
             config_getter=lambda key, default=None: self._rhapi.db.option(key, default),
             config_setter=lambda key, value: self._rhapi.db.option_set(key, value),

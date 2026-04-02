@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Callable, Optional
 
+from ..events import HostRaceEvent, HostRaceEventType
 from ..repository import InMemoryDeviceRepository, LegacyConfigMigration
 from ..services.config_service import ConfigService
 from ..services.control_service import ControlService
@@ -23,6 +24,7 @@ class RaceLinkApp:
         repository: InMemoryDeviceRepository,
         transport_port,
         race_provider_port,
+        race_event_port=None,
         notify_fn: Callable[[str], None] | None = None,
         config_getter: Callable[[str, object], object] | None = None,
         config_setter: Callable[[str, object], None] | None = None,
@@ -30,6 +32,7 @@ class RaceLinkApp:
         self.repository = repository
         self.transport_port = transport_port
         self.race_provider_port = race_provider_port
+        self.race_event_port = race_event_port
         self._notify_fn = notify_fn
         self._config_getter = config_getter
         self._config_setter = config_setter
@@ -44,6 +47,20 @@ class RaceLinkApp:
             self.save_to_db,
             self.repository,
         )
+        if self.race_event_port is not None:
+            self.race_event_port.start(self.on_race_event)
+
+    def on_race_event(self, event: HostRaceEvent) -> None:
+        event_type = getattr(event, "type", None)
+        payload = getattr(event, "payload", None)
+        if event_type == HostRaceEventType.RACE_STARTED:
+            self.on_race_start(payload)
+        elif event_type == HostRaceEventType.RACE_FINISHED:
+            self.on_race_finish(payload)
+        elif event_type == HostRaceEventType.RACE_STOPPED:
+            self.on_race_stop(payload)
+        elif event_type == HostRaceEventType.RACE_SNAPSHOT:
+            logger.debug("RaceLink Race Snapshot Event payload=%s", payload)
 
     def on_race_start(self, _args=None):
         logger.warning("RaceLink Race Start Event")

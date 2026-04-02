@@ -8,7 +8,7 @@ from ...controller import RaceLink_LoRa
 from ...core.app import RaceLinkApp
 from ...core.repository import InMemoryDeviceRepository
 from ...data import RL_DeviceGroup
-from ...providers.rotorhazard_provider import RotorHazardRaceProvider
+from ...providers.rotorhazard_provider import RotorHazardRaceEventAdapter, RotorHazardRaceProvider
 from ...racelink_webui import register_rl_blueprint
 from .ui import RotorHazardHostUIAdapter
 
@@ -22,6 +22,7 @@ class RotorHazardPluginRuntime:
         self.rhapi = rhapi
         self.repository = InMemoryDeviceRepository()
         self.race_provider = RotorHazardRaceProvider(rhapi)
+        self.race_events = RotorHazardRaceEventAdapter(rhapi)
         self.controller: RaceLink_LoRa | None = None
         self.app: RaceLinkApp | None = None
 
@@ -32,6 +33,7 @@ class RotorHazardPluginRuntime:
             "RaceLink",
             repository=self.repository,
             race_provider=self.race_provider,
+            race_event_port=self.race_events,
         )
         self.app = self.controller.app
         host_ui = RotorHazardHostUIAdapter(self.controller)
@@ -50,10 +52,5 @@ class RotorHazardPluginRuntime:
         self.rhapi.events.on(Evt.DATA_EXPORT_INITIALIZE, self.controller.host_ui.register_rl_dataexporter)
         self.rhapi.events.on(Evt.ACTIONS_INITIALIZE, self.controller.host_ui.registerActions)
         self.rhapi.events.on(Evt.STARTUP, self.controller.onStartup)
-
-        # RH callbacks forward into app callbacks (host-agnostic app remains RH-unaware).
-        self.race_provider.on_race_start(lambda args: self.app.on_race_start(args) if self.app else None)
-        self.race_provider.on_race_finish(lambda args: self.app.on_race_finish(args) if self.app else None)
-        self.race_provider.on_race_stop(lambda args: self.app.on_race_stop(args) if self.app else None)
 
         return self.controller
