@@ -51,11 +51,25 @@ class ControlService:
         self._update_group_cache(gid, f, p, b)
         self._transport.lora.send_control(recv3=b"\xFF\xFF\xFF", group_id=gid, flags=f, preset_id=p, brightness=b)
 
+
+    @staticmethod
+    def _flags_for_brightness(brightness: int) -> int:
+        bri = int(brightness)
+        return (RL_FLAG_POWER_ON if bri > 0 else 0) | RL_FLAG_HAS_BRI
+
+    def apply_device_switch(self, *, target_device: RL_Device, brightness: int, preset_id: int):
+        flags = self._flags_for_brightness(brightness)
+        self.send_racelink(target_device, flags, int(preset_id), int(brightness))
+
+    def apply_group_switch(self, *, group_id: int, brightness: int, preset_id: int):
+        flags = self._flags_for_brightness(brightness)
+        self.send_group_control(int(group_id), flags, int(preset_id), int(brightness))
+
     def send_wled_control(self, *, target_device=None, target_group=None, params=None):
         params = params or {}
         preset_id = int(params.get("presetId", 1))
         brightness = int(params.get("brightness", 0))
-        flags = (RL_FLAG_POWER_ON if brightness > 0 else 0) | RL_FLAG_HAS_BRI
+        flags = self._flags_for_brightness(brightness)
         if target_group is not None:
             self.send_group_control(int(target_group), flags, preset_id, brightness)
             return True

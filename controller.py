@@ -524,6 +524,57 @@ class RaceLink_LoRa(RaceLinkUIMixin):
     def _on_transport_disconnect(self) -> None:
         self.ready = False
 
+    def list_devices(self) -> list[RL_Device]:
+        return list(rl_devicelist)
+
+    def list_group_objects(self) -> list[RL_DeviceGroup]:
+        return list(rl_grouplist)
+
+    def get_group_count(self) -> int:
+        return len(rl_grouplist)
+
+    def add_group(self, group: RL_DeviceGroup) -> None:
+        rl_grouplist.append(group)
+
+    def query_devices(self, *, dev_types=None, capabilities=None) -> list[RL_Device]:
+        dev_types_set = set(int(d) for d in (dev_types or [])) if dev_types else None
+        cap_set = set(capabilities or []) if capabilities else None
+
+        def _matches_device(dev: RL_Device):
+            if dev_types_set and int(getattr(dev, "dev_type", 0) or 0) not in dev_types_set:
+                return False
+            if cap_set:
+                caps = set(get_dev_type_info(getattr(dev, "dev_type", 0)).get("caps", []))
+                if not cap_set.issubset(caps):
+                    return False
+            return True
+
+        return [dev for dev in rl_devicelist if _matches_device(dev)]
+
+    def query_groups(self, *, exclude_static: bool = False) -> list[tuple[int, RL_DeviceGroup]]:
+        out = []
+        for idx, group in enumerate(rl_grouplist):
+            if exclude_static and int(getattr(group, "static_group", 0)) == 1:
+                continue
+            value = 255 if (group.static_group and str(getattr(group, "name", "")) == "All WLED Nodes") else idx
+            out.append((value, group))
+        return out
+
+    def query_groups_for_devices(self, devices: list[RL_Device], capabilities=None) -> list[tuple[int, str]]:
+        cap_set = set(capabilities or []) if capabilities else None
+        group_ids = {int(getattr(dev, "groupId", 0) or 0) for dev in devices}
+        out = []
+        for idx, group in enumerate(rl_grouplist):
+            if group.static_group and str(getattr(group, "name", "")) == "All WLED Nodes":
+                if cap_set and "WLED" not in cap_set:
+                    continue
+                if devices:
+                    out.append((255, group.name))
+                continue
+            if idx in group_ids:
+                out.append((idx, group.name))
+        return out
+
     def getDeviceFromAddress(self, addr: str) -> Optional[RL_Device]:
         return self.device_service.get_device_from_address(addr)
 
