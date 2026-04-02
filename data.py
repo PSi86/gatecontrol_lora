@@ -315,9 +315,3 @@ def create_device(*, dev_type: int, specials: dict | None = None, **kwargs) -> R
     dev.specials = build_specials_state(dev_type, specials)
     return dev
 
-
-rl_backup_devicelist = []
-rl_backup_grouplist = [RL_DeviceGroup("All WLED Nodes", 1, 0)]
-
-rl_devicelist: list[RL_Device] = []
-rl_grouplist: list[RL_DeviceGroup] = []

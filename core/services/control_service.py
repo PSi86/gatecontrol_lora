@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import time
 
-from ...data import RL_Device, RL_FLAG_HAS_BRI, RL_FLAG_POWER_ON, rl_devicelist
+from ...data import RL_Device, RL_FLAG_HAS_BRI, RL_FLAG_POWER_ON
 from ...racelink_transport import LP, _mac_last3_from_hex
 
 
 class ControlService:
-    def __init__(self, transport_coordinator):
+    def __init__(self, transport_coordinator, repository):
         self._transport = transport_coordinator
+        self._repo = repository
 
     @staticmethod
     def _coerce(flags, preset_id, brightness, fallback: RL_Device | None = None):
@@ -18,9 +19,8 @@ class ControlService:
             brightness = fallback.brightness if brightness is None else brightness
         return int(flags) & 0xFF, int(preset_id) & 0xFF, int(brightness) & 0xFF
 
-    @staticmethod
-    def _update_group_cache(group_id: int, flags: int, preset_id: int, brightness: int):
-        for device in rl_devicelist:
+    def _update_group_cache(self, group_id: int, flags: int, preset_id: int, brightness: int):
+        for device in self._repo.all():
             if (int(getattr(device, "groupId", 0)) & 0xFF) != group_id:
                 continue
             device.flags = flags
@@ -90,7 +90,7 @@ class ControlService:
 
         total_packets = max(1, (len(data) + 7) // 8)
         ctrl = self._stream_ctrl(True, total_packets == 1, 0 if total_packets == 1 else total_packets)
-        targets = [device] if device is not None else [d for d in rl_devicelist if int(getattr(d, "groupId", 0) or 0) == int(group_id)]
+        targets = [device] if device is not None else self._repo.by_group(int(group_id))
         target_last3 = {_mac_last3_from_hex(dev.addr) for dev in targets if dev and dev.addr}
         target_last3.discard(b"\xFF\xFF\xFF")
         expected = len(target_last3)

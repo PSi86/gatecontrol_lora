@@ -5,19 +5,20 @@ import threading
 import time
 
 from .. import lora_proto_auto as LPA
-from ..data import create_device, rl_devicelist
+from ..data import create_device
 from ..racelink_transport import EV_ERROR, EV_RX_WINDOW_CLOSED, EV_RX_WINDOW_OPEN, LP, LoRaUSB
 
 logger = logging.getLogger(__name__)
 
 
 class LoRaTransportAdapter:
-    def __init__(self, rhapi, get_device_by_address, on_status_update, on_identify_update, on_disconnect):
+    def __init__(self, rhapi, get_device_by_address, on_status_update, on_identify_update, on_disconnect, repository):
         self._rhapi = rhapi
         self._get_device = get_device_by_address
         self._on_status_update = on_status_update
         self._on_identify_update = on_identify_update
         self._on_disconnect = on_disconnect
+        self._repo = repository
         self.lora = None
         self.lp = LP
         self._transport_hooks_installed = False
@@ -182,7 +183,7 @@ class LoRaTransportAdapter:
                 if not dev:
                     dev_type = ev.get("caps", 0)
                     dev = create_device(addr=mac12, dev_type=int(dev_type or 0), name=f"WLED {mac12}")
-                    rl_devicelist.append(dev)
+                    self._repo.add(dev)
                 self._on_identify_update(ev, dev)
         self._pending_try_match(ev)
 

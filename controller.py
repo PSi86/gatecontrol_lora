@@ -6,6 +6,7 @@ from typing import Dict, Optional, Tuple, Union
 
 from .core.services.config_service import ConfigService
 from .core.services.control_service import ControlService
+from .core.repository import InMemoryDeviceRepository, LegacyConfigMigration
 from .core.services.device_service import DeviceService
 from .core.services.startblock_service import StartblockService
 from .infrastructure.lora_transport_adapter import LoRaTransportAdapter
@@ -15,15 +16,7 @@ from .data import (
     RL_Device,
     RL_DeviceGroup,
     RL_Dev_Type,
-    build_specials_state,
-    create_device,
     get_dev_type_info,
-    RL_FLAG_HAS_BRI,
-    RL_FLAG_POWER_ON,
-    rl_backup_devicelist,
-    rl_backup_grouplist,
-    rl_devicelist,
-    rl_grouplist,
 )
 
 # ---- lora proto registry (auto-generated from lora_proto.h) ----
@@ -111,7 +104,7 @@ def build_startblock_payload_v1(
 
 
 class RaceLink_LoRa(RaceLinkUIMixin):
-    def __init__(self, rhapi, name, label):
+    def __init__(self, rhapi, name, label, repository: InMemoryDeviceRepository | None = None):
         self._rhapi = rhapi
         self.name = name
         self.label = label
@@ -123,21 +116,24 @@ class RaceLink_LoRa(RaceLinkUIMixin):
         self.uiDeviceList = None
         self.uiGroupList = None
         self.uiDiscoveryGroupList = None
+        self.repository = repository or InMemoryDeviceRepository()
         self.transport_adapter = LoRaTransportAdapter(
             rhapi=self._rhapi,
             get_device_by_address=self.getDeviceFromAddress,
             on_status_update=self._on_status_update,
             on_identify_update=self._on_identify_update,
             on_disconnect=self._on_transport_disconnect,
+            repository=self.repository,
         )
-        self.device_service = DeviceService(self.transport_adapter, notifier=self)
-        self.control_service = ControlService(self.transport_adapter)
+        self.device_service = DeviceService(self.transport_adapter, self.repository, notifier=self)
+        self.control_service = ControlService(self.transport_adapter, self.repository)
         self.config_service = ConfigService(self.transport_adapter, device_lookup=self)
         self.startblock_service = StartblockService(
             self.transport_adapter,
             self.control_service,
             self._rhapi,
             self.save_to_db,
+            self.repository,
         )
         # Basic colors: 1-9; Basic effects: 10-19; Special Effects (WLED only): 20-100
         self.uiEffectList = [
@@ -163,14 +159,8 @@ class RaceLink_LoRa(RaceLinkUIMixin):
 
     def save_to_db(self, args):
         logger.debug("RL: Writing current states to Database")
-        config_str_devices = str([obj.__dict__ for obj in rl_devicelist])
-        self._rhapi.db.option_set("rl_device_config", config_str_devices)
-
-        if len(rl_grouplist) >= len(rl_backup_grouplist):
-            config_str_groups = str([obj.__dict__ for obj in rl_grouplist])
-        else:
-            config_str_groups = str([obj.__dict__ for obj in rl_backup_grouplist])
-        self._rhapi.db.option_set("rl_groups_config", config_str_groups)
+        self._rhapi.db.option_set("rl_device_config", LegacyConfigMigration.dump_devices(self.repository))
+        self._rhapi.db.option_set("rl_groups_config", LegacyConfigMigration.dump_groups(self.repository))
 
     def load_from_db(self):
         logger.debug("RL: Applying config from Database")
@@ -178,84 +168,20 @@ class RaceLink_LoRa(RaceLinkUIMixin):
         config_str_groups = self._rhapi.db.option("rl_groups_config", None)
 
         if config_str_devices is None:
-            config_str_devices = str([obj.__dict__ for obj in rl_backup_devicelist])
+            config_str_devices = "[]"
             self._rhapi.db.option_set("rl_device_config", config_str_devices)
 
         if config_str_devices == "":
             config_str_devices = "[]"
             self._rhapi.db.option_set("rl_device_config", config_str_devices)
 
-        config_list_devices = list(eval(config_str_devices))
-        rl_devicelist.clear()
-
-        for device in config_list_devices:
-            logger.debug(device)
-            try:
-                flags = device.get("flags", None)
-                presetId = device.get("presetId", None)
-
-                if flags is None:
-                    legacy_state = int(device.get("state", 1) or 0)
-                    flags = RL_FLAG_POWER_ON if legacy_state else 0
-                    if "brightness" in device:
-                        flags |= RL_FLAG_HAS_BRI
-
-                if presetId is None:
-                    presetId = int(device.get("effect", 1) or 1)
-
-                brightness = int(device.get("brightness", 70) or 0)
-
-                dev_type = device.get("dev_type", None)
-                if dev_type is None:
-                    dev_type = device.get("device_type", None)
-                if dev_type is None:
-                    dev_type = device.get("caps", device.get("type", 0))
-
-                special_state = build_specials_state(int(dev_type or 0), device)
-                rl_devicelist.append(
-                    create_device(
-                        addr=str(device.get("addr", "")).upper(),
-                        dev_type=int(dev_type or 0),
-                        name=str(device.get("name", "")),
-                        groupId=int(device.get("groupId", 0) or 0),
-                        version=int(device.get("version", 0) or 0),
-                        caps=int(dev_type or 0),
-                        flags=int(flags) & 0xFF,
-                        presetId=int(presetId) & 0xFF,
-                        brightness=brightness & 0xFF,
-                        specials=special_state,
-                    )
-                )
-            except Exception:
-                logger.exception("RL: failed to load device entry from DB: %r", device)
-                continue
+        LegacyConfigMigration.load_devices_into_repo(config_str_devices, self.repository)
 
         if config_str_groups is None or config_str_groups == "":
-            config_str_groups = str([obj.__dict__ for obj in rl_backup_grouplist])
+            config_str_groups = str([{"name": "All WLED Nodes", "static_group": 1, "dev_type": 0}])
             self._rhapi.db.option_set("rl_groups_config", config_str_groups)
 
-        config_list_groups = list(eval(config_str_groups))
-        rl_grouplist.clear()
-
-        for group in config_list_groups:
-            logger.debug(group)
-            group_dev_type = group.get("dev_type", group.get("device_type", 0))
-            rl_grouplist.append(RL_DeviceGroup(group["name"], group["static_group"], group_dev_type))
-
-        rl_grouplist[:] = [
-            g
-            for g in rl_grouplist
-            if str(getattr(g, "name", "")).strip().lower() not in {"unconfigured", "all wled devices"}
-        ]
-
-        if not any(str(getattr(g, "name", "")).strip().lower() == "all wled nodes" for g in rl_grouplist):
-            rl_grouplist.append(RL_DeviceGroup("All WLED Nodes", static_group=1, dev_type=0))
-        else:
-            for g in rl_grouplist:
-                if str(getattr(g, "name", "")).strip().lower() == "all wled nodes":
-                    g.name = "All WLED Nodes"
-                    g.static_group = 1
-                    g.dev_type = 0
+        LegacyConfigMigration.load_groups_into_repo(config_str_groups, self.repository)
 
         self.uiDeviceList = self.createUiDevList()
         self.uiGroupList = self.createUiGroupList()
@@ -327,9 +253,9 @@ class RaceLink_LoRa(RaceLinkUIMixin):
 
     def forceGroups(self, args=None, sanityCheck: bool = True):
         logger.debug("Forcing all known devices to their stored groups.")
-        num_groups = len(rl_grouplist)
+        num_groups = len(self.repository.all_groups())
 
-        for device in rl_devicelist:
+        for device in self.repository.all():
             if sanityCheck is True and device.groupId >= num_groups:
                 device.groupId = 0
             self.setNodeGroupId(device, forceSet=True)
@@ -525,16 +451,16 @@ class RaceLink_LoRa(RaceLinkUIMixin):
         self.ready = False
 
     def list_devices(self) -> list[RL_Device]:
-        return list(rl_devicelist)
+        return self.repository.all()
 
     def list_group_objects(self) -> list[RL_DeviceGroup]:
-        return list(rl_grouplist)
+        return self.repository.all_groups()
 
     def get_group_count(self) -> int:
-        return len(rl_grouplist)
+        return len(self.repository.all_groups())
 
     def add_group(self, group: RL_DeviceGroup) -> None:
-        rl_grouplist.append(group)
+        self.repository.add_group(group)
 
     def query_devices(self, *, dev_types=None, capabilities=None) -> list[RL_Device]:
         dev_types_set = set(int(d) for d in (dev_types or [])) if dev_types else None
@@ -549,11 +475,11 @@ class RaceLink_LoRa(RaceLinkUIMixin):
                     return False
             return True
 
-        return [dev for dev in rl_devicelist if _matches_device(dev)]
+        return [dev for dev in self.repository.all() if _matches_device(dev)]
 
     def query_groups(self, *, exclude_static: bool = False) -> list[tuple[int, RL_DeviceGroup]]:
         out = []
-        for idx, group in enumerate(rl_grouplist):
+        for idx, group in enumerate(self.repository.all_groups()):
             if exclude_static and int(getattr(group, "static_group", 0)) == 1:
                 continue
             value = 255 if (group.static_group and str(getattr(group, "name", "")) == "All WLED Nodes") else idx
@@ -564,7 +490,7 @@ class RaceLink_LoRa(RaceLinkUIMixin):
         cap_set = set(capabilities or []) if capabilities else None
         group_ids = {int(getattr(dev, "groupId", 0) or 0) for dev in devices}
         out = []
-        for idx, group in enumerate(rl_grouplist):
+        for idx, group in enumerate(self.repository.all_groups()):
             if group.static_group and str(getattr(group, "name", "")) == "All WLED Nodes":
                 if cap_set and "WLED" not in cap_set:
                     continue

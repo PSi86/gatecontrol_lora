@@ -6,6 +6,7 @@ import logging
 
 from eventmanager import Evt
 
+from .core.repository import InMemoryDeviceRepository
 from .racelink_webui import register_rl_blueprint
 from .controller import RaceLink_LoRa
 from .data import (
@@ -17,10 +18,6 @@ from .data import (
     RL_FLAG_HAS_BRI,
     RL_FLAG_FORCE_TT0,
     RL_FLAG_FORCE_REAPPLY,
-    rl_backup_devicelist,
-    rl_backup_grouplist,
-    rl_devicelist,
-    rl_grouplist,
 )
 
 logger = logging.getLogger(__name__)
@@ -29,17 +26,19 @@ logger = logging.getLogger(__name__)
 def initialize(rhapi):
     global rl_instance
 
+    repository = InMemoryDeviceRepository()
     rl_instance = RaceLink_LoRa(
         rhapi,
         "RaceLink_LoRa",
         "RaceLink",
+        repository=repository,
     )
 
     register_rl_blueprint(
         rhapi,
         rl_instance=rl_instance,
-        rl_devicelist=rl_devicelist,
-        rl_grouplist=rl_grouplist,
+        rl_devicelist=repository.device_items,
+        rl_grouplist=repository.group_items,
         RL_DeviceGroup=RL_DeviceGroup,
         logger=logger,
     )
@@ -65,9 +64,5 @@ __all__ = [
     "RL_FLAG_FORCE_TT0",
     "RL_FLAG_FORCE_REAPPLY",
     "RaceLink_LoRa",
-    "rl_backup_devicelist",
-    "rl_backup_grouplist",
-    "rl_devicelist",
-    "rl_grouplist",
     "initialize",
 ]

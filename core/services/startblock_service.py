@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 
-from ...data import get_dev_type_info, rl_devicelist
+from ...data import get_dev_type_info
 from ...racelink_transport import _mac_last3_from_hex
 
 _STARTBLOCK_VER = 0x01
@@ -12,11 +12,12 @@ _ALLOWED_NAME_RE = re.compile(r"[^A-Z0-9 _\-\.\+]", re.IGNORECASE)
 
 
 class StartblockService:
-    def __init__(self, transport_coordinator, control_service, rhapi, save_to_db_fn):
+    def __init__(self, transport_coordinator, control_service, rhapi, save_to_db_fn, repository):
         self._transport = transport_coordinator
         self._control = control_service
         self._rhapi = rhapi
         self._save_to_db = save_to_db_fn
+        self._repo = repository
 
     @staticmethod
     def _sanitize_pilot_name(name: str, max_len: int = 32) -> str:
@@ -75,8 +76,8 @@ class StartblockService:
             return [target_device] if self._is_startblock_device(target_device) else []
         if target_group is not None:
             gid = int(target_group)
-            return [dev for dev in rl_devicelist if self._is_startblock_device(dev) and int(getattr(dev, "groupId", 0) or 0) == gid]
-        return [dev for dev in rl_devicelist if self._is_startblock_device(dev)]
+            return [dev for dev in self._repo.by_group(gid) if self._is_startblock_device(dev)]
+        return [dev for dev in self._repo.all() if self._is_startblock_device(dev)]
 
     def _normalize_startblock_slot_list(self, slot_list):
         out = []

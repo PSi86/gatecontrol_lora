@@ -3,33 +3,20 @@ from __future__ import annotations
 import logging
 from typing import Callable, Optional
 
-from ...data import RL_Device, rl_devicelist
+from ...data import RL_Device
 from ...racelink_transport import LP, _mac_last3_from_hex
 
 logger = logging.getLogger(__name__)
 
 
 class DeviceService:
-    def __init__(self, transport_coordinator, notifier=None):
+    def __init__(self, transport_coordinator, repository, notifier=None):
         self._transport = transport_coordinator
+        self._repo = repository
         self._notifier = notifier
 
-    @staticmethod
-    def get_device_from_address(addr: str) -> Optional[RL_Device]:
-        if not addr:
-            return None
-        s = str(addr).strip().upper()
-        if len(s) == 12:
-            for d in rl_devicelist:
-                if (d.addr or "").upper() == s:
-                    return d
-            return None
-        if len(s) == 6:
-            for d in rl_devicelist:
-                if (d.addr or "").upper().endswith(s):
-                    return d
-            return None
-        return None
+    def get_device_from_address(self, addr: str) -> Optional[RL_Device]:
+        return self._repo.get(addr)
 
     def discover_devices(self, group_filter=255, target_device=None, add_to_group=-1, set_group_fn: Callable | None = None):
         if not self._transport.ensure_ready("getDevices"):
@@ -137,9 +124,7 @@ class DeviceService:
                 if updated == 0:
                     target_device.mark_offline("Missing reply (STATUS)")
             else:
-                targets = list(rl_devicelist) if group_filter == 255 else [
-                    dev for dev in rl_devicelist if int(getattr(dev, "groupId", 0)) == int(group_filter)
-                ]
+                targets = self._repo.all() if group_filter == 255 else self._repo.by_group(int(group_filter))
                 for dev in targets:
                     mac = (dev.addr or "").upper()
                     if mac and mac not in responders and mac[-6:] not in responders:
