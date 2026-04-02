@@ -4,13 +4,17 @@ Stand: 2026-04-02.
 
 Dieses Dokument erfasst bestehende Kompatibilitäts-Shims und Legacy-Aliase, benennt den Zielpfad (neuer API-Name), dokumentiert bekannte aktive Nutzung und definiert Bereinigungskriterien inkl. geplantem Meilenstein.
 
-## 1) Backward-Compat Import-Shims (`platform/*`)
+## 1) Backward-Compat Import-Shims (`platform/*`) — **historisch (entfernt)**
 
-| Altpfad / Shim | Typ | Zielpfad (neu) | Aktiv genutzt von … (bekannt) | Migrationshinweis | Entfernungskriterium | Geplante Bereinigung |
-|---|---|---|---|---|---|---|
-| `platform/rh_adapter.py` (`RotorHazardAdapter`) | Import-Reexport | `plugins.rotorhazard.bootstrap.RotorHazardAdapter` | `platform/__init__.py` reexportiert den Namen weiterhin; direkte weitere Treffer im Repo aktuell nicht gefunden. | Neue Importe direkt auf `plugins.rotorhazard.bootstrap` umstellen. | Entfernen, sobald keine externen/downstream Importe mehr auf `platform.rh_adapter` zeigen (Code-Search + Release-Notes mit Breaking-Change-Hinweis). | **v1.1 (M1: Compat-Warnungen aktivieren)**: Deprecation-Warnung; **v2.0 (M3: Breaking Cleanup)**: Entfernen. |
-| `platform/flask_adapter.py` (`FlaskStandaloneAdapter`) | Import-Reexport | `plugins.standalone.flask_adapter.FlaskStandaloneAdapter` | `platform/__init__.py` reexportiert den Namen weiterhin; direkte weitere Treffer im Repo aktuell nicht gefunden. | Neue Importe direkt auf `plugins.standalone.flask_adapter` umstellen. | Entfernen, sobald keine externen/downstream Importe mehr auf `platform.flask_adapter` zeigen. | **v1.1 (M1)** Deprecation-Warnung; **v2.0 (M3)** Entfernen. |
-| `platform/ports.py` (`ConfigStorePort`, `EventBusPort`, `RacePilotDataProviderPort`, `UINotificationPort`) | Import-Reexport | `adapters.ports.*` | Aktive interne Nutzung im Repo aktuell nicht gefunden. | Auf `from ...adapters.ports import ...` migrieren. | Entfernen, wenn keine Importpfade `platform.ports` mehr in Repo + integr. Projekten vorkommen. | **v1.1 (M1)** Deprecation-Warnung; **v2.0 (M3)** Entfernen. |
+Die frühere Kompatibilitätsschicht unter `platform/*` wurde im Major-Cleanup am **2026-04-02** entfernt (`platform/__init__.py`, `platform/rh_adapter.py`, `platform/flask_adapter.py`, `platform/ports.py`).
+
+| Altpfad / Shim | Typ | Zielpfad (neu) | Letzter bekannter Status | Migrationshinweis | Entfernung |
+|---|---|---|---|---|---|
+| `platform/rh_adapter.py` (`RotorHazardAdapter`) | Import-Reexport | `plugins.rotorhazard.bootstrap.RotorHazardAdapter` | Shim war vorhanden, interne Nutzung nicht nachweisbar. | Importe direkt auf `plugins.rotorhazard.bootstrap` umstellen. | **Entfernt am 2026-04-02 (Major-Cleanup)** |
+| `platform/flask_adapter.py` (`FlaskStandaloneAdapter`) | Import-Reexport | `plugins.standalone.flask_adapter.FlaskStandaloneAdapter` | Shim war vorhanden, interne Nutzung nicht nachweisbar. | Importe direkt auf `plugins.standalone.flask_adapter` umstellen. | **Entfernt am 2026-04-02 (Major-Cleanup)** |
+| `platform/ports.py` (`ConfigStorePort`, `EventBusPort`, `RacePilotDataProviderPort`, `UINotificationPort`) | Import-Reexport | `adapters.ports.*` | Shim war vorhanden, interne Nutzung nicht nachweisbar. | Importe auf `adapters.ports` umstellen. | **Entfernt am 2026-04-02 (Major-Cleanup)** |
+
+> Hinweis zum früheren Plan "Warnungen aktivieren": Durch den direkt vollzogenen Major-Cleanup wurden keine dauerhaften Laufzeit-Warnungen (`DeprecationWarning`) mehr in den entfernten Shims aktiviert. Downstream-Projekte müssen stattdessen auf die Zielpfade migrieren.
 
 ## 2) Legacy-Methoden / Alias-Namen in `controller.py`
 

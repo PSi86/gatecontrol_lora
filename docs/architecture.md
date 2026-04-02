@@ -21,7 +21,7 @@
 
 - RH-Race-Provider und RH-Event-Adapter wurden nach `plugins/rotorhazard/host/` verschoben.
 - RH-WebUI (Blueprint + Templates + Static Assets) liegt unter `plugins/rotorhazard/presentation/`.
-- `platform/*` bleibt nur als Kompatibilitätsschicht bestehen und re-exportiert neue Pfade.
+- Die frühere Kompatibilitätsschicht `platform/*` wurde im Major-Cleanup am 2026-04-02 entfernt; gültige Importpfade sind `plugins.rotorhazard.*`, `plugins.standalone.*` und `adapters.ports`.
 
 ## Ist-Stand der Abhängigkeiten
 
