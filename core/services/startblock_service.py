@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import re
 
 from ...data import get_dev_type_info
@@ -12,10 +11,10 @@ _ALLOWED_NAME_RE = re.compile(r"[^A-Z0-9 _\-\.\+]", re.IGNORECASE)
 
 
 class StartblockService:
-    def __init__(self, transport_coordinator, control_service, rhapi, save_to_db_fn, repository):
+    def __init__(self, transport_coordinator, control_service, race_provider, save_to_db_fn, repository):
         self._transport = transport_coordinator
         self._control = control_service
-        self._rhapi = rhapi
+        self._race_provider = race_provider
         self._save_to_db = save_to_db_fn
         self._repo = repository
 
@@ -89,16 +88,9 @@ class StartblockService:
         return out
 
     def get_current_heat_slot_list(self):
-        freq = json.loads(self._rhapi.race.frequencyset.frequencies)
-        racechannels = ["--" if band is None else f"{band}{freq['c'][i]}" for i, band in enumerate(freq["b"])]
-        ctx = self._rhapi._racecontext
-        heat_nodes = ctx.rhdata.get_heatNodes_by_heat(ctx.race.current_heat) or []
-        callsign_by_slot = {}
-        for hn in heat_nodes:
-            slot = int(getattr(hn, "node_index"))
-            pid = getattr(hn, "pilot_id", None)
-            p = ctx.rhdata.get_pilot(pid) if pid else None
-            callsign_by_slot[slot] = (p.callsign if p else "")
+        racechannels = list(self._race_provider.get_frequency_channels() or [])
+        racechannels.extend(["--"] * max(0, 8 - len(racechannels)))
+        callsign_by_slot = {int(slot): callsign for slot, callsign in self._race_provider.get_pilot_assignments()}
         n = min(len(racechannels), 8)
         return [(i, callsign_by_slot.get(i, ""), racechannels[i]) for i in range(n)]
 

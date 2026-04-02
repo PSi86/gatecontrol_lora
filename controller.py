@@ -11,6 +11,7 @@ from .core.services.device_service import DeviceService
 from .core.services.startblock_service import StartblockService
 from .infrastructure.lora_transport_adapter import LoRaTransportAdapter
 from .ui import RaceLinkUIMixin
+from .providers.rotorhazard_provider import RotorHazardRaceProvider
 from RHUI import UIFieldSelectOption
 from .data import (
     RL_Device,
@@ -104,7 +105,7 @@ def build_startblock_payload_v1(
 
 
 class RaceLink_LoRa(RaceLinkUIMixin):
-    def __init__(self, rhapi, name, label, repository: InMemoryDeviceRepository | None = None):
+    def __init__(self, rhapi, name, label, repository: InMemoryDeviceRepository | None = None, race_provider=None):
         self._rhapi = rhapi
         self.name = name
         self.label = label
@@ -128,10 +129,11 @@ class RaceLink_LoRa(RaceLinkUIMixin):
         self.device_service = DeviceService(self.transport_adapter, self.repository, notifier=self)
         self.control_service = ControlService(self.transport_adapter, self.repository)
         self.config_service = ConfigService(self.transport_adapter, device_lookup=self)
+        self.race_provider = race_provider or RotorHazardRaceProvider(self._rhapi)
         self.startblock_service = StartblockService(
             self.transport_adapter,
             self.control_service,
-            self._rhapi,
+            self.race_provider,
             self.save_to_db,
             self.repository,
         )

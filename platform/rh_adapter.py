@@ -10,7 +10,8 @@ from ..controller import RaceLink_LoRa
 from ..core.repository import InMemoryDeviceRepository
 from ..data import RL_DeviceGroup
 from ..racelink_webui import register_rl_blueprint
-from .ports import ConfigStorePort, EventBusPort, RacePilotDataProviderPort, UINotificationPort
+from ..providers.rotorhazard_provider import RotorHazardRaceProvider
+from .ports import ConfigStorePort, EventBusPort, UINotificationPort
 
 logger = logging.getLogger(__name__)
 
@@ -61,15 +62,6 @@ class RHUINotifier(UINotificationPort):
         self._rhapi.ui.broadcast_ui(panel)
 
 
-class RHRacePilotDataProvider(RacePilotDataProviderPort):
-    def __init__(self, rhapi):
-        self._rhapi = rhapi
-
-    def get_current_heat_slot_list(self) -> list[tuple[int, str, str]]:
-        # Delegated to service via rhapi object in current architecture.
-        return []
-
-
 class RotorHazardAdapter:
     """Adapter wiring RaceLink to RotorHazard runtime (`rhapi`)."""
 
@@ -79,7 +71,7 @@ class RotorHazardAdapter:
         self.event_bus = RHEventBus(rhapi)
         self.config_store = RHConfigStore(rhapi)
         self.ui = RHUINotifier(rhapi)
-        self.race_data = RHRacePilotDataProvider(rhapi)
+        self.race_provider = RotorHazardRaceProvider(rhapi)
         self.rl_instance: RaceLink_LoRa | None = None
 
     def initialize(self) -> RaceLink_LoRa:
@@ -88,6 +80,7 @@ class RotorHazardAdapter:
             "RaceLink_LoRa",
             "RaceLink",
             repository=self.repository,
+            race_provider=self.race_provider,
         )
 
         register_rl_blueprint(
@@ -103,8 +96,8 @@ class RotorHazardAdapter:
         self.event_bus.subscribe(Evt.DATA_EXPORT_INITIALIZE, self.rl_instance.register_rl_dataexporter)
         self.event_bus.subscribe(Evt.ACTIONS_INITIALIZE, self.rl_instance.registerActions)
         self.event_bus.subscribe(Evt.STARTUP, self.rl_instance.onStartup)
-        self.event_bus.subscribe(Evt.RACE_START, self.rl_instance.onRaceStart)
-        self.event_bus.subscribe(Evt.RACE_FINISH, self.rl_instance.onRaceFinish)
-        self.event_bus.subscribe(Evt.RACE_STOP, self.rl_instance.onRaceStop)
+        self.race_provider.on_race_start(self.rl_instance.onRaceStart)
+        self.race_provider.on_race_finish(self.rl_instance.onRaceFinish)
+        self.race_provider.on_race_stop(self.rl_instance.onRaceStop)
 
         return self.rl_instance
