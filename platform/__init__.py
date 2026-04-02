@@ -1,4 +1,4 @@
-"""Platform adapters and runtime ports for RaceLink."""
+"""Deprecated platform package kept as compatibility layer."""
 
 from .flask_adapter import FlaskStandaloneAdapter
 from .rh_adapter import RotorHazardAdapter

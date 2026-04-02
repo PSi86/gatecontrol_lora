@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 
 from ....data import RL_DeviceGroup
-from ....racelink_webui import register_rl_blueprint
+from ..presentation.racelink_webui import register_rl_blueprint
 
 logger = logging.getLogger(__name__)
 

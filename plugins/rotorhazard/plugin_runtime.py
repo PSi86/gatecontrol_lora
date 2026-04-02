@@ -3,7 +3,7 @@ from __future__ import annotations
 from ...controller import RaceLink_LoRa
 from ...core.app import RaceLinkApp
 from ...core.repository import InMemoryDeviceRepository
-from ...providers.rotorhazard_provider import RotorHazardRaceEventAdapter, RotorHazardRaceProvider
+from .host.rotorhazard_provider import RotorHazardRaceEventAdapter, RotorHazardRaceProvider
 from .features import config_io, events, ui_extensions, web_blueprint
 from .ui import RotorHazardHostUIAdapter
 

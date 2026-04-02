@@ -49,7 +49,7 @@ import shutil
 from flask import Blueprint, request, jsonify, templating, Response, stream_with_context
 
 try:
-    from .data import effect_select_options, get_dev_type_info, get_specials_config, get_special_keys_for_caps, is_wled_dev_type  # type: ignore
+    from ....data import effect_select_options, get_dev_type_info, get_specials_config, get_special_keys_for_caps, is_wled_dev_type  # type: ignore
 except Exception:  # pragma: no cover
     from data import effect_select_options, get_dev_type_info, get_specials_config, get_special_keys_for_caps, is_wled_dev_type
 
@@ -251,7 +251,7 @@ def register_rl_blueprint(
 
     # Event type constants from racelink_transport (optional)
     try:
-        from .racelink_transport import EV_ERROR, EV_RX_WINDOW_OPEN, EV_RX_WINDOW_CLOSED, EV_TX_DONE  # type: ignore
+        from ....racelink_transport import EV_ERROR, EV_RX_WINDOW_OPEN, EV_RX_WINDOW_CLOSED, EV_TX_DONE  # type: ignore
     except Exception:
         try:
             from racelink_transport import EV_ERROR, EV_RX_WINDOW_OPEN, EV_RX_WINDOW_CLOSED, EV_TX_DONE  # type: ignore

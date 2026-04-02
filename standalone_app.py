@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 try:
-    from .platform.flask_adapter import FlaskStandaloneAdapter
+    from .plugins.standalone import FlaskStandaloneAdapter
 except Exception:  # pragma: no cover
-    from platform.flask_adapter import FlaskStandaloneAdapter
+    from plugins.standalone import FlaskStandaloneAdapter
 
 
 def create_app():

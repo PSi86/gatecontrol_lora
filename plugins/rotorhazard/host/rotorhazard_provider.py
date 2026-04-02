@@ -4,9 +4,9 @@ import json
 
 from eventmanager import Evt
 
-from ..core.events import HostRaceEvent, HostRaceEventType
-from ..core.ports.host_race_events import HostRaceEventSink
-from ..core.ports.race_provider import RaceProviderPort
+from ....core.events import HostRaceEvent, HostRaceEventType
+from ....core.ports.host_race_events import HostRaceEventSink
+from ....core.ports.race_provider import RaceProviderPort
 
 
 class RotorHazardRaceProvider(RaceProviderPort):
