@@ -11,6 +11,7 @@ from ..core.repository import InMemoryDeviceRepository
 from ..data import RL_DeviceGroup
 from ..racelink_webui import register_rl_blueprint
 from ..providers.rotorhazard_provider import RotorHazardRaceProvider
+from ..plugins.rotorhazard.ui import RotorHazardHostUIAdapter
 from .ports import ConfigStorePort, EventBusPort, UINotificationPort
 
 logger = logging.getLogger(__name__)
@@ -83,6 +84,8 @@ class RotorHazardAdapter:
             race_provider=self.race_provider,
         )
 
+        self.rl_instance.bind_host_ui(RotorHazardHostUIAdapter(self.rl_instance))
+
         register_rl_blueprint(
             self.rhapi,
             rl_instance=self.rl_instance,
@@ -92,9 +95,9 @@ class RotorHazardAdapter:
             logger=logger,
         )
 
-        self.event_bus.subscribe(Evt.DATA_IMPORT_INITIALIZE, self.rl_instance.register_rl_dataimporter)
-        self.event_bus.subscribe(Evt.DATA_EXPORT_INITIALIZE, self.rl_instance.register_rl_dataexporter)
-        self.event_bus.subscribe(Evt.ACTIONS_INITIALIZE, self.rl_instance.registerActions)
+        self.event_bus.subscribe(Evt.DATA_IMPORT_INITIALIZE, self.rl_instance.host_ui.register_rl_dataimporter)
+        self.event_bus.subscribe(Evt.DATA_EXPORT_INITIALIZE, self.rl_instance.host_ui.register_rl_dataexporter)
+        self.event_bus.subscribe(Evt.ACTIONS_INITIALIZE, self.rl_instance.host_ui.registerActions)
         self.event_bus.subscribe(Evt.STARTUP, self.rl_instance.onStartup)
         self.race_provider.on_race_start(self.rl_instance.onRaceStart)
         self.race_provider.on_race_finish(self.rl_instance.onRaceFinish)

@@ -59,3 +59,6 @@ class TransportCoordinatorPort(Protocol):
     def wait_rx_window(self, send_fn: Callable[[], None], collect_pred=None, fail_safe_s: float = 8.0): ...
 
     def send_and_wait_for_reply(self, recv3: bytes, opcode7: int, send_fn, timeout_s: float = 8.0): ...
+
+
+from .host_ui import HostUIPort

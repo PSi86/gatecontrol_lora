@@ -10,6 +10,7 @@ from ...core.repository import InMemoryDeviceRepository
 from ...data import RL_DeviceGroup
 from ...providers.rotorhazard_provider import RotorHazardRaceProvider
 from ...racelink_webui import register_rl_blueprint
+from .ui import RotorHazardHostUIAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,8 @@ class RotorHazardPluginRuntime:
             race_provider=self.race_provider,
         )
         self.app = self.controller.app
+        host_ui = RotorHazardHostUIAdapter(self.controller)
+        self.controller.bind_host_ui(host_ui)
 
         register_rl_blueprint(
             self.rhapi,
@@ -43,9 +46,9 @@ class RotorHazardPluginRuntime:
             logger=logger,
         )
 
-        self.rhapi.events.on(Evt.DATA_IMPORT_INITIALIZE, self.controller.register_rl_dataimporter)
-        self.rhapi.events.on(Evt.DATA_EXPORT_INITIALIZE, self.controller.register_rl_dataexporter)
-        self.rhapi.events.on(Evt.ACTIONS_INITIALIZE, self.controller.registerActions)
+        self.rhapi.events.on(Evt.DATA_IMPORT_INITIALIZE, self.controller.host_ui.register_rl_dataimporter)
+        self.rhapi.events.on(Evt.DATA_EXPORT_INITIALIZE, self.controller.host_ui.register_rl_dataexporter)
+        self.rhapi.events.on(Evt.ACTIONS_INITIALIZE, self.controller.host_ui.registerActions)
         self.rhapi.events.on(Evt.STARTUP, self.controller.onStartup)
 
         # RH callbacks forward into app callbacks (host-agnostic app remains RH-unaware).

@@ -144,6 +144,12 @@ class RaceLinkApp:
                 device.groupId = 0
             self.setNodeGroupId(device, forceSet=True)
 
+    def apply_device_switch(self, *, target_device: RL_Device, brightness: int, preset_id: int):
+        self.control_service.apply_device_switch(target_device=target_device, brightness=brightness, preset_id=preset_id)
+
+    def apply_group_switch(self, *, group_id: int, brightness: int, preset_id: int):
+        self.control_service.apply_group_switch(group_id=group_id, brightness=brightness, preset_id=preset_id)
+
     def sendRaceLink(self, targetDevice, flags=None, presetId=None, brightness=None):
         self.control_service.send_racelink(targetDevice, flags, presetId, brightness)
 

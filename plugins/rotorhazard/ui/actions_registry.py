@@ -5,12 +5,12 @@ import logging
 from EventActions import ActionEffect
 from RHUI import UIField, UIFieldType
 
-from ...data import get_specials_config
+from ....data import get_specials_config
 
 logger = logging.getLogger(__name__)
 
 
-def registerActions(gc, args=None):
+def register_actions(gc, args=None):
     logger.debug("Registering RaceLink Actions")
 
     if args and "register_fn" in args:
@@ -146,12 +146,12 @@ def registerActions(gc, args=None):
 
 def _make_special_action_handler(gc, fn_key: str, mode: str):
     def _handler(action, args=None):
-        return specialAction(gc, action, fn_key, mode)
+        return special_action(gc, action, fn_key, mode)
 
     return _handler
 
 
-def specialAction(gc, action, fn_key: str, mode: str):
+def special_action(gc, action, fn_key: str, mode: str):
     specials = get_specials_config()
     fn_info = None
     cap_key = None

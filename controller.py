@@ -3,14 +3,11 @@ from __future__ import annotations
 import logging
 from typing import Optional, Union
 
-from RHUI import UIFieldSelectOption
-
 from .core.app import RaceLinkApp
 from .core.repository import InMemoryDeviceRepository
 from .data import RL_Device
 from .infrastructure.lora_transport_adapter import LoRaTransportAdapter
 from .providers.mock_provider import MockRaceProvider
-from .ui import RaceLinkUIMixin
 
 # ---- lora proto registry (auto-generated from lora_proto.h) ----
 try:
@@ -27,7 +24,7 @@ except Exception:
 logger = logging.getLogger(__name__)
 
 
-class RaceLink_LoRa(RaceLinkUIMixin):
+class RaceLink_LoRa:
     """RH-facing controller/facade delegating host-agnostic logic to RaceLinkApp."""
 
     def __init__(self, rhapi, name, label, repository: InMemoryDeviceRepository | None = None, race_provider=None):
@@ -68,25 +65,17 @@ class RaceLink_LoRa(RaceLinkUIMixin):
         self.config_service = self.app.config_service
         self.startblock_service = self.app.startblock_service
 
-        # Basic colors: 1-9; Basic effects: 10-19; Special Effects (WLED only): 20-100
-        self.uiEffectList = [
-            UIFieldSelectOption("01", "Red"),
-            UIFieldSelectOption("02", "Green"),
-            UIFieldSelectOption("03", "Blue"),
-            UIFieldSelectOption("04", "White"),
-            UIFieldSelectOption("05", "Yellow"),
-            UIFieldSelectOption("06", "Cyan"),
-            UIFieldSelectOption("07", "Magenta"),
-            UIFieldSelectOption("10", "Blink Multicolor"),
-            UIFieldSelectOption("11", "Pulse White"),
-            UIFieldSelectOption("12", "Colorloop"),
-            UIFieldSelectOption("13", "Blink RGB"),
-            UIFieldSelectOption("20", "WLED Chaser"),
-            UIFieldSelectOption("21", "WLED Chaser inverted"),
-            UIFieldSelectOption("22", "WLED Rainbow"),
-        ]
+        self.uiEffectList = []
+        self.host_ui = None
+
+    def bind_host_ui(self, host_ui):
+        self.host_ui = host_ui
 
     def __getattr__(self, item):
+        host_ui = self.__dict__.get("host_ui")
+        if host_ui and hasattr(host_ui, item):
+            return getattr(host_ui, item)
+
         app = self.__dict__.get("app")
         if app and hasattr(app, item):
             return getattr(app, item)
@@ -97,9 +86,9 @@ class RaceLink_LoRa(RaceLinkUIMixin):
         self.uiDeviceList = self.createUiDevList()
         self.uiGroupList = self.createUiGroupList()
         self.uiDiscoveryGroupList = self.createUiGroupList(True)
-        self.register_settings()
+        self.register_settings_ui()
         self.register_quickset_ui()
-        self.registerActions()
+        self.register_actions()
         self._rhapi.ui.broadcast_ui("settings")
         self._rhapi.ui.broadcast_ui("run")
         self.discoverPort({})
