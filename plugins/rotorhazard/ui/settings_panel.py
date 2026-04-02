@@ -46,21 +46,21 @@ def register_settings(gc):
         "rl_settings",
         "rl_btn_force_groups",
         "Set all Groups",
-        gc.forceGroups,
+        gc.force_groups,
         args={"manual": True},
     )
     gc._rhapi.ui.register_quickbutton(
         "rl_settings",
         "rl_btn_get_devices",
         "Discover Devices",
-        gc.discoveryAction,
+        gc.discover_devices_action,
         args={"manual": True},
     )
     gc._rhapi.ui.register_quickbutton(
         "rl_settings",
         "rl_run_autodetect",
         "Detect USB Communicator",
-        gc.discoverPort,
+        gc.discover_port,
         args={"manual": True},
     )
 

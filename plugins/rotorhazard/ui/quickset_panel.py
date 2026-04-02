@@ -23,6 +23,6 @@ def register_quickset_ui(gc):
         "rl_quickset",
         "run_quickset",
         "Apply",
-        gc.groupSwitch,
+        gc.group_switch_action,
         args={"manual": True},
     )

@@ -8,4 +8,4 @@ def activate(plugin) -> None:
     controller = plugin.controller
     rhapi = plugin.rhapi
 
-    rhapi.events.on(Evt.ACTIONS_INITIALIZE, controller.host_ui.registerActions)
+    rhapi.events.on(Evt.ACTIONS_INITIALIZE, controller.host_ui.register_actions)

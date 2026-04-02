@@ -73,6 +73,7 @@ class RaceLink_LoRa:
         self.host_ui = host_ui
 
     def __getattr__(self, item):
+        logger.warning("RaceLink_LoRa dynamic attribute fallback hit for '%s'", item)
         host_ui = self.__dict__.get("host_ui")
         if host_ui and hasattr(host_ui, item):
             return getattr(host_ui, item)
@@ -82,21 +83,59 @@ class RaceLink_LoRa:
             return getattr(app, item)
         raise AttributeError(item)
 
-    def onStartup(self, _args):
+    def on_startup(self, _args):
         self.app.load_from_db()
-        self.uiDeviceList = self.createUiDevList()
-        self.uiGroupList = self.createUiGroupList()
-        self.uiDiscoveryGroupList = self.createUiGroupList(True)
+        self.uiDeviceList = self.create_ui_device_list()
+        self.uiGroupList = self.create_ui_group_list()
+        self.uiDiscoveryGroupList = self.create_ui_group_list(True)
         self.register_settings_ui()
         self.register_quickset_ui()
         self.register_actions()
         self._rhapi.ui.broadcast_ui("settings")
         self._rhapi.ui.broadcast_ui("run")
-        self.discoverPort({})
+        self.discover_port({})
 
-    def discoverPort(self, args):
+    def discover_port(self, args):
         self.ready = self.transport_adapter.discover_port(args)
         self.lora = self.transport_adapter.lora
+
+    def onStartup(self, _args):
+        self.on_startup(_args)
+
+    def discoverPort(self, args):
+        self.discover_port(args)
+
+    def create_ui_device_list(self):
+        return self.host_ui.create_ui_device_list()
+
+    def create_ui_group_list(self, exclude_static=False):
+        return self.host_ui.create_ui_group_list(exclude_static=exclude_static)
+
+    def create_filtered_ui_device_list(self, *, dev_types=None, capabilities=None, output_devices=True, output_groups=True):
+        return self.host_ui.create_filtered_ui_device_list(
+            dev_types=dev_types,
+            capabilities=capabilities,
+            output_devices=output_devices,
+            output_groups=output_groups,
+        )
+
+    def register_settings_ui(self):
+        self.host_ui.register_settings_ui()
+
+    def register_quickset_ui(self):
+        self.host_ui.register_quickset_ui()
+
+    def register_actions(self, args=None):
+        self.host_ui.register_actions(args=args)
+
+    def group_switch_action(self, action, args=None):
+        self.host_ui.group_switch_action(action, args=args)
+
+    def node_switch_action(self, action, args=None):
+        self.host_ui.node_switch_action(action, args=args)
+
+    def discover_devices_action(self, args):
+        self.host_ui.discover_devices_action(args)
 
     def _on_status_update(self, ev: dict) -> None:
         sender3_hex = self._to_hex_str(ev.get("sender3"))
@@ -181,4 +220,97 @@ class RaceLink_LoRa:
         return str(addr).strip().replace(":", "").replace(" ", "").upper()
 
     def get_device_by_address(self, addr: str) -> Optional[RL_Device]:
-        return self.getDeviceFromAddress(addr)
+        return self.get_device_from_address(addr)
+
+    def get_device_from_address(self, addr: str) -> Optional[RL_Device]:
+        return self.app.getDeviceFromAddress(addr)
+
+    def getDeviceFromAddress(self, addr: str) -> Optional[RL_Device]:
+        return self.get_device_from_address(addr)
+
+    def save_to_db(self, args=None):
+        self.app.save_to_db(args)
+
+    def load_from_db(self):
+        self.app.load_from_db()
+
+    def force_groups(self, args=None, sanity_check: bool = True):
+        self.app.forceGroups(args, sanityCheck=sanity_check)
+
+    def forceGroups(self, args=None, sanityCheck: bool = True):
+        self.force_groups(args=args, sanity_check=sanityCheck)
+
+    def get_devices(self, group_filter=255, target_device=None, add_to_group=-1):
+        return self.app.getDevices(groupFilter=group_filter, targetDevice=target_device, addToGroup=add_to_group)
+
+    def get_status(self, group_filter=255, target_device=None):
+        return self.app.getStatus(groupFilter=group_filter, targetDevice=target_device)
+
+    def list_devices(self):
+        return self.app.list_devices()
+
+    def list_group_objects(self):
+        return self.app.list_group_objects()
+
+    def get_group_count(self):
+        return self.app.get_group_count()
+
+    def add_group(self, group):
+        self.app.add_group(group)
+
+    def query_devices(self, *, dev_types=None, capabilities=None):
+        return self.app.query_devices(dev_types=dev_types, capabilities=capabilities)
+
+    def query_groups(self, *, exclude_static: bool = False):
+        return self.app.query_groups(exclude_static=exclude_static)
+
+    def query_groups_for_devices(self, devices, cap_set=None):
+        return self.app.query_groups_for_devices(devices, cap_set)
+
+    def send_wled_control(self, *, target_device=None, target_group=None, params=None):
+        return self.app.sendWledControl(targetDevice=target_device, targetGroup=target_group, params=params)
+
+    def send_startblock_config(self, *, target_device=None, target_group=None, params=None):
+        return self.app.sendStartblockConfig(targetDevice=target_device, targetGroup=target_group, params=params)
+
+    def send_startblock_control(self, *, target_device=None, target_group=None, params=None):
+        return self.app.sendStartblockControl(targetDevice=target_device, targetGroup=target_group, params=params)
+
+    def send_group_control(self, group_id, flags, preset_id, brightness):
+        return self.app.sendGroupControl(group_id, flags, preset_id, brightness)
+
+    def send_racelink(self, target_device, flags=None, preset_id=None, brightness=None):
+        return self.app.sendRaceLink(target_device, flags, preset_id, brightness)
+
+    def send_config(self, option, data0=0, data1=0, data2=0, data3=0, recv3=b"\xFF\xFF\xFF", wait_for_ack=False, timeout_s=6.0):
+        return self.app.sendConfig(option, data0, data1, data2, data3, recv3, wait_for_ack, timeout_s)
+
+    def send_stream(self, payload: bytes, group_id: int | None = None, device: RL_Device | None = None, retries: int = 2, timeout_s: float = 8.0):
+        return self.app.sendStream(payload, groupId=group_id, device=device, retries=retries, timeout_s=timeout_s)
+
+    def getDevices(self, groupFilter=255, targetDevice=None, addToGroup=-1):
+        return self.get_devices(group_filter=groupFilter, target_device=targetDevice, add_to_group=addToGroup)
+
+    def getStatus(self, groupFilter=255, targetDevice=None):
+        return self.get_status(group_filter=groupFilter, target_device=targetDevice)
+
+    def sendWledControl(self, *, targetDevice=None, targetGroup=None, params=None):
+        return self.send_wled_control(target_device=targetDevice, target_group=targetGroup, params=params)
+
+    def sendStartblockConfig(self, *, targetDevice=None, targetGroup=None, params=None):
+        return self.send_startblock_config(target_device=targetDevice, target_group=targetGroup, params=params)
+
+    def sendStartblockControl(self, *, targetDevice=None, targetGroup=None, params=None):
+        return self.send_startblock_control(target_device=targetDevice, target_group=targetGroup, params=params)
+
+    def sendGroupControl(self, gcGroupId, gcFlags, gcPresetId, gcBrightness):
+        return self.send_group_control(gcGroupId, gcFlags, gcPresetId, gcBrightness)
+
+    def sendRaceLink(self, targetDevice, flags=None, presetId=None, brightness=None):
+        return self.send_racelink(targetDevice, flags, presetId, brightness)
+
+    def sendConfig(self, option, data0=0, data1=0, data2=0, data3=0, recv3=b"\xFF\xFF\xFF", wait_for_ack=False, timeout_s=6.0):
+        return self.send_config(option, data0, data1, data2, data3, recv3, wait_for_ack, timeout_s)
+
+    def sendStream(self, payload: bytes, groupId: int | None = None, device: RL_Device | None = None, retries: int = 2, timeout_s: float = 8.0):
+        return self.send_stream(payload, group_id=groupId, device=device, retries=retries, timeout_s=timeout_s)

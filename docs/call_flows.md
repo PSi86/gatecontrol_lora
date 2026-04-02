@@ -21,14 +21,14 @@ Dieses Dokument beschreibt zentrale Laufzeit-Sequenzen von RaceLink im RotorHaza
    - `ui_extensions.activate(...)`
    - `events.activate(...)`
 4. `events.activate(...)` registriert den RH-Startup-Hook:
-   - `rhapi.events.on(Evt.STARTUP, controller.onStartup)`
-5. Beim RH-`STARTUP` läuft `RaceLink_LoRa.onStartup(...)`:
+   - `rhapi.events.on(Evt.STARTUP, controller.on_startup)`
+5. Beim RH-`STARTUP` läuft `RaceLink_LoRa.on_startup(...)`:
    - `self.app.load_from_db()`
-   - UI-Listen aufbauen (`createUiDevList`, `createUiGroupList`, Discovery-Gruppen)
+   - UI-Listen aufbauen (`create_ui_device_list`, `create_ui_group_list`, Discovery-Gruppen)
    - Settings/Quickset/Actions registrieren
    - UI refresh (`broadcast_ui("settings")`, `broadcast_ui("run")`)
-   - Port-Discovery via `discoverPort({})`
-6. `discoverPort({})` delegiert in `LoRaTransportAdapter.discover_port(args)`:
+   - Port-Discovery via `discover_port({})`
+6. `discover_port({})` delegiert in `LoRaTransportAdapter.discover_port(args)`:
    - liest `psi_comms_port` aus RH-DB
    - `LoRaUSB(...).discover_and_open()`
    - bei Erfolg: `start()`, Transport-Hooks installieren, Adapter auf `ready=True`
@@ -87,17 +87,17 @@ Die produktiven UI-Module liegen vollständig unter `plugins/rotorhazard/`:
 - Quickset-Panel: `plugins/rotorhazard/ui/quickset_panel.py` → `register_quickset_ui(gc)`
 - Action-Registry: `plugins/rotorhazard/ui/actions_registry.py` → `register_actions(gc, args=None)`
 - Handler im Host-Adapter:
-  - `plugins/rotorhazard/ui/host_ui_adapter.py` → `groupSwitch(...)`
-  - `plugins/rotorhazard/ui/host_ui_adapter.py` → `nodeSwitch(...)`
-  - `plugins/rotorhazard/ui/host_ui_adapter.py` → `specialAction(...)`
+  - `plugins/rotorhazard/ui/host_ui_adapter.py` → `group_switch_action(...)`
+  - `plugins/rotorhazard/ui/host_ui_adapter.py` → `node_switch_action(...)`
+  - `plugins/rotorhazard/ui/host_ui_adapter.py` → `special_action(...)`
 
 ### Zwischenstationen
-1. `register_quickset_ui(...)` legt RH-UI-Optionen an (`rl_quickset_group/effect/brightness`) und registriert den Quickbutton „Apply“ auf `gc.groupSwitch` mit `args={"manual": True}`.
-2. `groupSwitch(...)` löst je nach Kontext aus:
+1. `register_quickset_ui(...)` legt RH-UI-Optionen an (`rl_quickset_group/effect/brightness`) und registriert den Quickbutton „Apply“ auf `gc.group_switch_action` mit `args={"manual": True}`.
+2. `group_switch_action(...)` löst je nach Kontext aus:
    - Action-basiert (`rl_action_group/...`) oder
    - Quickset-basiert (`manual` + DB-Optionswerte)
    - delegiert jeweils nach `self.controller.app.apply_group_switch(...)`
-3. `nodeSwitch(...)` arbeitet analog auf Device-Ebene:
+3. `node_switch_action(...)` arbeitet analog auf Device-Ebene:
    - ermittelt Target-Device und Werte
    - ruft `self.controller.app.apply_device_switch(...)`
 4. `RaceLinkApp` delegiert zu Services:
@@ -106,7 +106,7 @@ Die produktiven UI-Module liegen vollständig unter `plugins/rotorhazard/`:
 5. `ControlService` erzeugt Flags und sendet LoRa-Control:
    - Gruppe: `send_group_control(...)` → `lora.send_control(recv3=FF:FF:FF, group_id=...)`
    - Device: `send_racelink(...)` → `lora.send_control(recv3=<device>, group_id=...)`
-6. Für „Special Actions“ baut `actions_registry.special_action(...)` Parameter auf und ruft dynamisch eine Comm-Funktion (z. B. `sendWledControl`, `sendStartblockConfig`, `sendStartblockControl`) am Controller/App auf. Diese landen in:
+6. Für „Special Actions“ baut `actions_registry.special_action(...)` Parameter auf und ruft explizite Controller-Weiterleitungen (`send_wled_control`, `send_startblock_config`, `send_startblock_control`) auf. Diese landen in:
    - `ControlService.send_wled_control(...)`
    - `StartblockService.send_startblock_config(...)`
    - `StartblockService.send_startblock_control(...)`

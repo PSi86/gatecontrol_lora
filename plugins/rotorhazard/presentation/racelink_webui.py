@@ -1245,7 +1245,7 @@ def register_rl_blueprint(
             rl_instance.uiEffectList = [UIFieldSelectOption(str(pid), name) for pid, name in parsed]
         try:
             rl_instance.register_quickset_ui()
-            rl_instance.registerActions()
+            rl_instance.register_actions()
             rl_instance._rhapi.ui.broadcast_ui("run")
         except Exception:
             pass

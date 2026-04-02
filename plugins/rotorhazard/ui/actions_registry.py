@@ -25,7 +25,7 @@ def register_actions(gc, args=None):
     gc.action_reg_fn(
         ActionEffect(
             "RaceLink Action",
-            gc.groupSwitch,
+            gc.group_switch_action,
             [
                 UIField(
                     "rl_action_group",
@@ -62,7 +62,7 @@ def register_actions(gc, args=None):
             def _build_fields(mode):
                 fields = []
                 if mode == "device":
-                    options = gc.rl_createUiDevList(capabilities=[cap_key], outputGroups=False)["devices"]
+                    options = gc.create_filtered_ui_device_list(capabilities=[cap_key], output_groups=False)["devices"]
                     if not options:
                         return None
                     fields.append(
@@ -75,7 +75,7 @@ def register_actions(gc, args=None):
                         )
                     )
                 else:
-                    options = gc.rl_createUiDevList(capabilities=[cap_key], outputDevices=False)["groups"]
+                    options = gc.create_filtered_ui_device_list(capabilities=[cap_key], output_devices=False)["groups"]
                     if not options:
                         return None
                     fields.append(
@@ -181,7 +181,7 @@ def special_action(gc, action, fn_key: str, mode: str):
     if mode == "device":
         target_addr = action.get(f"rl_special_{fn_key}_device")
         if target_addr:
-            target_device = gc.getDeviceFromAddress(target_addr)
+            target_device = gc.get_device_from_address(target_addr)
     else:
         try:
             target_group = int(action.get(f"rl_special_{fn_key}_group"))
@@ -193,7 +193,12 @@ def special_action(gc, action, fn_key: str, mode: str):
         logger.warning("specialAction: missing comm function for %s", fn_key)
         return
 
-    comm_fn = getattr(gc, comm_name, None)
+    comm_map = {
+        "sendWledControl": gc.send_wled_control,
+        "sendStartblockConfig": gc.send_startblock_config,
+        "sendStartblockControl": gc.send_startblock_control,
+    }
+    comm_fn = comm_map.get(comm_name)
     if not callable(comm_fn):
         logger.warning("specialAction: comm function missing: %s", comm_name)
         return
