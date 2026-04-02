@@ -78,6 +78,13 @@ class ControlService:
             return True
         return False
 
+    def apply_race_event_group_control(self, *, group_id: int, preset_id: int, brightness: int) -> dict:
+        gid = int(group_id) & 0xFF
+        pid = int(preset_id) & 0xFF
+        bri = max(0, min(255, int(brightness)))
+        self.apply_group_switch(group_id=gid, brightness=bri, preset_id=pid)
+        return {"group_id": gid, "preset_id": pid, "brightness": bri}
+
     def send_stream(self, payload: bytes, group_id: int | None = None, device: RL_Device | None = None, retries: int = 2, timeout_s: float = 8.0):
         if not self._transport.ensure_ready("sendStream"):
             return {}

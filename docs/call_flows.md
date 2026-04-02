@@ -64,7 +64,12 @@ Dieses Dokument beschreibt zentrale Laufzeit-Sequenzen von RaceLink im RotorHaza
    - `RACE_FINISHED` → `on_race_finish(...)`
    - `RACE_STOPPED` → `on_race_stop(...)`
    - `RACE_SNAPSHOT` → Debug-Log
-6. Optionaler Shutdown (`RotorHazardPlugin.stop()`):
+6. Die Race-Handler normalisieren zuerst das Payload-Mapping über `_map_race_event_payload(...)` (host-agnostisch, nur `source_payload` wird ausgewertet).
+7. Danach erfolgen Service-Aufrufe:
+   - `ControlService.apply_race_event_group_control(...)` für Szenen-/Helligkeitswechsel pro Event-Typ.
+   - optional `StartblockService.trigger_race_event(...)` für Start/Finish.
+8. `RACE_STOPPED` führt absichtlich keinen Startblock-Stream aus; `trigger_race_event(...)` gibt hier einen `skipped/not_applicable`-Status zurück.
+9. Optionaler Shutdown (`RotorHazardPlugin.stop()`):
    - `self.app.stop_event_stream()` ruft `race_event_port.stop()` auf und meldet den Sink sauber ab.
 
 ### Seiteneffekte
@@ -73,7 +78,10 @@ Dieses Dokument beschreibt zentrale Laufzeit-Sequenzen von RaceLink im RotorHaza
 - **Broadcasts**:
   - In diesem Pfad derzeit keine direkten RH-UI-Broadcasts.
 - **LoRa TX/RX**:
-  - In den Default-Handlern aktuell keine LoRa-Sendelogik; sie loggen primär den Race-Status.
+  - `RACE_STARTED`: `send_control(recv3=FF:FF:FF, group_id=<group_id>, ...)` und optional `send_stream(...)` für Startblock-Slots.
+  - `RACE_FINISHED`: `send_control(...)` mit Finish-Szene und optional Startblock-Stream.
+  - `RACE_STOPPED`: `send_control(...)` mit Stop-Szene; kein Startblock-Stream.
+  - Bei Gruppen-TX werden Device-Caches für die Zielgruppe aktualisiert; Startblock-Streams sammeln ACKs im RX-Fenster.
 
 ---
 

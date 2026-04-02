@@ -143,3 +143,15 @@ class StartblockService:
             sent.append({"slot": slot1, "device": getattr(dev, "deviceId", getattr(dev, "mac", None)), "result": self._control.send_stream(payload, device=dev)})
 
         return {"mode": "unicast", "devices": [{"device": getattr(d, "deviceId", getattr(d, "mac", None)), "first": a, "last": b} for (d, a, b) in dev_ranges], "sent": sent}
+
+    def trigger_race_event(self, *, event_name: str, target_group: int | None = None, use_current_heat: bool = True) -> dict:
+        if event_name not in {"RACE_STARTED", "RACE_FINISHED", "RACE_STOPPED"}:
+            return {"skipped": True, "reason": "unsupported_event", "event": event_name}
+        if event_name == "RACE_STOPPED":
+            return {"skipped": True, "reason": "not_applicable", "event": event_name}
+
+        result = self.send_startblock_control(
+            target_group=target_group,
+            params={"startblock_use_current_heat": bool(use_current_heat)},
+        )
+        return {"event": event_name, "target_group": target_group, "result": result}

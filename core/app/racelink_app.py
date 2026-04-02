@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from ..events import HostRaceEvent, HostRaceEventType
 from ..repository import InMemoryDeviceRepository, LegacyConfigMigration
@@ -73,14 +73,81 @@ class RaceLinkApp:
         elif event_type == HostRaceEventType.RACE_SNAPSHOT:
             logger.debug("RaceLink Race Snapshot Event payload=%s", payload)
 
-    def on_race_start(self, _args=None):
-        logger.warning("RaceLink Race Start Event")
+    @staticmethod
+    def _extract_source_payload(payload: Any) -> dict[str, Any]:
+        if isinstance(payload, dict):
+            source = payload.get("source_payload", payload)
+            if isinstance(source, dict):
+                return source
+        return {}
 
-    def on_race_finish(self, _args=None):
-        logger.warning("RaceLink Race Finish Event")
+    @staticmethod
+    def _as_int(raw: Any, default: int | None = None) -> int | None:
+        if raw is None:
+            return default
+        try:
+            return int(raw)
+        except Exception:
+            return default
 
-    def on_race_stop(self, _args=None):
-        logger.warning("RaceLink Race Stop Event")
+    @classmethod
+    def _map_race_event_payload(cls, payload: Any) -> dict[str, Any]:
+        source_payload = cls._extract_source_payload(payload)
+        mapped = {
+            "heat_id": cls._as_int(source_payload.get("heat_id", source_payload.get("current_heat"))),
+            "group_id": cls._as_int(source_payload.get("rl_group_id", source_payload.get("group_id")), 255),
+            "start_preset_id": cls._as_int(source_payload.get("rl_start_preset_id", source_payload.get("start_preset_id")), 1),
+            "start_brightness": cls._as_int(source_payload.get("rl_start_brightness", source_payload.get("start_brightness")), 70),
+            "finish_preset_id": cls._as_int(source_payload.get("rl_finish_preset_id", source_payload.get("finish_preset_id")), 2),
+            "finish_brightness": cls._as_int(source_payload.get("rl_finish_brightness", source_payload.get("finish_brightness")), 100),
+            "stop_preset_id": cls._as_int(source_payload.get("rl_stop_preset_id", source_payload.get("stop_preset_id")), 1),
+            "stop_brightness": cls._as_int(source_payload.get("rl_stop_brightness", source_payload.get("stop_brightness")), 0),
+            "trigger_startblock": bool(source_payload.get("rl_trigger_startblock", True)),
+        }
+        return mapped
+
+    def on_race_start(self, args=None):
+        mapped = self._map_race_event_payload(args)
+        control = self.control_service.apply_race_event_group_control(
+            group_id=mapped["group_id"],
+            preset_id=mapped["start_preset_id"],
+            brightness=mapped["start_brightness"],
+        )
+        startblock = None
+        if mapped["trigger_startblock"]:
+            startblock = self.startblock_service.trigger_race_event(
+                event_name=HostRaceEventType.RACE_STARTED,
+                target_group=mapped["group_id"],
+            )
+        logger.info("RaceLink Race Start Event mapped=%s control=%s startblock=%s", mapped, control, startblock)
+
+    def on_race_finish(self, args=None):
+        mapped = self._map_race_event_payload(args)
+        control = self.control_service.apply_race_event_group_control(
+            group_id=mapped["group_id"],
+            preset_id=mapped["finish_preset_id"],
+            brightness=mapped["finish_brightness"],
+        )
+        startblock = None
+        if mapped["trigger_startblock"]:
+            startblock = self.startblock_service.trigger_race_event(
+                event_name=HostRaceEventType.RACE_FINISHED,
+                target_group=mapped["group_id"],
+            )
+        logger.info("RaceLink Race Finish Event mapped=%s control=%s startblock=%s", mapped, control, startblock)
+
+    def on_race_stop(self, args=None):
+        mapped = self._map_race_event_payload(args)
+        control = self.control_service.apply_race_event_group_control(
+            group_id=mapped["group_id"],
+            preset_id=mapped["stop_preset_id"],
+            brightness=mapped["stop_brightness"],
+        )
+        startblock = self.startblock_service.trigger_race_event(
+            event_name=HostRaceEventType.RACE_STOPPED,
+            target_group=mapped["group_id"],
+        )
+        logger.info("RaceLink Race Stop Event mapped=%s control=%s startblock=%s", mapped, control, startblock)
 
     # Backward-compatible callbacks
     def onRaceStart(self, args=None):
