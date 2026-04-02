@@ -79,6 +79,10 @@ Dieses Dokument beschreibt zentrale Laufzeit-Sequenzen von RaceLink im RotorHaza
 
 ## 3) UI-Aktionen: Quickset/Action-Handler bis Core-Services
 
+Die produktiven UI-Module liegen vollständig unter `plugins/rotorhazard/`:
+- Web-Blueprint/WebUI: `plugins/rotorhazard/presentation/racelink_webui.py`
+- UI-Registrierung/Handler: `plugins/rotorhazard/ui/quickset_panel.py`, `plugins/rotorhazard/ui/actions_registry.py`, `plugins/rotorhazard/ui/host_ui_adapter.py`
+
 ### Einstiegspunkte
 - Quickset-Panel: `plugins/rotorhazard/ui/quickset_panel.py` → `register_quickset_ui(gc)`
 - Action-Registry: `plugins/rotorhazard/ui/actions_registry.py` → `register_actions(gc, args=None)`

@@ -20,7 +20,8 @@
 ## Migrationshinweise
 
 - RH-Race-Provider und RH-Event-Adapter wurden nach `plugins/rotorhazard/host/` verschoben.
-- RH-WebUI (Blueprint + Templates + Static Assets) liegt unter `plugins/rotorhazard/presentation/`.
+- Die produktive Presentation-Schicht (Blueprint + Templates + Static Assets) liegt unter `plugins/rotorhazard/presentation/`.
+- Das Top-Level-Verzeichnis `presentation/` ist **kein** Laufzeit- oder Packaging-Entry-Point und wurde entfernt, um den Importpfad eindeutig auf `plugins.rotorhazard.presentation` zu halten.
 - Die frühere Kompatibilitätsschicht `platform/*` wurde im Major-Cleanup am 2026-04-02 entfernt; gültige Importpfade sind `plugins.rotorhazard.*`, `plugins.standalone.*` und `adapters.ports`.
 
 ## Ist-Stand der Abhängigkeiten
