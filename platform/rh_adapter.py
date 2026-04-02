@@ -1,38 +1,19 @@
 from __future__ import annotations
 
 import logging
-from collections import defaultdict
-from typing import Any, Callable
-
-from eventmanager import Evt
+from typing import Any
 
 from ..controller import RaceLink_LoRa
+from ..core import events as core_events
+from ..core.event_bus import InMemoryEventBus
 from ..core.repository import InMemoryDeviceRepository
 from ..data import RL_DeviceGroup
+from ..integrations.rotorhazard.event_bridge import RHEventBridge
 from ..racelink_webui import register_rl_blueprint
 from ..providers.rotorhazard_provider import RotorHazardRaceProvider
-from .ports import ConfigStorePort, EventBusPort, UINotificationPort
+from .ports import ConfigStorePort, UINotificationPort
 
 logger = logging.getLogger(__name__)
-
-
-class RHEventBus(EventBusPort):
-    def __init__(self, rhapi):
-        self._rhapi = rhapi
-        self._listeners: dict[str, list[Callable[[Any], None]]] = defaultdict(list)
-
-    def subscribe(self, event_name: str, handler: Callable[[Any], None]) -> None:
-        self._listeners[event_name].append(handler)
-        self._rhapi.events.on(event_name, handler)
-
-    def publish(self, event_name: str, payload: Any = None) -> None:
-        trigger = getattr(self._rhapi.events, "trigger", None)
-        if callable(trigger):
-            trigger(event_name, payload)
-            return
-
-        for handler in list(self._listeners.get(event_name, [])):
-            handler(payload)
 
 
 class RHConfigStore(ConfigStorePort):
@@ -51,7 +32,6 @@ class RHUINotifier(UINotificationPort):
         self._rhapi = rhapi
 
     def notify(self, message: str, level: str = "info") -> None:
-        # RH API typically offers `notify`; keep fallback to logger.
         notifier = getattr(self._rhapi.ui, "notify", None)
         if callable(notifier):
             notifier(message, level)
@@ -68,10 +48,11 @@ class RotorHazardAdapter:
     def __init__(self, rhapi):
         self.rhapi = rhapi
         self.repository = InMemoryDeviceRepository()
-        self.event_bus = RHEventBus(rhapi)
+        self.event_bus = InMemoryEventBus()
+        self.rh_event_bridge = RHEventBridge(rhapi, self.event_bus)
         self.config_store = RHConfigStore(rhapi)
         self.ui = RHUINotifier(rhapi)
-        self.race_provider = RotorHazardRaceProvider(rhapi)
+        self.race_provider = RotorHazardRaceProvider(rhapi, self.event_bus)
         self.rl_instance: RaceLink_LoRa | None = None
 
     def initialize(self) -> RaceLink_LoRa:
@@ -92,12 +73,13 @@ class RotorHazardAdapter:
             logger=logger,
         )
 
-        self.event_bus.subscribe(Evt.DATA_IMPORT_INITIALIZE, self.rl_instance.register_rl_dataimporter)
-        self.event_bus.subscribe(Evt.DATA_EXPORT_INITIALIZE, self.rl_instance.register_rl_dataexporter)
-        self.event_bus.subscribe(Evt.ACTIONS_INITIALIZE, self.rl_instance.registerActions)
-        self.event_bus.subscribe(Evt.STARTUP, self.rl_instance.onStartup)
+        self.event_bus.subscribe(core_events.DATA_IMPORT_INITIALIZE, self.rl_instance.register_rl_dataimporter)
+        self.event_bus.subscribe(core_events.DATA_EXPORT_INITIALIZE, self.rl_instance.register_rl_dataexporter)
+        self.event_bus.subscribe(core_events.ACTIONS_INITIALIZE, self.rl_instance.registerActions)
+        self.event_bus.subscribe(core_events.STARTUP, self.rl_instance.onStartup)
         self.race_provider.on_race_start(self.rl_instance.onRaceStart)
         self.race_provider.on_race_finish(self.rl_instance.onRaceFinish)
         self.race_provider.on_race_stop(self.rl_instance.onRaceStop)
 
+        self.rh_event_bridge.install()
         return self.rl_instance

@@ -1,0 +1,1 @@
+"""RotorHazard specific integration components."""
