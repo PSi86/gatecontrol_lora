@@ -46,7 +46,7 @@ Dieses Dokument beschreibt zentrale Laufzeit-Sequenzen von RaceLink im RotorHaza
 ## 2) Race-Event-Verarbeitung
 
 ### Einstiegspunkt
-- `plugins/rotorhazard/host/rotorhazard_provider.py` → `RotorHazardRaceEventAdapter.start(event_sink)`
+- `plugins/rotorhazard/providers/rotorhazard_provider.py` → `RotorHazardRaceEventAdapter.start(event_sink)`
 
 ### Zwischenstationen
 1. Während Komposition (`RotorHazardPlugin.build(...)`) wird `RaceLinkApp(...)` inkl. `race_event_port` erstellt, **aber noch nicht gestartet**.

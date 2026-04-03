@@ -11,7 +11,7 @@ Die Event-Port-Schnittstelle liegt in `core/ports/host_race_events.py` (`start(e
 
 ## RotorHazard-Integration (Event-basiert)
 
-`plugins/rotorhazard/host/rotorhazard_provider.py` enthält den Adapter `RotorHazardRaceEventAdapter`:
+`plugins/rotorhazard/providers/rotorhazard_provider.py` enthält den Adapter `RotorHazardRaceEventAdapter`:
 
 - `Evt.RACE_START` → `RACE_STARTED`
 - `Evt.RACE_FINISH` → `RACE_FINISHED`
