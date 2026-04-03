@@ -7,7 +7,6 @@ from .core.app import RaceLinkApp
 from .core.repository import InMemoryDeviceRepository
 from .data import RL_Device
 from .infrastructure.lora_transport_adapter import LoRaTransportAdapter
-from .core.ports.noop_race_provider import NoOpRaceProvider
 
 # ---- lora proto registry (auto-generated from lora_proto.h) ----
 try:
@@ -50,14 +49,14 @@ class RaceLink_LoRa:
             repository=self.repository,
         )
 
-        # Option A default: no implicit mock plugin fallback in controller/runtime wiring.
-        # If no host provider is injected, a neutral no-op provider keeps startup import-safe.
-        resolved_race_provider = race_provider if race_provider is not None else NoOpRaceProvider()
+        # No implicit provider fallback exists; host plugin must inject RaceProviderPort.
+        if race_provider is None:
+            raise ValueError("race_provider is required; the active host plugin must inject a RaceProviderPort.")
 
         self.app = RaceLinkApp(
             repository=self.repository,
             transport_port=self.transport_adapter,
-            race_provider_port=resolved_race_provider,
+            race_provider_port=race_provider,
             race_event_port=race_event_port,
             notify_fn=self.notify,
             config_getter=lambda key, default=None: self._rhapi.db.option(key, default),
