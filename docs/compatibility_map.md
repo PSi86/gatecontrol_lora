@@ -61,3 +61,28 @@ Die frühere Kompatibilitätsschicht unter `platform/*` wurde im Major-Cleanup a
 - Laufzeit-Telemetrie/Logs zeigen keine Legacy-Warnungen über definierten Beobachtungszeitraum.
 - Downstream-Integrationen wurden via Release-Notes informiert.
 - Major-Release mit Migrationshinweisen ist veröffentlicht.
+
+## 6) Statische Validierung (Dev-Doku / CI)
+
+Zur Absicherung der Provider-Entkopplung ist ein statischer Check-Satz hinterlegt:
+
+```bash
+python3 scripts/static_validation.py
+```
+
+Der Check enthält:
+
+1. **Kein Root-`providers.*`-Import** (harte Validierung, Exit-Code != 0 bei Treffer).
+2. **Keine Referenz auf `NoOpRaceProvider`** (harte Validierung, Exit-Code != 0 bei Treffer).
+3. **Known Runtime Guard** für `RaceLink_LoRa(...)` in bekannten Runtime-Dateien (`plugins/rotorhazard/plugin_runtime.py`, `plugins/standalone/flask_adapter.py`): Aufrufe müssen `race_provider=` explizit setzen.
+
+Optional kann Check 3 als reine Warnung laufen (z. B. in frühen Migrationsphasen):
+
+```bash
+python3 scripts/static_validation.py --warn-known-runtime-provider
+```
+
+### Akzeptanzkriterium
+
+- Alle App-Startpfade (Composition-Roots) sind **importierbar**.
+- Runtime-Instanziierung ohne injizierten Provider ist **absichtlich** nicht erlaubt und schlägt **früh und eindeutig** fehl (aktuell via `ValueError` bei `RaceLink_LoRa(...)` ohne `race_provider`).
