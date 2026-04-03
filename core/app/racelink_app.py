@@ -10,7 +10,6 @@ from ..services.control_service import ControlService
 from ..services.device_service import DeviceService
 from ..services.startblock_service import StartblockService
 from ...data import RL_Device, RL_DeviceGroup, get_dev_type_info
-from ...racelink_transport import LP, _mac_last3_from_hex
 
 logger = logging.getLogger(__name__)
 
@@ -127,40 +126,18 @@ class RaceLinkApp:
 
     def setNodeGroupId(self, targetDevice: RL_Device, forceSet: bool = False, wait_for_ack: bool = True) -> bool:
         del forceSet
-        if not self.transport_port.ensure_ready("setNodeGroupId"):
-            return False
-
-        self.transport_port.install_hooks()
-
-        recv3 = _mac_last3_from_hex(targetDevice.addr)
-        group_id = int(targetDevice.groupId) & 0xFF
-        is_broadcast = recv3 == b"\xFF\xFF\xFF"
-
+        is_broadcast = str(getattr(targetDevice, "addr", "")).strip().replace(":", "").upper().endswith("FFFFFF")
         if not is_broadcast:
             targetDevice.ack_clear()
-
-        def _send():
-            self.transport_port.lora.send_set_group(recv3, group_id)
-
-        if not wait_for_ack or is_broadcast:
-            _send()
-            return True
-
-        events, _ = self.transport_port.send_and_wait_for_reply(recv3, LP.OPC_SET_GROUP, _send, timeout_s=8.0)
-        if not events:
-            logger.warning("No ACK_OK for SET_GROUP to %s (timeout)", targetDevice.addr)
-            return False
-
-        ev = events[-1]
-        ok = int(ev.get("ack_status", 1)) == 0
-        if not ok:
-            logger.warning(
-                "No ACK_OK for SET_GROUP to %s (status=%s, opcode=%s)",
-                targetDevice.addr,
-                ev.get("ack_status"),
-                ev.get("ack_of"),
+        should_wait_for_ack = bool(wait_for_ack and not is_broadcast)
+        return bool(
+            self.transport_port.set_group_with_optional_ack(
+                target_addr=str(getattr(targetDevice, "addr", "")),
+                group_id=int(getattr(targetDevice, "groupId", 0)),
+                wait_for_ack=should_wait_for_ack,
+                timeout_s=8.0,
             )
-        return ok
+        )
 
     def forceGroups(self, args=None, sanityCheck: bool = True):
         del args

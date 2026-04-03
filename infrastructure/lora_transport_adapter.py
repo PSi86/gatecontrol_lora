@@ -6,7 +6,7 @@ import time
 
 from .. import lora_proto_auto as LPA
 from ..data import create_device
-from ..racelink_transport import EV_ERROR, EV_RX_WINDOW_CLOSED, EV_RX_WINDOW_OPEN, LP, LoRaUSB
+from ..racelink_transport import EV_ERROR, EV_RX_WINDOW_CLOSED, EV_RX_WINDOW_OPEN, LP, LoRaUSB, _mac_last3_from_hex
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +137,46 @@ class LoRaTransportAdapter:
             return False
 
         return self.wait_rx_window(send_fn, collect_pred=_collect, fail_safe_s=timeout_s)
+
+    def set_group_with_optional_ack(
+        self,
+        *,
+        target_addr: str,
+        group_id: int,
+        wait_for_ack: bool = True,
+        timeout_s: float = 8.0,
+    ) -> bool:
+        if not self.ensure_ready("set_group_with_optional_ack"):
+            return False
+
+        self.install_hooks()
+
+        recv3 = _mac_last3_from_hex(target_addr)
+        group_id_u8 = int(group_id) & 0xFF
+        is_broadcast = recv3 == b"\xFF\xFF\xFF"
+
+        def _send():
+            self.lora.send_set_group(recv3, group_id_u8)
+
+        if not wait_for_ack or is_broadcast:
+            _send()
+            return True
+
+        events, _ = self.send_and_wait_for_reply(recv3, LP.OPC_SET_GROUP, _send, timeout_s=float(timeout_s))
+        if not events:
+            logger.warning("No ACK_OK for SET_GROUP to %s (timeout)", target_addr)
+            return False
+
+        ev = events[-1]
+        ok = int(ev.get("ack_status", 1)) == 0
+        if not ok:
+            logger.warning(
+                "No ACK_OK for SET_GROUP to %s (status=%s, opcode=%s)",
+                target_addr,
+                ev.get("ack_status"),
+                ev.get("ack_of"),
+            )
+        return ok
 
     def _on_transport_tx(self, ev: dict):
         if not ev or ev.get("type") != "TX_M2N":

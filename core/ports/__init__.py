@@ -60,6 +60,15 @@ class TransportCoordinatorPort(Protocol):
 
     def send_and_wait_for_reply(self, recv3: bytes, opcode7: int, send_fn, timeout_s: float = 8.0): ...
 
+    def set_group_with_optional_ack(
+        self,
+        *,
+        target_addr: str,
+        group_id: int,
+        wait_for_ack: bool = True,
+        timeout_s: float = 8.0,
+    ) -> bool: ...
+
 
 from .host_ui import HostUIPort
 from .host_race_events import HostRaceEventPort
