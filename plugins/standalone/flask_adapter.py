@@ -9,6 +9,7 @@ from flask import Flask, jsonify
 from ...controller import RaceLink_LoRa
 from ...core.repository import InMemoryDeviceRepository
 from ...adapters.ports import ConfigStorePort, EventBusPort, UINotificationPort
+from ..mock.providers import MockRaceProvider
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +79,7 @@ class FlaskStandaloneAdapter:
         self.config_store = InMemoryConfigStore()
         self.ui = FlaskUINotifier()
         self.rhapi = _StandaloneRHAPI(self.config_store, self.ui)
+        self.race_provider = MockRaceProvider()
         self.rl_instance: RaceLink_LoRa | None = None
 
     def create_app(self) -> Flask:
@@ -100,5 +102,6 @@ class FlaskStandaloneAdapter:
             "RaceLink_LoRa",
             "RaceLink Standalone",
             repository=self.repository,
+            race_provider=self.race_provider,
         )
         return self.rl_instance
