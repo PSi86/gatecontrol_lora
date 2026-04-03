@@ -32,7 +32,7 @@ Die frühere Kompatibilitätsschicht unter `platform/*` wurde im Major-Cleanup a
 | Verhalten | Status | Details | Migrationshinweis |
 |---|---|---|---|
 | Impliziter `MockRaceProvider` im Controller | **Entfernt am 2026-04-03** | `RaceLink_LoRa` importiert kein Top-Level-`providers.*` mehr. | Host-Plugin soll den gewünschten `RaceProviderPort` explizit injizieren. |
-| Default ohne injizierten Provider | **Aktiv** | Fallback auf neutralen `core.ports.noop_race_provider.NoOpRaceProvider` (liefert nur leere Werte/`None`). | Für produktive Daten immer hostspezifischen Provider (z. B. `plugins.rotorhazard.providers.RotorHazardRaceProvider`) übergeben. |
+| Default ohne injizierten Provider | **Entfernt am 2026-04-03** | Kein Fallback mehr: `RaceLink_LoRa` erwartet einen injizierten `RaceProviderPort` und wirft sonst `ValueError`. | Host-Plugin muss immer einen hostspezifischen Provider (z. B. `plugins.rotorhazard.providers.RotorHazardRaceProvider`) übergeben. |
 
 ## 3) Legacy-Methoden / Alias-Namen in `plugins/rotorhazard/ui/host_ui_adapter.py`
 

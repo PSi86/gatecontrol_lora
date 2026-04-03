@@ -37,7 +37,7 @@ Als Referenz ist im Beispielplugin `plugins/mock/providers/mock_provider.py` ein
 {"race_state": "running", "heat_id": 3}
 ```
 
-Hinweis zum Default-Wiring: `controller.py` nutzt keinen impliziten Mock-Provider aus einem Root-`providers`-Pfad mehr. Ohne injizierten Host-Provider wird neutral `NoOpRaceProvider` (`core/ports/noop_race_provider.py`) verwendet.
+Hinweis zum Default-Wiring: `controller.py` nutzt keinen impliziten Mock-Provider aus einem Root-`providers`-Pfad mehr. Der aktive Host muss einen `RaceProviderPort` injizieren; ohne Provider schlägt die Initialisierung mit `ValueError` fehl.
 
 ## Daten-Mapping für Startblock
 
