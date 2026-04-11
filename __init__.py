@@ -2,11 +2,7 @@
 Works with Rotorhazard 4.0.
 """
 
-import logging
-
-from eventmanager import Evt
-
-from .racelink_webui import register_rl_blueprint
+from .racelink.integrations.rotorhazard import plugin as _rh_plugin
 from .controller import RaceLink_LoRa
 from .data import (
     RL_Device,
@@ -23,36 +19,15 @@ from .data import (
     rl_grouplist,
 )
 
-logger = logging.getLogger(__name__)
+initialize = _rh_plugin.initialize
 
 
-def initialize(rhapi):
-    global rl_instance
-
-    rl_instance = RaceLink_LoRa(
-        rhapi,
-        "RaceLink_LoRa",
-        "RaceLink",
-    )
-
-    register_rl_blueprint(
-        rhapi,
-        rl_instance=rl_instance,
-        rl_devicelist=rl_devicelist,
-        rl_grouplist=rl_grouplist,
-        RL_DeviceGroup=RL_DeviceGroup,
-        logger=logger,
-    )
-
-    rhapi.events.on(Evt.DATA_IMPORT_INITIALIZE, rl_instance.register_rl_dataimporter)
-    rhapi.events.on(Evt.DATA_EXPORT_INITIALIZE, rl_instance.register_rl_dataexporter)
-    rhapi.events.on(Evt.ACTIONS_INITIALIZE, rl_instance.registerActions)
-
-    rhapi.events.on(Evt.STARTUP, rl_instance.onStartup)
-
-    rhapi.events.on(Evt.RACE_START, rl_instance.onRaceStart)
-    rhapi.events.on(Evt.RACE_FINISH, rl_instance.onRaceFinish)
-    rhapi.events.on(Evt.RACE_STOP, rl_instance.onRaceStop)
+def __getattr__(name):
+    if name == "rl_instance":
+        return _rh_plugin.rl_instance
+    if name == "rl_app":
+        return _rh_plugin.rl_app
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 __all__ = [

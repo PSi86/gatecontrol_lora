@@ -1,0 +1,124 @@
+import unittest
+
+from racelink.domain import RL_Device
+from racelink.services.discovery_service import DiscoveryService
+from racelink.services.status_service import StatusService
+from racelink.transport import LP
+
+
+class FakeLora:
+    def __init__(self):
+        self.sent = []
+
+    def send_get_devices(self, **kwargs):
+        self.sent.append(("devices", kwargs))
+
+    def send_get_status(self, **kwargs):
+        self.sent.append(("status", kwargs))
+
+    def drain_events(self, timeout_s=0.0):
+        return []
+
+
+class FakeGateway:
+    def __init__(self, events, got_closed=True):
+        self.events = events
+        self.got_closed = got_closed
+        self.installed = False
+
+    def install_transport_hooks(self):
+        self.installed = True
+
+    def wait_rx_window(self, send_fn, collect_pred=None, fail_safe_s=8.0):
+        send_fn()
+        collected = []
+        for ev in self.events:
+            if collect_pred and collect_pred(ev):
+                collected.append(ev)
+        return collected, self.got_closed
+
+
+class FakeController:
+    def __init__(self, devices):
+        self._devices = devices
+        self.lora = FakeLora()
+        self.group_assignments = []
+
+    def _to_hex_str(self, value):
+        if isinstance(value, (bytes, bytearray)):
+            return bytes(value).hex().upper()
+        return str(value or "").upper()
+
+    def getDeviceFromAddress(self, addr):
+        want = str(addr or "").upper()
+        for dev in self._devices:
+            if dev.addr == want or dev.addr.endswith(want):
+                return dev
+        return None
+
+    def setNodeGroupId(self, dev):
+        self.group_assignments.append((dev.addr, dev.groupId))
+
+    @property
+    def device_repository(self):
+        class Repo:
+            def __init__(self, items):
+                self._items = items
+
+            def list(self):
+                return self._items
+
+        return Repo(self._devices)
+
+
+class DiscoveryAndStatusTests(unittest.TestCase):
+    def test_discovery_service_assigns_group_to_responders(self):
+        dev = RL_Device("AABBCCDDEEFF", 1, "Node", groupId=0)
+        controller = FakeController([dev])
+        gateway = FakeGateway(
+            [
+                {
+                    "opc": LP.OPC_DEVICES,
+                    "reply": "IDENTIFY_REPLY",
+                    "mac6": bytes.fromhex("AABBCCDDEEFF"),
+                    "sender3": bytes.fromhex("DDEEFF"),
+                }
+            ]
+        )
+        service = DiscoveryService(controller, gateway)
+
+        result = service.discover_devices(group_filter=0, add_to_group=4)
+
+        self.assertTrue(gateway.installed)
+        self.assertEqual(result["found"], 1)
+        self.assertEqual(result["responders"], {"AABBCCDDEEFF"})
+        self.assertEqual(dev.groupId, 4)
+        self.assertEqual(controller.group_assignments, [("AABBCCDDEEFF", 4)])
+
+    def test_status_service_marks_non_responders_offline_on_window_close(self):
+        responding = RL_Device("AABBCCDDEEFF", 1, "Node A", groupId=2)
+        silent = RL_Device("001122334455", 1, "Node B", groupId=2)
+        controller = FakeController([responding, silent])
+        gateway = FakeGateway(
+            [
+                {
+                    "opc": LP.OPC_STATUS,
+                    "reply": "STATUS_REPLY",
+                    "mac6": bytes.fromhex("AABBCCDDEEFF"),
+                    "sender3": bytes.fromhex("DDEEFF"),
+                }
+            ],
+            got_closed=True,
+        )
+        service = StatusService(controller, gateway)
+
+        result = service.get_status(group_filter=2)
+
+        self.assertEqual(result["updated"], 1)
+        self.assertEqual(result["responders"], {"AABBCCDDEEFF"})
+        self.assertFalse(silent.link_online)
+        self.assertEqual(silent.link_error, "Missing reply (STATUS)")
+
+
+if __name__ == "__main__":
+    unittest.main()
