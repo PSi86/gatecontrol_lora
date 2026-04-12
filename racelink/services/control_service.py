@@ -16,11 +16,11 @@ class ControlService:
         self.gateway_service = gateway_service
 
     @property
-    def lora(self):
-        return getattr(self.controller, "lora", None)
+    def transport(self):
+        return getattr(self.controller, "transport", None)
 
-    def _require_lora(self, context: str):
-        if self.lora:
+    def _require_transport(self, context: str):
+        if self.transport:
             return True
         logger.warning("%s: communicator not ready", context)
         return False
@@ -46,7 +46,7 @@ class ControlService:
 
     def send_device_control(self, target_device, flags=None, preset_id=None, brightness=None):
         """Send CONTROL to a single node (receiver = last3 of targetDevice.addr)."""
-        if not self._require_lora("sendRaceLink"):
+        if not self._require_transport("sendRaceLink"):
             return
 
         recv3 = mac_last3_from_hex(target_device.addr)
@@ -58,7 +58,7 @@ class ControlService:
             fallback=target_device,
         )
 
-        self.lora.send_control(
+        self.transport.send_control(
             recv3=recv3,
             group_id=group_id,
             flags=flags_b,
@@ -79,14 +79,14 @@ class ControlService:
 
     def send_group_control(self, group_id, flags, preset_id, brightness):
         """Broadcast CONTROL to a group; update local cache for matching devices."""
-        if not self._require_lora("sendGroupControl"):
+        if not self._require_transport("sendGroupControl"):
             return
 
         group_b = int(group_id) & 0xFF
         flags_b, preset_b, brightness_b = self._coerce_control_values(flags, preset_id, brightness)
         self._update_group_control_cache(group_b, flags_b, preset_b, brightness_b)
 
-        self.lora.send_control(
+        self.transport.send_control(
             recv3=b"\xFF\xFF\xFF",
             group_id=group_b,
             flags=flags_b,

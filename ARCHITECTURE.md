@@ -11,8 +11,8 @@ root is now limited to the RotorHazard plugin entrypoint:
   persistence, communicator lifecycle, legacy entrypoints, and service
   delegation. Discovery, status, control/config/sync/stream, gateway
   orchestration, and startblock behavior live in `racelink/services/`.
-- `lora_proto.h` remains the source of truth for the protocol, mirrored by
-  `gen_lora_proto_py.py` into `racelink/lora_proto_auto.py`.
+- `racelink_proto.h` remains the source of truth for the protocol, mirrored by
+  `gen_racelink_proto_py.py` into `racelink/racelink_proto_auto.py`.
 
 ## Target Structure
 
@@ -51,7 +51,7 @@ The long-term architecture is introduced as a package scaffold under
   concerns.
 - `protocol` exposes protocol structure cleanly so higher layers do not depend
   on raw body layouts.
-  The generated module `racelink/lora_proto_auto.py` is the canonical mirror
+  The generated module `racelink/racelink_proto_auto.py` is the canonical mirror
   for protocol constants, rules, packed sizes, and packed field layouts.
 - `transport` handles USB/serial/framing and emits low-level events only.
 - `state` owns in-memory repositories and persistence concerns.
@@ -98,9 +98,9 @@ clear place for `event_source` and `data_sink` wiring.
 
 - One backlog task per branch/PR.
 - No behavior changes unless the task explicitly requires them.
-- No protocol changes in `lora_proto.h` unless a task explicitly requires them.
+- No protocol changes in `racelink_proto.h` unless a task explicitly requires them.
 - The only supported Python protocol mirror path is
-  `lora_proto.h -> gen_lora_proto_py.py -> racelink/lora_proto_auto.py`.
+  `racelink_proto.h -> gen_racelink_proto_py.py -> racelink/racelink_proto_auto.py`.
 - No UI redesign during the architecture refactor.
 - RotorHazard remains fully functional during the migration.
 - Standalone support is added as an additional path, not as a replacement.
@@ -117,7 +117,7 @@ expected to hold, without trying to lint every architectural nuance.
 - `domain` must not import Flask or RotorHazard modules.
 - `protocol` should not depend on web or RotorHazard concerns.
 - `protocol` and `transport` must import the generated protocol mirror via the
-  package path `racelink.lora_proto_auto`, never via a top-level fallback.
+  package path `racelink.racelink_proto_auto`, never via a top-level fallback.
 - `transport` must not import RotorHazard modules.
 - `state` should remain framework-agnostic.
 - `services` may depend on domain/state/protocol/transport abstractions, but
@@ -185,4 +185,4 @@ Risks:
   orchestration that should continue to move toward smaller service entrypoints.
 - The protocol mirror is now packaged correctly, but packet builders and reply
   decoding are still hand-written Python logic. They are protected by drift
-  tests against `racelink/lora_proto_auto.py`, not yet fully code-generated.
+  tests against `racelink/racelink_proto_auto.py`, not yet fully code-generated.

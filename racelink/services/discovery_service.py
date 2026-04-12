@@ -15,11 +15,11 @@ class DiscoveryService:
         self.gateway_service = gateway_service
 
     @property
-    def lora(self):
-        return getattr(self.controller, "lora", None)
+    def transport(self):
+        return getattr(self.controller, "transport", None)
 
     def discover_devices(self, *, group_filter=255, target_device=None, add_to_group=-1) -> dict:
-        if not self.lora:
+        if not self.transport:
             logger.warning("getDevices: communicator not ready")
             return {"found": 0, "responders": set(), "assigned_group": None}
 
@@ -56,12 +56,12 @@ class DiscoveryService:
         logger.debug("GET_DEVICES -> recv3=%s group=%d flags=%d", recv3.hex().upper(), group_id, 0)
 
         try:
-            self.lora.drain_events(0.0)
+            self.transport.drain_events(0.0)
         except Exception:
             pass
 
         self.gateway_service.wait_rx_window(
-            lambda: self.lora.send_get_devices(recv3=recv3, group_id=group_id, flags=0),
+            lambda: self.transport.send_get_devices(recv3=recv3, group_id=group_id, flags=0),
             collect_pred=_collect,
             fail_safe_s=8.0,
         )

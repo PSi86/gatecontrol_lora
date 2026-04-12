@@ -5,7 +5,7 @@ from racelink.services.gateway_service import GatewayService
 from racelink.transport import EV_RX_WINDOW_CLOSED, LP
 
 
-class FakeLora:
+class FakeTransport:
     def __init__(self):
         self.listeners = []
         self.tx_listeners = []
@@ -35,7 +35,7 @@ class FakeLora:
 class FakeController:
     def __init__(self):
         self.dev = RL_Device("AABBCCDDEEFF", 1, "Node")
-        self.lora = FakeLora()
+        self.transport = FakeTransport()
         self._pending_expect = None
         self._pending_config = {}
         self._transport_hooks_installed = False
@@ -76,7 +76,7 @@ class GatewayServiceTests(unittest.TestCase):
         service = GatewayService(controller)
 
         def send_fn():
-            controller.lora.emit(
+            controller.transport.emit(
                 {
                     "opc": LP.OPC_ACK,
                     "ack_of": LP.OPC_CONFIG,
@@ -84,7 +84,7 @@ class GatewayServiceTests(unittest.TestCase):
                     "sender3": bytes.fromhex("DDEEFF"),
                 }
             )
-            controller.lora.emit({"type": EV_RX_WINDOW_CLOSED})
+            controller.transport.emit({"type": EV_RX_WINDOW_CLOSED})
 
         events, got_closed = service.send_and_wait_for_reply(bytes.fromhex("DDEEFF"), LP.OPC_CONFIG, send_fn)
 

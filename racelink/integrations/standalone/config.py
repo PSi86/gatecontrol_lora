@@ -9,7 +9,7 @@ from typing import Any, Dict, Optional
 
 
 def _default_config_path() -> str:
-    return os.path.join(os.path.expanduser("~"), ".racelink_lora", "standalone_config.json")
+    return os.path.join(os.path.expanduser("~"), ".racelink", "standalone_config.json")
 
 
 @dataclass

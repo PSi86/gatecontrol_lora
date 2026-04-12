@@ -4,7 +4,7 @@ from racelink.domain import RL_Device
 from racelink.services import ConfigService, ControlService, StreamService, SyncService
 
 
-class FakeLora:
+class FakeTransport:
     def __init__(self):
         self.control_calls = []
         self.sync_calls = []
@@ -33,7 +33,7 @@ class FakeGateway:
 
 class FakeController:
     def __init__(self):
-        self.lora = FakeLora()
+        self.transport = FakeTransport()
         self.devices = [
             RL_Device("AABBCCDDEEFF", 1, "Node A", groupId=2),
             RL_Device("001122334455", 1, "Node B", groupId=2),
@@ -60,7 +60,7 @@ class ActiveSendServiceTests(unittest.TestCase):
         service.send_device_control(controller.devices[0], flags=5, preset_id=7, brightness=80)
         service.send_group_control(2, 1, 9, 33)
 
-        self.assertEqual(controller.lora.control_calls[0]["group_id"], 2)
+        self.assertEqual(controller.transport.control_calls[0]["group_id"], 2)
         self.assertEqual(controller.devices[0].flags, 1)
         self.assertEqual(controller.devices[0].presetId, 9)
         self.assertEqual(controller.devices[1].brightness, 33)

@@ -9,15 +9,15 @@ __all__ = [
     "EV_RX_WINDOW_OPEN",
     "EV_TX_DONE",
     "LP",
-    "LoRaUSB",
+    "GatewaySerialTransport",
     "mac_last3_from_hex",
     "u16le",
 ]
 
 
 def __getattr__(name):
-    if name == "LoRaUSB":
-        from .gateway_serial import LoRaUSB
+    if name == "GatewaySerialTransport":
+        from .gateway_serial import GatewaySerialTransport
 
-        return LoRaUSB
+        return GatewaySerialTransport
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

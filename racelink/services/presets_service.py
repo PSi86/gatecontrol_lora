@@ -19,7 +19,7 @@ class PresetsService:
         self._apply_options = apply_options
 
     def presets_dir(self) -> str:
-        directory = os.path.join(os.path.expanduser("~"), ".racelink_lora", "presets")
+        directory = os.path.join(os.path.expanduser("~"), ".racelink", "presets")
         os.makedirs(directory, exist_ok=True)
         return directory
 

@@ -1,4 +1,4 @@
-"""Protocol-facing modules for the RaceLink LoRa packet layer."""
+"""Protocol-facing modules for the RaceLink packet layer."""
 
 from .addressing import last3_hex, to_hex_str
 from .codec import parse_reply_event

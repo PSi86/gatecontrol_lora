@@ -297,7 +297,7 @@ def register_api_routes(bp, ctx):
             if hasattr(ctx.rl_instance, "sendConfig"):
                 ctx.rl_instance.sendConfig(option=option, data0=data0, data1=data1, data2=data2, data3=data3, recv3=recv3)
             else:
-                ctx.rl_instance.lora.send_config(recv3=recv3, option=option, data0=data0, data1=data1, data2=data2, data3=data3)
+                ctx.rl_instance.transport.send_config(recv3=recv3, option=option, data0=data0, data1=data1, data2=data2, data3=data3)
         except Exception as ex:
             ctx.log(f"RaceLink: config failed: {ex}")
             return jsonify({"ok": False, "error": str(ex)}), 500

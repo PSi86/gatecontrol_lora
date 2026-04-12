@@ -13,7 +13,7 @@ from ...domain import RL_DeviceGroup
 from ...services import HostWifiService, OTAService, PresetsService
 from ...state import get_runtime_state_repository
 from ...web import register_rl_blueprint
-from ....controller import RaceLink_LoRa
+from ....controller import RaceLink_Host
 from .config import StandaloneConfig, StandaloneOptionStore
 
 logger = logging.getLogger(__name__)
@@ -67,9 +67,9 @@ def create_standalone_app(config: StandaloneConfig | None = None) -> tuple[Flask
     rhapi = StandaloneRhApiShim(app, cfg)
     state_repository = get_runtime_state_repository()
 
-    controller = RaceLink_LoRa(
+    controller = RaceLink_Host(
         rhapi,
-        "RaceLink_LoRa",
+        "RaceLink_Host",
         "RaceLink",
         state_repository=state_repository,
     )
@@ -84,7 +84,7 @@ def create_standalone_app(config: StandaloneConfig | None = None) -> tuple[Flask
 
     rl_app = RaceLinkApp(
         controller=controller,
-        transport=getattr(controller, "lora", None),
+        transport=getattr(controller, "transport", None),
         state_repository=state_repository,
         services={
             "config": controller.config_service,

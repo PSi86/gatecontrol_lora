@@ -74,7 +74,7 @@ class StartblockService:
     def send_startblock_config(self, *, target_device=None, target_group=None, params=None):
         if target_group is not None:
             return False
-        if not target_device or not self.controller._require_lora("sendStartblockConfig"):
+        if not target_device or not self.controller._require_transport("sendStartblockConfig"):
             return False
 
         params = params or {}
@@ -168,7 +168,7 @@ class StartblockService:
         return slot_to_dev, dev_ranges
 
     def send_startblock_control(self, *, target_device=None, target_group=None, params=None):
-        if not self.controller._require_lora("sendStartblockControl"):
+        if not self.controller._require_transport("sendStartblockControl"):
             return {}
 
         params = params or {}

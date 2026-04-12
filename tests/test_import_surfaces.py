@@ -116,7 +116,7 @@ def _ensure_rotorhazard_import_stubs():
 
 
 def _load_root_plugin():
-    module_name = "gatecontrol_lora_root_plugin_test"
+    module_name = "gatecontrol_root_plugin_test"
     if module_name in sys.modules:
         return sys.modules[module_name]
 

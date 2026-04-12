@@ -15,11 +15,11 @@ class StatusService:
         self.gateway_service = gateway_service
 
     @property
-    def lora(self):
-        return getattr(self.controller, "lora", None)
+    def transport(self):
+        return getattr(self.controller, "transport", None)
 
     def get_status(self, *, group_filter=255, target_device=None) -> dict:
-        if not self.lora:
+        if not self.transport:
             logger.warning("getStatus: communicator not ready")
             return {"updated": 0, "responders": set(), "got_closed": False}
 
@@ -62,12 +62,12 @@ class StatusService:
             return False
 
         try:
-            self.lora.drain_events(0.0)
+            self.transport.drain_events(0.0)
         except Exception:
             pass
 
         _collected, got_closed = self.gateway_service.wait_rx_window(
-            lambda: self.lora.send_get_status(recv3=recv3, group_id=group_id, flags=0),
+            lambda: self.transport.send_get_status(recv3=recv3, group_id=group_id, flags=0),
             collect_pred=_collect,
             fail_safe_s=8.0,
         )

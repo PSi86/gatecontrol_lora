@@ -1,4 +1,4 @@
-"""USB serial transport for the RaceLink LoRa gateway."""
+"""USB serial transport for the RaceLink gateway."""
 
 from __future__ import annotations
 
@@ -24,13 +24,13 @@ from ..protocol.packets import (
 logger = logging.getLogger("racelink_transport")
 
 
-class LoRaUSB:
+class GatewaySerialTransport:
     """
-    Thin USB transport mirroring lora_proto on Host<->Device.
+    Thin USB transport mirroring racelink_proto on Host<->Device.
 
     Framing v1.1: [0x00][LEN][TYPE][DATA...]
       Host->Device DATA: [recv3(3)][Body]
-      Device->Host DATA: [Header7(7)][Body][RSSI(LE16)][SNR(i8)] for LoRa replies,
+      Device->Host DATA: [Header7(7)][Body][RSSI(LE16)][SNR(i8)] for transport replies,
                          or payload per EV_* for USB events.
     """
 
@@ -146,7 +146,7 @@ class LoRaUSB:
 
     def open(self):
         if not self.port:
-            raise RuntimeError("LoRaUSB: no port set")
+            raise RuntimeError("GatewaySerialTransport: no port set")
         self.ser.port = self.port
         if not self.ser.is_open:
             self.ser.open()

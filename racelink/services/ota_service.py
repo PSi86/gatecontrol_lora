@@ -22,7 +22,7 @@ class OTAService:
         self._uploads = {}
 
     def uploads_dir(self) -> str:
-        directory = os.path.join(tempfile.gettempdir(), "racelink_lora_uploads")
+        directory = os.path.join(tempfile.gettempdir(), "racelink_uploads")
         os.makedirs(directory, exist_ok=True)
         return directory
 

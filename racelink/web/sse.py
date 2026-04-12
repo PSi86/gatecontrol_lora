@@ -68,7 +68,7 @@ class SSEBridge:
         self._clients = set()
         self.master = MasterState(self.broadcast)
         self._task_manager = None
-        self._hooked_lora = {"ok": False}
+        self._hooked_transport = {"ok": False}
 
     def attach_task_manager(self, task_manager):
         self._task_manager = task_manager
@@ -97,26 +97,26 @@ class SSEBridge:
                     pass
 
     def ensure_transport_hooked(self, rl_instance):
-        if self._hooked_lora["ok"]:
+        if self._hooked_transport["ok"]:
             return
 
-        lora = getattr(rl_instance, "lora", None)
-        if not lora:
+        transport = getattr(rl_instance, "transport", None)
+        if not transport:
             return
 
-        if hasattr(lora, "add_listener"):
+        if hasattr(transport, "add_listener"):
             try:
-                lora.add_listener(self.on_transport_event)  # type: ignore[attr-defined]
-                self._hooked_lora["ok"] = True
+                transport.add_listener(self.on_transport_event)  # type: ignore[attr-defined]
+                self._hooked_transport["ok"] = True
                 self.log("RaceLink: transport event listener installed (add_listener)")
                 return
             except Exception as ex:
                 self.log(f"RaceLink: add_listener failed, falling back to on_event: {ex}")
 
-        if not hasattr(lora, "on_event"):
+        if not hasattr(transport, "on_event"):
             return
 
-        prev = getattr(lora, "on_event", None)
+        prev = getattr(transport, "on_event", None)
 
         def _mux(ev: dict):
             try:
@@ -130,8 +130,8 @@ class SSEBridge:
                 pass
 
         try:
-            lora.on_event = _mux
-            self._hooked_lora["ok"] = True
+            transport.on_event = _mux
+            self._hooked_transport["ok"] = True
             self.log("RaceLink: transport event hook installed")
         except Exception as ex:
             self.log(f"RaceLink: transport hook failed: {ex}")

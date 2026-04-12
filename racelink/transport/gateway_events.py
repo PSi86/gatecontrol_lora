@@ -1,13 +1,13 @@
-"""Low-level transport constants and event definitions for the LoRa gateway."""
+"""Low-level transport constants and event definitions for the RaceLink gateway."""
 
 from __future__ import annotations
 
 try:
-    from .. import lora_proto_auto as LPA
+    from .. import racelink_proto_auto as RLPA
 
     _HAVE_AUTO = True
 except Exception as exc:
-    raise ImportError("RaceLink protocol mirror missing: expected racelink.lora_proto_auto") from exc
+    raise ImportError("RaceLink protocol mirror missing: expected racelink.racelink_proto_auto") from exc
 
 
 class LP:
@@ -30,18 +30,18 @@ class LP:
 
 if _HAVE_AUTO:
     try:
-        LP.DIR_M2N = getattr(LPA, "DIR_M2N", LP.DIR_M2N)
-        LP.DIR_N2M = getattr(LPA, "DIR_N2M", LP.DIR_N2M)
-        LP.OPC_DEVICES = getattr(LPA, "OPC_DEVICES", LP.OPC_DEVICES)
-        LP.OPC_SET_GROUP = getattr(LPA, "OPC_SET_GROUP", LP.OPC_SET_GROUP)
-        LP.OPC_STATUS = getattr(LPA, "OPC_STATUS", LP.OPC_STATUS)
-        LP.OPC_CONTROL = getattr(LPA, "OPC_CONTROL", getattr(LPA, "OPC_WLED_CONTROL", LP.OPC_CONTROL))
-        LP.OPC_CONFIG = getattr(LPA, "OPC_CONFIG", LP.OPC_CONFIG)
-        LP.OPC_SYNC = getattr(LPA, "OPC_SYNC", LP.OPC_SYNC)
-        LP.OPC_STREAM = getattr(LPA, "OPC_STREAM", LP.OPC_STREAM)
-        LP.OPC_ACK = getattr(LPA, "OPC_ACK", LP.OPC_ACK)
+        LP.DIR_M2N = getattr(RLPA, "DIR_M2N", LP.DIR_M2N)
+        LP.DIR_N2M = getattr(RLPA, "DIR_N2M", LP.DIR_N2M)
+        LP.OPC_DEVICES = getattr(RLPA, "OPC_DEVICES", LP.OPC_DEVICES)
+        LP.OPC_SET_GROUP = getattr(RLPA, "OPC_SET_GROUP", LP.OPC_SET_GROUP)
+        LP.OPC_STATUS = getattr(RLPA, "OPC_STATUS", LP.OPC_STATUS)
+        LP.OPC_CONTROL = getattr(RLPA, "OPC_CONTROL", getattr(RLPA, "OPC_WLED_CONTROL", LP.OPC_CONTROL))
+        LP.OPC_CONFIG = getattr(RLPA, "OPC_CONFIG", LP.OPC_CONFIG)
+        LP.OPC_SYNC = getattr(RLPA, "OPC_SYNC", LP.OPC_SYNC)
+        LP.OPC_STREAM = getattr(RLPA, "OPC_STREAM", LP.OPC_STREAM)
+        LP.OPC_ACK = getattr(RLPA, "OPC_ACK", LP.OPC_ACK)
 
-        make_type = getattr(LPA, "make_type", LP.make_type)
+        make_type = getattr(RLPA, "make_type", LP.make_type)
 
         def _make_type(direction, opcode):
             return make_type(direction, opcode)

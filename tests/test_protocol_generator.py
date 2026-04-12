@@ -2,7 +2,7 @@ import importlib.util
 import pathlib
 import unittest
 
-from gen_lora_proto_py import generate
+from gen_racelink_proto_py import generate
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -18,10 +18,10 @@ def _load_module_from_path(module_name: str, path: pathlib.Path):
 
 class ProtocolGeneratorTests(unittest.TestCase):
     def test_generator_writes_package_module_contract(self):
-        out_path = ROOT / "tests" / "_generated_lora_proto_auto_test.py"
+        out_path = ROOT / "tests" / "_generated_racelink_proto_auto_test.py"
         try:
-            generate(ROOT / "lora_proto.h", out_path)
-            generated = _load_module_from_path("generated_lora_proto_auto_test", out_path)
+            generate(ROOT / "racelink_proto.h", out_path)
+            generated = _load_module_from_path("generated_racelink_proto_auto_test", out_path)
         finally:
             if out_path.exists():
                 out_path.unlink()
@@ -46,8 +46,8 @@ class ProtocolGeneratorTests(unittest.TestCase):
         self.assertEqual(rules_by_name["STATUS"].rsp_len, generated.SZ_P_StatusReply)
 
     def test_generator_default_output_path_points_into_package(self):
-        source = (ROOT / "gen_lora_proto_py.py").read_text(encoding="utf-8")
-        self.assertIn('default="racelink/lora_proto_auto.py"', source)
+        source = (ROOT / "gen_racelink_proto_py.py").read_text(encoding="utf-8")
+        self.assertIn('default="racelink/racelink_proto_auto.py"', source)
 
 
 if __name__ == "__main__":

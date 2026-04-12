@@ -56,7 +56,7 @@ class RotorHazardDataIOMixin:
         payload["help/rl_devices/name"] = ["UI: shown name of a device"]
         payload["help/rl_devices/groupId"] = ["Used to group devices for control. Valid numbers start with 3 (0-2 are reserved for device type based groups)"]
         payload["help/rl_devices/flags"] = ["bitmask: POWER_ON(0x01), ARM_ON_SYNC(0x02), HAS_BRI(0x04), FORCE_TT0(0x08), FORCE_REAPPLY(0x10)"]
-        payload["help/rl_devices/presetId"] = ["1-255: WLED preset index / mapping used by the LoRa usermod"]
+        payload["help/rl_devices/presetId"] = ["1-255: WLED preset index / mapping used by the RaceLink WLED Usermod"]
         payload["help/rl_devices/brightness"] = ["0: off, 1-255:dimming, special function with value 1: IR Controllers will spam the 'darker' signal to set IR devices to absolute minimum brightness."]
         payload["help/rl_groups"] = ["Lookup list for the groupId definitions in the device entries"]
         payload["help/rl_groups/name"] = ["UI: shown name of a group"]

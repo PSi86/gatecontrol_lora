@@ -24,18 +24,18 @@ from .racelink.services import (
 from .racelink.state import get_runtime_state_repository
 from .racelink.state.persistence import dump_records, load_records
 
-from .racelink.transport import LP, LoRaUSB, mac_last3_from_hex
+from .racelink.transport import GatewaySerialTransport, LP, mac_last3_from_hex
 
 logger = logging.getLogger(__name__)
 
 
-class RaceLink_LoRa:
+class RaceLink_Host:
     def __init__(self, rhapi, name, label, state_repository=None):
         self._rhapi = rhapi
         self.name = name
         self.label = label
         self.state_repository = state_repository or get_runtime_state_repository()
-        self.lora = None
+        self.transport = None
         self.ready = False
         self.action_reg_fn = None
         self.deviceCfgValid = False
@@ -270,18 +270,18 @@ class RaceLink_LoRa:
         self._rhapi.ui.broadcast_ui("run")
 
     def discoverPort(self, args):
-        """Initialize communicator via LoRaUSB only. No direct serial here."""
+        """Initialize the active gateway transport."""
         port = self._rhapi.db.option("psi_comms_port", None)
         try:
             self._transport_hooks_installed = False
-            self.lora = LoRaUSB(port=port, on_event=None)
-            ok = self.lora.discover_and_open()
+            self.transport = GatewaySerialTransport(port=port, on_event=None)
+            ok = self.transport.discover_and_open()
             if ok:
-                self.lora.start()
+                self.transport.start()
                 self.ready = True
                 self._install_transport_hooks()
-                used = self.lora.port or "unknown"
-                mac = getattr(self.lora, "ident_mac", None)
+                used = self.transport.port or "unknown"
+                mac = getattr(self.transport, "ident_mac", None)
                 if mac:
                     logger.info("RaceLink Communicator ready on %s with MAC: %s", used, mac)
                     if "manual" in args:
@@ -293,7 +293,7 @@ class RaceLink_LoRa:
                 self._rhapi.ui.message_notify(self._rhapi.__("No RaceLink Communicator module discovered or configured"))
         except Exception as ex:
             self.ready = False
-            logger.error("LoRaUSB init failed: %s", ex)
+            logger.error("Gateway transport init failed: %s", ex)
             if "manual" in args:
                 self._rhapi.ui.message_notify(self._rhapi.__("Failed to initialize communicator: {}").format(str(ex)))
 
@@ -329,7 +329,7 @@ class RaceLink_LoRa:
         return int(result.get("updated", 0) or 0)
 
     def setNodeGroupId(self, targetDevice: RL_Device, forceSet: bool = False, wait_for_ack: bool = True) -> bool:
-        if not getattr(self, "lora", None):
+        if not getattr(self, "transport", None):
             logger.warning("setNodeGroupId: communicator not ready")
             return False
 
@@ -343,7 +343,7 @@ class RaceLink_LoRa:
             targetDevice.ack_clear()
 
         def _send():
-            self.lora.send_set_group(recv3, group_id)
+            self.transport.send_set_group(recv3, group_id)
 
         if not wait_for_ack or is_broadcast:
             _send()
@@ -374,8 +374,8 @@ class RaceLink_LoRa:
                 device.groupId = 0
             self.setNodeGroupId(device, forceSet=True)
 
-    def _require_lora(self, context: str):
-        if getattr(self, "lora", None):
+    def _require_transport(self, context: str):
+        if getattr(self, "transport", None):
             return True
         logger.warning("%s: communicator not ready", context)
         return False
@@ -507,8 +507,8 @@ class RaceLink_LoRa:
     def _opcode_name(self, opcode7: int) -> str:
         return self.gateway_service.opcode_name(opcode7)
 
-    def _log_lora_reply(self, ev: dict) -> None:
-        return self.gateway_service.log_lora_reply(ev)
+    def _log_transport_reply(self, ev: dict) -> None:
+        return self.gateway_service.log_transport_reply(ev)
 
     def _log_rx_window_event(self, ev: dict) -> None:
         return self.gateway_service.log_rx_window_event(ev)

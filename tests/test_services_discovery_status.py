@@ -6,7 +6,7 @@ from racelink.services.status_service import StatusService
 from racelink.transport import LP
 
 
-class FakeLora:
+class FakeTransport:
     def __init__(self):
         self.sent = []
 
@@ -41,7 +41,7 @@ class FakeGateway:
 class FakeController:
     def __init__(self, devices):
         self._devices = devices
-        self.lora = FakeLora()
+        self.transport = FakeTransport()
         self.group_assignments = []
 
     def _to_hex_str(self, value):

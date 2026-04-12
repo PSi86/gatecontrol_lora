@@ -1,4 +1,4 @@
-"""Protocol codec helpers for typed LoRa reply events."""
+"""Protocol codec helpers for typed transport reply events."""
 
 from __future__ import annotations
 

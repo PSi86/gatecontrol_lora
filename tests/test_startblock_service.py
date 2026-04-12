@@ -47,7 +47,7 @@ class FakeController:
     def device_repository(self):
         return FakeRepo(self._devices)
 
-    def _require_lora(self, _context):
+    def _require_transport(self, _context):
         return True
 
     def sendConfig(self, **kwargs):

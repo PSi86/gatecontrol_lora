@@ -13,11 +13,11 @@ class SyncService:
         self.gateway_service = gateway_service
 
     @property
-    def lora(self):
-        return getattr(self.controller, "lora", None)
+    def transport(self):
+        return getattr(self.controller, "transport", None)
 
     def send_sync(self, ts24, brightness, recv3=b"\xFF\xFF\xFF"):
-        if not self.lora:
+        if not self.transport:
             logger.warning("sendSync: communicator not ready")
             return
         self.gateway_service.send_sync(ts24, brightness, recv3=recv3)

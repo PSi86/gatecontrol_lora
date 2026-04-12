@@ -20,11 +20,11 @@ class GatewayService:
         self.controller = controller
 
     @property
-    def lora(self):
-        return getattr(self.controller, "lora", None)
+    def transport(self):
+        return getattr(self.controller, "transport", None)
 
     def send_and_wait_for_reply(self, recv3: bytes, opcode7: int, send_fn, timeout_s: float = 8.0) -> tuple[list[dict], bool]:
-        if not self.lora:
+        if not self.transport:
             return [], False
 
         self.install_transport_hooks()
@@ -75,7 +75,7 @@ class GatewayService:
         return collected, got_closed
 
     def send_config(self, option, data0=0, data1=0, data2=0, data3=0, recv3=b"\xFF\xFF\xFF", wait_for_ack: bool = False, timeout_s: float = 6.0):
-        if not self.lora:
+        if not self.transport:
             logger.warning("sendConfig: communicator not ready")
             return False if wait_for_ack else None
 
@@ -91,7 +91,7 @@ class GatewayService:
                 dev.ack_clear()
 
         def _send():
-            self.lora.send_config(
+            self.transport.send_config(
                 recv3=recv3,
                 option=int(option) & 0xFF,
                 data0=int(data0) & 0xFF,
@@ -113,13 +113,13 @@ class GatewayService:
         return True
 
     def send_sync(self, ts24, brightness, recv3=b"\xFF\xFF\xFF"):
-        if not self.lora:
+        if not self.transport:
             logger.warning("sendSync: communicator not ready")
             return
-        self.lora.send_sync(recv3=recv3, ts24=int(ts24) & 0xFFFFFF, brightness=int(brightness) & 0xFF)
+        self.transport.send_sync(recv3=recv3, ts24=int(ts24) & 0xFFFFFF, brightness=int(brightness) & 0xFF)
 
     def send_stream(self, payload: bytes, groupId=None, device=None, retries: int = 2, timeout_s: float = 8.0) -> dict[str, int]:
-        if not self.lora:
+        if not self.transport:
             logger.warning("sendStream: communicator not ready")
             return {}
 
@@ -154,7 +154,7 @@ class GatewayService:
             return {"expected": expected, "acked": 0}
 
         try:
-            self.lora.drain_events(0.0)
+            self.transport.drain_events(0.0)
         except Exception:
             pass
 
@@ -178,7 +178,7 @@ class GatewayService:
                 return False
 
         for attempt in range(max(0, int(retries)) + 1):
-            self.wait_rx_window(lambda: self.lora.send_stream(recv3=recv3, ctrl=ctrl, data=data), collect_pred=_collect, fail_safe_s=timeout_s)
+            self.wait_rx_window(lambda: self.transport.send_stream(recv3=recv3, ctrl=ctrl, data=data), collect_pred=_collect, fail_safe_s=timeout_s)
             if len(acked) >= expected:
                 break
             if attempt < int(retries):
@@ -187,14 +187,14 @@ class GatewayService:
         return {"expected": expected, "acked": len(acked)}
 
     def wait_rx_window(self, send_fn, collect_pred=None, fail_safe_s: float = 8.0):
-        if not self.lora:
+        if not self.transport:
             return [], False
 
-        lora = self.lora
+        transport = self.transport
         collected = []
         got_closed = False
 
-        if hasattr(lora, "add_listener") and hasattr(lora, "remove_listener"):
+        if hasattr(transport, "add_listener") and hasattr(transport, "remove_listener"):
             closed_ev = threading.Event()
 
             def _cb(ev: dict):
@@ -211,13 +211,13 @@ class GatewayService:
                 except Exception:
                     pass
 
-            lora.add_listener(_cb)
+            transport.add_listener(_cb)
             try:
                 send_fn()
                 closed_ev.wait(timeout=float(fail_safe_s))
             finally:
                 try:
-                    lora.remove_listener(_cb)
+                    transport.remove_listener(_cb)
                 except Exception:
                     pass
             return collected, got_closed
@@ -225,7 +225,7 @@ class GatewayService:
         send_fn()
         t_end = time.time() + float(fail_safe_s)
         while time.time() < t_end:
-            for ev in lora.drain_events(timeout_s=0.1):
+            for ev in transport.drain_events(timeout_s=0.1):
                 if ev.get("type") == EV_RX_WINDOW_CLOSED:
                     got_closed = True
                     return collected, got_closed
@@ -236,7 +236,7 @@ class GatewayService:
     def opcode_name(self, opcode7: int) -> str:
         return protocol_opcode_name(int(opcode7) & 0x7F)
 
-    def log_lora_reply(self, ev: dict) -> None:
+    def log_transport_reply(self, ev: dict) -> None:
         try:
             opc = int(ev.get("opc", -1)) & 0x7F
         except Exception:
@@ -293,8 +293,8 @@ class GatewayService:
 
     def log_rx_window_event(self, ev: dict) -> None:
         t = ev.get("type")
-        if self.lora:
-            state = int(ev.get("rx_windows", getattr(self.lora, "rx_window_state", 0)) or 0)
+        if self.transport:
+            state = int(ev.get("rx_windows", getattr(self.transport, "rx_window_state", 0)) or 0)
         else:
             state = int(ev.get("rx_windows", 0) or 0)
         if t == EV_RX_WINDOW_OPEN:
@@ -331,15 +331,15 @@ class GatewayService:
     def install_transport_hooks(self) -> None:
         if self.controller._transport_hooks_installed:
             return
-        lora = self.lora
-        if not lora:
+        transport = self.transport
+        if not transport:
             return
 
         try:
-            if hasattr(lora, "add_listener"):
-                lora.add_listener(self.on_transport_event)
+            if hasattr(transport, "add_listener"):
+                transport.add_listener(self.on_transport_event)
             else:
-                prev = getattr(lora, "on_event", None)
+                prev = getattr(transport, "on_event", None)
 
                 def _mux(ev):
                     try:
@@ -352,13 +352,13 @@ class GatewayService:
                         except Exception:
                             pass
 
-                lora.on_event = _mux
+                transport.on_event = _mux
         except Exception:
             logger.exception("RaceLink: failed to install transport RX listener")
 
         try:
-            if hasattr(lora, "add_tx_listener"):
-                lora.add_tx_listener(self.on_transport_tx)
+            if hasattr(transport, "add_tx_listener"):
+                transport.add_tx_listener(self.on_transport_tx)
         except Exception:
             logger.exception("RaceLink: failed to install transport TX listener")
 
@@ -437,7 +437,7 @@ class GatewayService:
             if opc is None:
                 return
 
-            self.log_lora_reply(ev)
+            self.log_transport_reply(ev)
 
             if int(opc) == int(LP.OPC_ACK):
                 self.handle_ack_event(ev)
@@ -493,13 +493,13 @@ class GatewayService:
 
         def _reconnect():
             try:
-                logger.warning("RaceLink: attempting LoRaUSB reconnect after error: %s", reason)
+                logger.warning("RaceLink: attempting gateway transport reconnect after error: %s", reason)
                 try:
-                    if self.lora:
-                        self.lora.close()
+                    if self.transport:
+                        self.transport.close()
                 except Exception:
                     pass
-                self.controller.lora = None
+                self.controller.transport = None
                 self.controller.discoverPort({})
             finally:
                 self.controller._reconnect_in_progress = False

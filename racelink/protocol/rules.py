@@ -3,25 +3,25 @@
 from __future__ import annotations
 
 try:
-    from .. import lora_proto_auto as LPA
+    from .. import racelink_proto_auto as RLPA
 except Exception as exc:  # pragma: no cover
-    raise ImportError("RaceLink protocol mirror missing: expected racelink.lora_proto_auto") from exc
+    raise ImportError("RaceLink protocol mirror missing: expected racelink.racelink_proto_auto") from exc
 
 
-PacketRule = LPA.PacketRule
+PacketRule = RLPA.PacketRule
 
-DIR_M2N = LPA.DIR_M2N
-DIR_N2M = LPA.DIR_N2M
+DIR_M2N = RLPA.DIR_M2N
+DIR_N2M = RLPA.DIR_N2M
 
-RESP_NONE = LPA.RESP_NONE
-RESP_ACK = LPA.RESP_ACK
-RESP_SPECIFIC = LPA.RESP_SPECIFIC
+RESP_NONE = RLPA.RESP_NONE
+RESP_ACK = RLPA.RESP_ACK
+RESP_SPECIFIC = RLPA.RESP_SPECIFIC
 
-RULES = LPA.RULES
+RULES = RLPA.RULES
 
 
 def find_rule(opcode7: int):
-    return LPA.find_rule(opcode7)
+    return RLPA.find_rule(opcode7)
 
 
 def opcode_name(opcode7: int) -> str:

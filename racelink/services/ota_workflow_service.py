@@ -90,7 +90,7 @@ class OTAWorkflowService:
                 meta={"addr": mac},
             )
 
-            task_manager.update(meta={"stage": "LORA_AP_ON", "addr": mac, "message": "Enable WLED AP via LoRa (waiting for ACK)"})
+            task_manager.update(meta={"stage": "RACELINK_AP_ON", "addr": mac, "message": "Enable WLED AP via RaceLink (waiting for ACK)"})
             ok_ap = rl_instance.sendConfig(0x04, data0=1, recv3=self.ota.recv3_bytes_from_addr(mac), wait_for_ack=True, timeout_s=8.0)
             if not ok_ap:
                 raise RuntimeError(f"Timeout waiting for CONFIG ACK from {mac}")
@@ -182,7 +182,7 @@ class OTAWorkflowService:
                 }
                 results["devices"].append(dev_res)
                 try:
-                    task_manager.update(meta={"stage": "LORA_AP_ON", "index": idx, "total": total, "addr": addr, "retries": retries, "message": "Enable WLED AP via LoRa"})
+                    task_manager.update(meta={"stage": "RACELINK_AP_ON", "index": idx, "total": total, "addr": addr, "retries": retries, "message": "Enable WLED AP via RaceLink"})
                     rl_instance.sendConfig(0x04, data0=1, recv3=self.ota.recv3_bytes_from_addr(str(addr)))
                     self._connect_wled_wifi(
                         task_manager,

@@ -1,4 +1,4 @@
-# RaceLink LoRa
+# RaceLink
 
 RaceLink now uses the `racelink/` package as the primary home for the refactored architecture.
 
@@ -39,8 +39,8 @@ All other internal imports are expected to use the canonical package paths under
 
 ## Notes
 
-- `lora_proto.h` remains the protocol source of truth.
-- The supported Python mirror path is `lora_proto.h -> gen_lora_proto_py.py -> racelink/lora_proto_auto.py`.
+- `racelink_proto.h` remains the protocol source of truth.
+- The supported Python mirror path is `racelink_proto.h -> gen_racelink_proto_py.py -> racelink/racelink_proto_auto.py`.
 - The generator now mirrors constants, response rules, packed struct sizes, and packed field layouts used by the Python side.
 - `packets.py` and `codec.py` still contain the active Python builders/decoders, so generator-backed drift tests are used to keep those hand-written paths aligned with the shared header.
 - RotorHazard remains the primary supported integration path.

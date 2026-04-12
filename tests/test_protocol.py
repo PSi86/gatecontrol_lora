@@ -1,6 +1,6 @@
 import unittest
 
-from racelink import lora_proto_auto as LPA
+from racelink import racelink_proto_auto as RLPA
 from racelink.protocol import addressing, codec, packets, rules
 
 
@@ -22,35 +22,35 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(addressing.last3_hex("aa:bb:cc:dd:ee:ff"), "DDEEFF")
 
     def test_generated_struct_sizes_match_manual_packet_builders(self):
-        self.assertEqual(len(packets.build_get_devices_body(1, 2)), LPA.SZ_P_GetDevices)
-        self.assertEqual(len(packets.build_set_group_body(3)), LPA.SZ_P_SetGroup)
-        self.assertEqual(len(packets.build_control_body(1, 2, 3, 4)), LPA.SZ_P_Control)
-        self.assertEqual(len(packets.build_config_body(5, 1, 2, 3, 4)), LPA.SZ_P_Config)
-        self.assertEqual(len(packets.build_sync_body(0x123456, 0x44)), LPA.SZ_P_Sync)
-        self.assertEqual(len(packets.build_stream_body(0xA5, b"\x01\x02\x03\x04\x05\x06\x07\x08")), LPA.SZ_P_Stream)
-        self.assertEqual(LPA.SZ_P_IdentifyReply, 9)
-        self.assertEqual(LPA.SZ_P_StatusReply, 8)
-        self.assertEqual(LPA.SZ_P_Ack, 3)
+        self.assertEqual(len(packets.build_get_devices_body(1, 2)), RLPA.SZ_P_GetDevices)
+        self.assertEqual(len(packets.build_set_group_body(3)), RLPA.SZ_P_SetGroup)
+        self.assertEqual(len(packets.build_control_body(1, 2, 3, 4)), RLPA.SZ_P_Control)
+        self.assertEqual(len(packets.build_config_body(5, 1, 2, 3, 4)), RLPA.SZ_P_Config)
+        self.assertEqual(len(packets.build_sync_body(0x123456, 0x44)), RLPA.SZ_P_Sync)
+        self.assertEqual(len(packets.build_stream_body(0xA5, b"\x01\x02\x03\x04\x05\x06\x07\x08")), RLPA.SZ_P_Stream)
+        self.assertEqual(RLPA.SZ_P_IdentifyReply, 9)
+        self.assertEqual(RLPA.SZ_P_StatusReply, 8)
+        self.assertEqual(RLPA.SZ_P_Ack, 3)
 
     def test_generated_struct_fields_match_header_contract_used_by_python(self):
         self.assertEqual(
-            LPA.STRUCT_FIELDS["P_GetDevices"],
+            RLPA.STRUCT_FIELDS["P_GetDevices"],
             [("groupId", "uint8_t", 1), ("flags", "uint8_t", 1)],
         )
         self.assertEqual(
-            LPA.STRUCT_FIELDS["P_Control"],
+            RLPA.STRUCT_FIELDS["P_Control"],
             [("groupId", "uint8_t", 1), ("flags", "uint8_t", 1), ("presetId", "uint8_t", 1), ("brightness", "uint8_t", 1)],
         )
         self.assertEqual(
-            LPA.STRUCT_FIELDS["P_Sync"],
+            RLPA.STRUCT_FIELDS["P_Sync"],
             [("ts24_0", "uint8_t", 1), ("ts24_1", "uint8_t", 1), ("ts24_2", "uint8_t", 1), ("brightness", "uint8_t", 1)],
         )
         self.assertEqual(
-            LPA.STRUCT_FIELDS["P_IdentifyReply"],
+            RLPA.STRUCT_FIELDS["P_IdentifyReply"],
             [("fw", "uint8_t", 1), ("caps", "uint8_t", 1), ("groupId", "uint8_t", 1), ("mac6", "uint8_t", 6)],
         )
         self.assertEqual(
-            LPA.STRUCT_FIELDS["P_StatusReply"],
+            RLPA.STRUCT_FIELDS["P_StatusReply"],
             [
                 ("flags", "uint8_t", 1),
                 ("configByte", "uint8_t", 1),
@@ -83,7 +83,7 @@ class ProtocolTests(unittest.TestCase):
 
     def test_protocol_codec_parses_identify_reply_using_generated_size(self):
         identify_body = b"\x04\x21\x09" + bytes.fromhex("AABBCCDDEEFF")
-        self.assertEqual(len(identify_body), LPA.SZ_P_IdentifyReply)
+        self.assertEqual(len(identify_body), RLPA.SZ_P_IdentifyReply)
         identify_payload = bytes.fromhex("AABBCC11223300") + identify_body + b"\x00\x00\x00"
         identify_event = codec.parse_reply_event(0x01, identify_payload, timestamp=3.0, host_rssi=-42, host_snr=6, rx_windows=1)
 

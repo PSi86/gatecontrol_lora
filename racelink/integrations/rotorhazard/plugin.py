@@ -15,7 +15,7 @@ from ...services import HostWifiService, OTAService, PresetsService
 from ...state import get_runtime_state_repository
 from ...web import register_rl_blueprint
 from .ui import RotorHazardUIAdapter
-from ....controller import RaceLink_LoRa
+from ....controller import RaceLink_Host
 
 logger = logging.getLogger(__name__)
 
@@ -28,9 +28,9 @@ def initialize(rhapi):
 
     state_repository = get_runtime_state_repository()
 
-    controller = RaceLink_LoRa(
+    controller = RaceLink_Host(
         rhapi,
-        "RaceLink_LoRa",
+        "RaceLink_Host",
         "RaceLink",
         state_repository=state_repository,
     )
@@ -46,7 +46,7 @@ def initialize(rhapi):
     ota_service = OTAService(host_wifi_service=host_wifi_service, presets_service=presets_service)
     rl_app = RaceLinkApp(
         controller=controller,
-        transport=getattr(controller, "lora", None),
+        transport=getattr(controller, "transport", None),
         state_repository=state_repository,
         services={
             "config": controller.config_service,
