@@ -77,6 +77,8 @@ def _top_level_text() -> str:
 def _iter_sources() -> list[tuple[Path, str]]:
     sources = [(ROOT / "controller.py", "controller.py")]
     sources.extend((path, path.relative_to(ROOT).as_posix()) for path in sorted((ROOT / "racelink").rglob("*.py")))
+    sources.extend((path, path.relative_to(ROOT).as_posix()) for path in sorted((ROOT / "pages").rglob("*")) if path.is_file())
+    sources.extend((path, path.relative_to(ROOT).as_posix()) for path in sorted((ROOT / "static").rglob("*")) if path.is_file())
     return sources
 
 
