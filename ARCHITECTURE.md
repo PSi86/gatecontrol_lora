@@ -39,7 +39,7 @@ This keeps plugin repositories from reaching deeply into host internals.
 - `racelink/web/`
   Shared RaceLink WebUI registration, API, SSE, DTOs, and task state.
 - `racelink/integrations/standalone/`
-  Standalone Flask bootstrap using the same host runtime and WebUI.
+  Canonical standalone Flask bootstrap using the same host runtime and WebUI.
 - `pages/` and `static/`
   Shared RaceLink WebUI assets that remain in the host repository.
 
@@ -49,6 +49,7 @@ There is one RaceLink WebUI.
 
 - In standalone mode, the standalone Flask app mounts that UI through `register_racelink_web(...)`.
 - In RotorHazard mode, the external adapter plugin is expected to mount that same UI through the same host-owned registration entry.
+- The packaged standalone user entrypoint is `racelink-standalone`, which boots the host-owned standalone integration under `racelink.integrations.standalone`.
 
 `pages/` and `static/` stay in the host repository so both hosting modes use the same UI implementation.
 

@@ -28,6 +28,17 @@ The host-owned integration edge for outer adapters is intentionally small:
 - `racelink.app.create_runtime(...)`
 - `racelink.web.register_racelink_web(...)`
 
+## Standalone mode
+
+Standalone mode runs RaceLink as its own Flask application with the shared RaceLink WebUI mounted at `/racelink`.
+
+- Start it with the packaged `racelink-standalone` command after installing `racelink-host`
+- Normal standalone operation expects a connected RaceLink Gateway
+- Default bind address: `127.0.0.1:5077`
+- Default UI URL: `http://127.0.0.1:5077/racelink`
+
+For full Windows and Linux installation, configuration, and usage instructions, see [docs/standalone.md](/C:/Users/psima/Dev/RaceLink_Host/docs/standalone.md).
+
 ## Local checks
 
 Run the test suite with:
