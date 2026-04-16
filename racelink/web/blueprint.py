@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import os
+from pathlib import Path
 from typing import Any, Callable
 
 from flask import Blueprint, templating
@@ -35,6 +36,17 @@ def _join_url(base: str, suffix: str) -> str:
     base_norm = _normalize_url_prefix(base)
     suffix_norm = "/" + str(suffix or "").lstrip("/")
     return f"{base_norm}{suffix_norm}" if base_norm else suffix_norm
+
+
+def _resolve_asset_dirs() -> tuple[str, str]:
+    package_root = Path(__file__).resolve().parents[1]
+    package_pages = package_root / "pages"
+    package_static = package_root / "static"
+    if package_pages.is_dir() and package_static.is_dir():
+        return str(package_pages), str(package_static)
+
+    legacy_root = package_root.parent
+    return str(legacy_root / "pages"), str(legacy_root / "static")
 
 
 def _resolve_blueprint_registrar(app_or_host):
@@ -151,13 +163,13 @@ def create_racelink_web_blueprint(
             presets_service=ctx.services["presets"],
         )
 
-    root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    template_dir, static_dir = _resolve_asset_dirs()
     bp = Blueprint(
         blueprint_name,
         __name__,
         url_prefix=normalized_prefix or None,
-        template_folder=os.path.join(root_dir, "pages"),
-        static_folder=os.path.join(root_dir, "static"),
+        template_folder=template_dir,
+        static_folder=static_dir,
         static_url_path="/static",
     )
 

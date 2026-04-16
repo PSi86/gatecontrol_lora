@@ -3,6 +3,7 @@ import importlib
 import sys
 import types
 import unittest
+from pathlib import Path
 
 from racelink.domain import RL_DeviceGroup
 
@@ -96,6 +97,13 @@ class WebRegistrationTests(unittest.TestCase):
         self.assertIn(("/", ("GET",)), bp.routes)
         self.assertIn(("/api/devices", ("GET",)), bp.routes)
         self.assertIn(("/api/events", ("GET",)), bp.routes)
+
+    def test_asset_dirs_resolve_to_existing_paths(self):
+        blueprint = importlib.import_module("racelink.web.blueprint")
+        template_dir, static_dir = blueprint._resolve_asset_dirs()
+
+        self.assertTrue(Path(template_dir).is_dir())
+        self.assertTrue(Path(static_dir).is_dir())
 
     def test_root_render_injects_base_and_static_paths(self):
         app = _FakeApp()

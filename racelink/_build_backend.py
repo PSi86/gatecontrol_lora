@@ -27,6 +27,21 @@ ENTRY_POINTS = {
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def _package_data_sources() -> list[tuple[Path, str]]:
+    sources: list[tuple[Path, str]] = []
+    sources.extend(
+        (path, f"racelink/pages/{path.relative_to(ROOT / 'pages').as_posix()}")
+        for path in sorted((ROOT / "pages").rglob("*"))
+        if path.is_file()
+    )
+    sources.extend(
+        (path, f"racelink/static/{path.relative_to(ROOT / 'static').as_posix()}")
+        for path in sorted((ROOT / "static").rglob("*"))
+        if path.is_file()
+    )
+    return sources
+
+
 def _dist_info_dir() -> str:
     return f"{NAME.replace('-', '_')}-{VERSION}.dist-info"
 
@@ -77,8 +92,7 @@ def _top_level_text() -> str:
 def _iter_sources() -> list[tuple[Path, str]]:
     sources = [(ROOT / "controller.py", "controller.py")]
     sources.extend((path, path.relative_to(ROOT).as_posix()) for path in sorted((ROOT / "racelink").rglob("*.py")))
-    sources.extend((path, path.relative_to(ROOT).as_posix()) for path in sorted((ROOT / "pages").rglob("*")) if path.is_file())
-    sources.extend((path, path.relative_to(ROOT).as_posix()) for path in sorted((ROOT / "static").rglob("*")) if path.is_file())
+    sources.extend(_package_data_sources())
     return sources
 
 
