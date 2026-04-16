@@ -420,7 +420,7 @@ class GatewayService:
                     self.controller._last_error_notify_ts = now
                     try:
                         self.controller._rhapi.ui.message_notify(
-                            self.controller._rhapi.__("RaceLink Communicator disconnected: {}").format(reason)
+                            self.controller._rhapi.__("RaceLink Gateway disconnected: {}").format(reason)
                         )
                     except Exception:
                         logger.exception("RaceLink: failed to notify UI about disconnect")

@@ -4,8 +4,13 @@ __pycache__/
 *.pyd
 .vscode/
 .DS_Store
-<<<<<<< HEAD
 *.code-workspace
-=======
-*.code-workspace
->>>>>>> b61e07cef3c7b61fee5c1c093d7e34e2900949ae
+
+# Local Codex/debug packaging artifacts
+.pkgtest/
+.piptmp/
+.pi_files/
+.pi_files_2/
+.wheelcheck/
+.wheel-test/
+tmp*/

@@ -257,14 +257,14 @@ class RaceLink_Host:
                 used = self.transport.port or "unknown"
                 mac = getattr(self.transport, "ident_mac", None)
                 if mac:
-                    logger.info("RaceLink Communicator ready on %s with MAC: %s", used, mac)
+                    logger.info("RaceLink Gateway ready on %s with MAC: %s", used, mac)
                     if "manual" in args:
-                        self._notify(self._translate("RaceLink Communicator ready on {} with MAC: {}").format(used, mac))
+                        self._notify(self._translate("RaceLink Gateway ready on {} with MAC: {}").format(used, mac))
                 return
             self.ready = False
-            logger.warning("No RaceLink Communicator module discovered or configured")
+            logger.warning("No RaceLink Gateway module discovered or configured")
             if "manual" in args:
-                self._notify(self._translate("No RaceLink Communicator module discovered or configured"))
+                self._notify(self._translate("No RaceLink Gateway module discovered or configured"))
         except Exception as ex:
             self.ready = False
             logger.error("Gateway transport init failed: %s", ex)
