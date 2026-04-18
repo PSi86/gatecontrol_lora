@@ -31,5 +31,5 @@ The following paths used to live in this repository and now belong in the separa
 | `racelink/app.py` | Owns the host runtime factory and service wiring. |
 | `racelink/web/**` | Owns the shared RaceLink WebUI registration, API, SSE, and task state. |
 | `racelink/integrations/standalone/**` | Hosts the standalone Flask mode. |
-| `pages/**` and `static/**` | Shared RaceLink WebUI assets for all hosting modes. |
+| `racelink/pages/**` and `racelink/static/**` | Shared RaceLink WebUI assets for all hosting modes and package installation. |
 | `controller.py` | Host controller and runtime coordinator. |

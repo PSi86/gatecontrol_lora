@@ -42,11 +42,9 @@ def _resolve_asset_dirs() -> tuple[str, str]:
     package_root = Path(__file__).resolve().parents[1]
     package_pages = package_root / "pages"
     package_static = package_root / "static"
-    if package_pages.is_dir() and package_static.is_dir():
-        return str(package_pages), str(package_static)
-
-    legacy_root = package_root.parent
-    return str(legacy_root / "pages"), str(legacy_root / "static")
+    if not package_pages.is_dir() or not package_static.is_dir():
+        raise FileNotFoundError("RaceLink web assets are missing from the installed package")
+    return str(package_pages), str(package_static)
 
 
 def _resolve_blueprint_registrar(app_or_host):

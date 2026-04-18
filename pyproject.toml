@@ -5,7 +5,7 @@ backend-path = ["."]
 
 [project]
 name = "racelink-host"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Host-side software for the RaceLink wireless control system."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -33,6 +33,7 @@ Repository = "https://github.com/PSi86/RaceLink_Host"
 
 [project.scripts]
 racelink-standalone = "racelink.integrations.standalone.webapp:run_standalone"
+racelink-host-version = "racelink._version:print_version"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

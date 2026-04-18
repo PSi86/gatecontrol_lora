@@ -104,6 +104,10 @@ class WebRegistrationTests(unittest.TestCase):
 
         self.assertTrue(Path(template_dir).is_dir())
         self.assertTrue(Path(static_dir).is_dir())
+        self.assertEqual(Path(template_dir).name, "pages")
+        self.assertEqual(Path(static_dir).name, "static")
+        self.assertEqual(Path(template_dir).parent.name, "racelink")
+        self.assertEqual(Path(static_dir).parent.name, "racelink")
 
     def test_root_render_injects_base_and_static_paths(self):
         app = _FakeApp()

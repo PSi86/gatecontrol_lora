@@ -1,0 +1,94 @@
+name: Release Artifacts
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Validate tag matches package version
+        shell: bash
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          package_version="$(python - <<'PY'
+          import racelink
+          print(racelink.__version__)
+          PY
+          )"
+          if [[ "$tag_version" != "$package_version" ]]; then
+            echo "Tag version $tag_version does not match package version $package_version" >&2
+            exit 1
+          fi
+
+      - name: Install build frontend
+        run: python -m pip install --upgrade build
+
+      - name: Set reproducible build timestamp
+        shell: bash
+        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct "$GITHUB_SHA")" >> "$GITHUB_ENV"
+
+      - name: Build wheel and sdist
+        run: python -m build
+
+      - name: Verify stable artifact names
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from racelink import _build_backend
+
+          dist = Path("dist")
+          expected = {
+              _build_backend._wheel_name(),
+              _build_backend._sdist_name(),
+          }
+          actual = {path.name for path in dist.iterdir() if path.is_file()}
+          missing = expected - actual
+          if missing:
+              raise SystemExit(f"Missing expected artifacts: {sorted(missing)}")
+          PY
+
+      - name: Generate SHA256 file
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib
+
+          version = "${{ github.ref_name }}"[1:]
+          dist = Path("dist")
+          artifact_names = [
+              f"racelink_host-{version}-py3-none-any.whl",
+              f"racelink-host-{version}.tar.gz",
+          ]
+          lines = []
+          for name in artifact_names:
+              data = (dist / name).read_bytes()
+              digest = hashlib.sha256(data).hexdigest()
+              lines.append(f"{digest}  {name}")
+          (dist / f"racelink-host-{version}-sha256.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+          PY
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/*.whl
+            dist/*.tar.gz
+            dist/*-sha256.txt
