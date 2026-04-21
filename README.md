@@ -57,7 +57,14 @@ py -3 -m pip install --no-deps --no-build-isolation .
 
 ## Release artifacts
 
-Pushing a semver tag like `v0.1.0` triggers the GitHub Actions release workflow in `.github/workflows/release.yml`.
+Run the GitHub Actions release workflow in `.github/workflows/release.yml` from the Actions UI.
+
+The workflow accepts:
+
+- an optional `version` override
+- a required `target_branch` input
+
+If `version` is left empty, the workflow auto-increments the current host patch version using the canonical `racelink/_version.py` value.
 
 The workflow builds and publishes these stable filenames:
 
@@ -65,13 +72,13 @@ The workflow builds and publishes these stable filenames:
 - `racelink-host-<version>.tar.gz`
 - `racelink-host-<version>-sha256.txt`
 
-For example, tag `v0.1.0` publishes:
+For example, a release for `v0.1.0` publishes:
 
 - `racelink_host-0.1.0-py3-none-any.whl`
 - `racelink-host-0.1.0.tar.gz`
 - `racelink-host-0.1.0-sha256.txt`
 
-The workflow rejects tags whose version does not match `racelink.__version__`.
+The workflow validates that the computed release version matches `racelink.__version__`, commits the release metadata, creates the `v<version>` tag, pushes the selected branch with the tag, and then publishes the GitHub release.
 
 ## Consuming `racelink-host` from other repositories
 
@@ -79,8 +86,10 @@ Other repositories should consume `RaceLink_Host` as an installable package, not
 
 ### Build and release flow
 
-- Create a semver tag like `v0.1.0` in `RaceLink_Host`.
-- GitHub Actions builds the release artifacts from that tagged commit.
+- Open GitHub Actions and run `.github/workflows/release.yml`.
+- Set `target_branch` to the branch you want to release from.
+- Optionally set `version`. If left empty, the workflow increments the current patch version automatically.
+- GitHub Actions updates `racelink/_version.py`, validates the computed `v<version>` tag, builds the release artifacts, commits the version bump, creates the tag, pushes the branch and tag, and publishes the release.
 - The release publishes these stable filenames:
 - `racelink_host-<version>-py3-none-any.whl`
 - `racelink-host-<version>.tar.gz`
