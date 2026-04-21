@@ -82,7 +82,6 @@ class ActiveSendServiceTests(unittest.TestCase):
         self.assertEqual(len(gateway.sync_calls), 1)
         self.assertEqual(len(gateway.stream_calls), 1)
         self.assertEqual(result, {"expected": 1, "acked": 1})
-        self.assertEqual(StreamService.build_ctrl(True, False, 3), 0x83)
 
 
 if __name__ == "__main__":

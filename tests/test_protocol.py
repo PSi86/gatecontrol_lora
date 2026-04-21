@@ -17,7 +17,6 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(packets.build_control_body(1, 2, 3, 4), b"\x01\x02\x03\x04")
         self.assertEqual(packets.build_config_body(5, 1, 2, 3, 4), b"\x05\x01\x02\x03\x04")
         self.assertEqual(packets.build_sync_body(0x123456, 0x44), b"\x56\x34\x12\x44")
-        self.assertEqual(packets.build_stream_body(0xA5, b"\x01\x02"), b"\xA5\x01\x02")
         self.assertEqual(addressing.to_hex_str("aa:bb:cc:dd:ee:ff"), "AABBCCDDEEFF")
         self.assertEqual(addressing.last3_hex("aa:bb:cc:dd:ee:ff"), "DDEEFF")
 
@@ -27,7 +26,6 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(len(packets.build_control_body(1, 2, 3, 4)), RLPA.SZ_P_Control)
         self.assertEqual(len(packets.build_config_body(5, 1, 2, 3, 4)), RLPA.SZ_P_Config)
         self.assertEqual(len(packets.build_sync_body(0x123456, 0x44)), RLPA.SZ_P_Sync)
-        self.assertEqual(len(packets.build_stream_body(0xA5, b"\x01\x02\x03\x04\x05\x06\x07\x08")), RLPA.SZ_P_Stream)
         self.assertEqual(RLPA.SZ_P_IdentifyReply, 9)
         self.assertEqual(RLPA.SZ_P_StatusReply, 8)
         self.assertEqual(RLPA.SZ_P_Ack, 3)

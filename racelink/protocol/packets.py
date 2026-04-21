@@ -24,9 +24,3 @@ def build_config_body(option: int = 0, data0: int = 0, data1: int = 0, data2: in
 def build_sync_body(ts24: int = 0, brightness: int = 0) -> bytes:
     ts = int(ts24) & 0xFFFFFF
     return bytes([(ts & 0xFF), ((ts >> 8) & 0xFF), ((ts >> 16) & 0xFF), (int(brightness) & 0xFF)])
-
-
-def build_stream_body(ctrl: int, data: bytes) -> bytes:
-    if not isinstance(data, (bytes, bytearray)):
-        raise ValueError("data must be bytes")
-    return struct.pack("<B", int(ctrl) & 0xFF) + bytes(data)

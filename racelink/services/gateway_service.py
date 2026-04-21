@@ -125,18 +125,15 @@ class GatewayService:
 
         self.install_transport_hooks()
 
+        # For OPC_STREAM the host provides one logical payload. The gateway is
+        # responsible for fragmenting it into radio packets and assigning the
+        # per-packet stream control bytes.
         data = bytes(payload or b"")
         if len(data) > 128:
             raise ValueError("payload too large (max 128 bytes)")
 
         if device is None and groupId is None:
             raise ValueError("sendStream requires groupId or device")
-
-        total_packets = max(1, (len(data) + 7) // 8)
-        start = True
-        stop = total_packets == 1
-        packets_left = 0 if stop else total_packets
-        ctrl = self.controller._stream_ctrl(start, stop, packets_left)
 
         if device is None:
             targets = [dev for dev in self.controller.device_repository.list() if int(getattr(dev, "groupId", 0) or 0) == int(groupId)]
@@ -178,7 +175,11 @@ class GatewayService:
                 return False
 
         for attempt in range(max(0, int(retries)) + 1):
-            self.wait_rx_window(lambda: self.transport.send_stream(recv3=recv3, ctrl=ctrl, data=data), collect_pred=_collect, fail_safe_s=timeout_s)
+            self.wait_rx_window(
+                lambda: self.transport.send_stream(recv3=recv3, payload=data),
+                collect_pred=_collect,
+                fail_safe_s=timeout_s,
+            )
             if len(acked) >= expected:
                 break
             if attempt < int(retries):

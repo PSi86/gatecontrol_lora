@@ -15,6 +15,8 @@ class ConsumerDocsTests(unittest.TestCase):
         self.assertIn("RaceLink_RH-plugin", source)
         self.assertIn("Offline bundles should be populated from the published wheel", source)
         self.assertIn("not from a source checkout snapshot", source)
+        self.assertIn("Open GitHub Actions and run `.github/workflows/release.yml`.", source)
+        self.assertIn("If left empty, the workflow increments the current patch version automatically.", source)
 
     def test_repo_split_map_references_packaged_webui_asset_paths(self):
         source = (ROOT / "docs" / "repo_split_map.md").read_text(encoding="utf-8")

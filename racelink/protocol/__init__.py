@@ -7,7 +7,6 @@ from .packets import (
     build_control_body,
     build_get_devices_body,
     build_set_group_body,
-    build_stream_body,
     build_sync_body,
 )
 from .rules import (
@@ -37,7 +36,6 @@ __all__ = [
     "build_control_body",
     "build_get_devices_body",
     "build_set_group_body",
-    "build_stream_body",
     "build_sync_body",
     "find_rule",
     "last3_hex",

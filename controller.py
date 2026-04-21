@@ -460,10 +460,6 @@ class RaceLink_Host:
         """Compatibility entrypoint forwarding sync packets to SyncService."""
         return self.sync_service.send_sync(ts24, brightness, recv3=recv3)
 
-    @staticmethod
-    def _stream_ctrl(start: bool, stop: bool, packets_left: int) -> int:
-        return StreamService.build_ctrl(start, stop, packets_left)
-
     def sendStream(
         self,
         payload: bytes,

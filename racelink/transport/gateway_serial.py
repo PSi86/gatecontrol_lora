@@ -17,7 +17,6 @@ from ..protocol.packets import (
     build_control_body,
     build_get_devices_body,
     build_set_group_body,
-    build_stream_body,
     build_sync_body,
 )
 
@@ -258,9 +257,13 @@ class GatewaySerialTransport:
         body = build_sync_body(ts24=ts24, brightness=brightness)
         self._send_m2n(LP.make_type(LP.DIR_M2N, LP.OPC_SYNC), recv3, body)
 
-    def send_stream(self, recv3: bytes, ctrl: int, data: bytes):
-        body = build_stream_body(ctrl=ctrl, data=data)
-        self._send_m2n(LP.make_type(LP.DIR_M2N, LP.OPC_STREAM), recv3, body)
+    def send_stream(self, recv3: bytes, payload: bytes):
+        """Send one logical stream payload to the gateway.
+
+        The gateway is responsible for splitting the payload into radio-sized
+        packets, adding per-packet stream control bytes, and padding as needed.
+        """
+        self._send_m2n(LP.make_type(LP.DIR_M2N, LP.OPC_STREAM), recv3, bytes(payload or b""))
 
     def send_wled_control(self, recv3: bytes, group_id: int, state: int, effect: int, brightness: int):
         flags = 0x01 if int(state) else 0x00

@@ -10,6 +10,7 @@ class FakeTransport:
         self.listeners = []
         self.tx_listeners = []
         self.sent_config = []
+        self.sent_stream = []
 
     def add_listener(self, cb):
         self.listeners.append(cb)
@@ -23,6 +24,9 @@ class FakeTransport:
 
     def send_config(self, **kwargs):
         self.sent_config.append(kwargs)
+
+    def send_stream(self, **kwargs):
+        self.sent_stream.append(kwargs)
 
     def emit(self, ev):
         for cb in list(self.listeners):
@@ -54,9 +58,6 @@ class FakeController:
 
     def _apply_config_update(self, dev, option, data0):
         self.applied.append((dev, option, data0))
-
-    def _stream_ctrl(self, start, stop, packets_left):
-        return (0x80 if start else 0) | (0x40 if stop else 0) | (packets_left & 0x3F)
 
     @property
     def device_repository(self):
@@ -126,6 +127,40 @@ class GatewayServiceTests(unittest.TestCase):
         self.assertFalse(controller.dev.link_online)
         self.assertEqual(controller.dev.link_error, "Missing reply (STATUS)")
         self.assertIsNone(controller._pending_expect)
+
+    def test_send_stream_passes_raw_payload_to_transport(self):
+        controller = FakeController()
+        service = GatewayService(controller)
+
+        def emit_ack_and_close():
+            controller.transport.emit(
+                {
+                    "opc": LP.OPC_ACK,
+                    "ack_of": LP.OPC_STREAM,
+                    "ack_status": 0,
+                    "sender3": bytes.fromhex("DDEEFF"),
+                }
+            )
+            controller.transport.emit({"type": EV_RX_WINDOW_CLOSED})
+
+        original_wait = service.wait_rx_window
+
+        def wrapped_wait(send_fn, collect_pred=None, fail_safe_s=8.0):
+            def wrapped_send():
+                send_fn()
+                emit_ack_and_close()
+
+            return original_wait(wrapped_send, collect_pred=collect_pred, fail_safe_s=fail_safe_s)
+
+        service.wait_rx_window = wrapped_wait
+
+        result = service.send_stream(b"\x01\x02\x03", device=controller.dev, retries=0)
+
+        self.assertEqual(result, {"expected": 1, "acked": 1})
+        self.assertEqual(
+            controller.transport.sent_stream,
+            [{"recv3": bytes.fromhex("DDEEFF"), "payload": b"\x01\x02\x03"}],
+        )
 
 
 if __name__ == "__main__":
