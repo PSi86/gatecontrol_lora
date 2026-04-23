@@ -17,11 +17,13 @@ class OTAWorkflowService:
                 try:
                     self.host_wifi.profile_down(wifi_conn_name, timeout_s=10.0)
                 except Exception:
+                    # swallow-ok: best-effort fallback; caller proceeds with safe default
                     pass
                 self.host_wifi.set_radio(False)
                 results["hostWifi"]["enabled"] = False
                 results["hostWifi"]["restored"] = True
             except Exception as ex:
+                # swallow-ok: best-effort fallback; caller proceeds with safe default
                 results["errors"].append(f"Host WiFi restore failed: {ex}")
                 results["ok"] = False
 
@@ -119,8 +121,10 @@ class OTAWorkflowService:
             try:
                 rl_instance.sendConfig(0x04, data0=0, recv3=self.ota.recv3_bytes_from_addr(mac), wait_for_ack=True, timeout_s=6.0)
             except Exception:
+                # swallow-ok: best-effort fallback; caller proceeds with safe default
                 pass
         except Exception as ex:
+            # swallow-ok: best-effort fallback; caller proceeds with safe default
             results["ok"] = False
             results["errors"].append(str(ex))
         finally:
@@ -222,6 +226,7 @@ class OTAWorkflowService:
                                 ok = True
                                 break
                             except Exception as ex:
+                                # swallow-ok: best-effort fallback; caller proceeds with safe default
                                 last_err = ex
                                 time.sleep(2.0)
                         if not ok:
@@ -236,8 +241,10 @@ class OTAWorkflowService:
                     try:
                         rl_instance.sendConfig(0x04, data0=0, recv3=self.ota.recv3_bytes_from_addr(str(addr)))
                     except Exception:
+                        # swallow-ok: best-effort fallback; caller proceeds with safe default
                         pass
         except Exception:
+            # swallow-ok: best-effort fallback; caller proceeds with safe default
             results["ok"] = False
         finally:
             self._restore_host_wifi(

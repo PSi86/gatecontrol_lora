@@ -51,6 +51,7 @@ class DiscoveryService:
                             responders.add(sender_hex.upper())
                     return True
             except Exception:
+                # swallow-ok: best-effort fallback; caller proceeds with safe default
                 pass
             return False
 
@@ -61,10 +62,16 @@ class DiscoveryService:
         except Exception:
             logger.debug("RaceLink: drain_events before discover raised", exc_info=True)
 
-        self.gateway_service.wait_rx_window(
+        # Plan Phase C (revised): GET_DEVICES is the one call where the
+        # responder count is genuinely unknown (a fresh device could answer),
+        # so we keep the hard ceiling at 5 s. Idle-based termination still
+        # lets us return early once the last late-comer has gone quiet for
+        # 600 ms.
+        self.gateway_service.send_and_collect(
             lambda: transport.send_get_devices(recv3=recv3, group_id=group_id, flags=0),
-            collect_pred=_collect,
-            fail_safe_s=8.0,
+            _collect,
+            idle_timeout_s=0.6,
+            max_timeout_s=5.0,
         )
 
         assigned_group = None

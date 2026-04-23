@@ -49,6 +49,7 @@ class ControlService:
                 device.presetId = preset_id
                 device.brightness = brightness
             except Exception:
+                # swallow-ok: best-effort fallback; caller proceeds with safe default
                 continue
 
     def send_device_control(self, target_device, flags=None, preset_id=None, brightness=None):

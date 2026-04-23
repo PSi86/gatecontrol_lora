@@ -31,5 +31,6 @@ def build_specials_state(type_id: int | None, stored: dict | None = None) -> dic
             try:
                 state[key] = int(stored.get(key, default_val))
             except Exception:
+                # swallow-ok: best-effort fallback; caller proceeds with safe default
                 state[key] = int(default_val)
     return state

@@ -76,8 +76,9 @@ class FakeController:
     def group_repository(self):
         return self._group_repository
 
-    def setNodeGroupId(self, dev, forceSet=False, wait_for_ack=True):
+    def setNodeGroupId(self, dev, forceSet: bool = False, wait_for_ack: bool = True) -> bool:
         self.group_assignments.append((dev.addr, dev.groupId, forceSet, wait_for_ack))
+        return True  # simulate ACK ok so the async worker exits cleanly
 
     def is_discovery_active(self):
         return bool(self.discovery_active)
@@ -103,6 +104,45 @@ class GatewayServiceTests(unittest.TestCase):
 
         self.assertTrue(got_closed)
         self.assertEqual(len(events), 1)
+        self.assertTrue(controller.dev.link_online)
+
+    def test_send_and_wait_short_circuits_when_window_does_not_close(self):
+        """Regression: unicast ACK arrives but gateway never emits WINDOW_CLOSED.
+
+        Before the ``stop_on_match`` fix this call would block the full
+        ``timeout_s`` even though the expected reply arrived immediately,
+        producing a bogus "No ACK_OK ..." warning in production. The call must
+        now return in <1 s when the match is found.
+        """
+        import time
+
+        controller = FakeController()
+        service = GatewayService(controller)
+
+        def send_fn():
+            # Simulate the node ACK landing ~20 ms after TX -- but never
+            # emit EV_RX_WINDOW_CLOSED.
+            controller.transport.emit(
+                {
+                    "opc": LP.OPC_ACK,
+                    "ack_of": LP.OPC_SET_GROUP,
+                    "ack_status": 0,
+                    "sender3": bytes.fromhex("DDEEFF"),
+                }
+            )
+
+        t0 = time.monotonic()
+        events, completed = service.send_and_wait_for_reply(
+            bytes.fromhex("DDEEFF"), LP.OPC_SET_GROUP, send_fn, timeout_s=5.0
+        )
+        elapsed = time.monotonic() - t0
+
+        self.assertEqual(len(events), 1)
+        # Phase B: the second tuple element now means "the wait completed",
+        # not "the gateway closed its RX window". Registry-based match always
+        # returns True on success.
+        self.assertTrue(completed)
+        self.assertLess(elapsed, 1.0, f"short-circuit took {elapsed:.3f}s")
         self.assertTrue(controller.dev.link_online)
 
     def test_handle_ack_applies_pending_config(self):
@@ -155,16 +195,30 @@ class GatewayServiceTests(unittest.TestCase):
             )
             controller.transport.emit({"type": EV_RX_WINDOW_CLOSED})
 
-        original_wait = service.wait_rx_window
+        # Plan Phase C (revised): send_stream uses send_and_collect with
+        # idle/max timeouts. Wrap send_fn to emit the ACK synchronously.
+        original_collect = service.send_and_collect
 
-        def wrapped_wait(send_fn, collect_pred=None, fail_safe_s=8.0):
+        def wrapped_collect(
+            send_fn,
+            collect_pred,
+            *,
+            expected=None,
+            idle_timeout_s=0.6,
+            max_timeout_s=5.0,
+        ):
             def wrapped_send():
                 send_fn()
                 emit_ack_and_close()
+            return original_collect(
+                wrapped_send,
+                collect_pred,
+                expected=expected,
+                idle_timeout_s=idle_timeout_s,
+                max_timeout_s=max_timeout_s,
+            )
 
-            return original_wait(wrapped_send, collect_pred=collect_pred, fail_safe_s=fail_safe_s)
-
-        service.wait_rx_window = wrapped_wait
+        service.send_and_collect = wrapped_collect
 
         result = service.send_stream(b"\x01\x02\x03", device=controller.dev, retries=0)
 
@@ -191,9 +245,11 @@ class GatewayServiceTests(unittest.TestCase):
                 "host_snr": 8,
             }
         )
+        service._join_auto_restore_workers(timeout=2.0)
 
         self.assertEqual(controller.dev.groupId, 3)
-        self.assertEqual(controller.group_assignments, [("AABBCCDDEEFF", 3, True, False)])
+        # Plan P2-6: async worker calls setNodeGroupId with wait_for_ack=True
+        self.assertEqual(controller.group_assignments, [("AABBCCDDEEFF", 3, True, True)])
 
     def test_identify_reply_with_reported_nonzero_group_does_not_auto_reassign_known_device(self):
         controller = FakeController()
@@ -270,8 +326,9 @@ class GatewayServiceTests(unittest.TestCase):
 
         service.on_transport_event(ev)
         service.on_transport_event(ev)
+        service._join_auto_restore_workers(timeout=2.0)
 
-        self.assertEqual(controller.group_assignments, [("AABBCCDDEEFF", 3, True, False)])
+        self.assertEqual(controller.group_assignments, [("AABBCCDDEEFF", 3, True, True)])
 
     def test_identify_reply_group_zero_is_paused_during_discovery_task(self):
         controller = FakeController()
@@ -310,6 +367,169 @@ class GatewayServiceTests(unittest.TestCase):
 
         self.assertEqual(controller.dev.groupId, 0)
         self.assertEqual(controller.group_assignments, [])
+
+    def test_send_and_collect_exits_on_expected_count(self):
+        """Broadcast collector returns immediately once ``expected`` is hit."""
+        import time
+
+        controller = FakeController()
+        service = GatewayService(controller)
+
+        def send_fn():
+            for sender in (b"\x11\x11\x11", b"\x22\x22\x22"):
+                controller.transport.emit(
+                    {
+                        "opc": LP.OPC_ACK,
+                        "ack_of": LP.OPC_STREAM,
+                        "ack_status": 0,
+                        "sender3": sender,
+                    }
+                )
+
+        def pred(ev):
+            return ev.get("opc") == LP.OPC_ACK and int(ev.get("ack_of", -1)) == LP.OPC_STREAM
+
+        t0 = time.monotonic()
+        replies = service.send_and_collect(
+            send_fn,
+            pred,
+            expected=2,
+            idle_timeout_s=0.6,
+            max_timeout_s=5.0,
+        )
+        elapsed = time.monotonic() - t0
+
+        self.assertEqual(len(replies), 2)
+        self.assertLess(elapsed, 0.2, f"expected-count early-exit took {elapsed:.3f}s")
+
+    def test_send_and_collect_terminates_on_idle_after_partial_replies(self):
+        """Idle-timeout: after last match + idle window, return even without expected."""
+        import threading
+        import time
+
+        controller = FakeController()
+        service = GatewayService(controller)
+
+        def send_fn():
+            # Emit 2 late replies, but not the 3rd expected one. The idle
+            # window (120 ms here for test speed) should terminate the wait.
+            def late():
+                for sender in (b"\x11\x11\x11", b"\x22\x22\x22"):
+                    time.sleep(0.02)
+                    controller.transport.emit(
+                        {
+                            "opc": LP.OPC_ACK,
+                            "ack_of": LP.OPC_STREAM,
+                            "ack_status": 0,
+                            "sender3": sender,
+                        }
+                    )
+            threading.Thread(target=late, daemon=True).start()
+
+        def pred(ev):
+            return ev.get("opc") == LP.OPC_ACK
+
+        t0 = time.monotonic()
+        replies = service.send_and_collect(
+            send_fn,
+            pred,
+            expected=3,  # 3 expected but only 2 arrive
+            idle_timeout_s=0.12,
+            max_timeout_s=5.0,
+        )
+        elapsed = time.monotonic() - t0
+
+        self.assertEqual(len(replies), 2)
+        # Last arrival at ~0.04 s + 0.12 s idle ~= 0.16 s, well under max.
+        self.assertLess(elapsed, 0.5, f"idle termination took {elapsed:.3f}s")
+
+    def test_send_and_collect_hits_hard_ceiling_when_no_reply(self):
+        """No reply at all: return after ``max_timeout_s``, not earlier."""
+        import time
+
+        controller = FakeController()
+        service = GatewayService(controller)
+
+        def send_fn():
+            pass  # no emissions
+
+        def pred(ev):
+            return True
+
+        t0 = time.monotonic()
+        replies = service.send_and_collect(
+            send_fn,
+            pred,
+            expected=None,
+            idle_timeout_s=0.6,
+            max_timeout_s=0.15,
+        )
+        elapsed = time.monotonic() - t0
+
+        self.assertEqual(replies, [])
+        # Should respect the ceiling approximately.
+        self.assertGreaterEqual(elapsed, 0.10)
+        self.assertLess(elapsed, 0.6)
+
+    def test_post_match_settle_delay_off_by_default(self):
+        """Default is 0.0 -- the earlier LBT/CAD hypothesis was wrong.
+
+        Kept as an optional knob in case a future diagnostic wants it.
+        """
+        import time
+
+        controller = FakeController()
+        service = GatewayService(controller)
+        self.assertEqual(service.post_match_settle_s, 0.0)
+
+        def send_fn():
+            controller.transport.emit(
+                {
+                    "opc": LP.OPC_ACK,
+                    "ack_of": LP.OPC_SET_GROUP,
+                    "ack_status": 0,
+                    "sender3": bytes.fromhex("DDEEFF"),
+                }
+            )
+
+        t0 = time.monotonic()
+        service.send_and_wait_for_reply(
+            bytes.fromhex("DDEEFF"), LP.OPC_SET_GROUP, send_fn, timeout_s=2.0
+        )
+        elapsed = time.monotonic() - t0
+        self.assertLess(elapsed, 0.1)
+
+    def test_compute_collect_max_timeout_scales_and_clamps(self):
+        f = GatewayService.compute_collect_max_timeout
+        self.assertAlmostEqual(f(0), 1.0)
+        self.assertAlmostEqual(f(4), 1.0 + 4 * 0.15, places=5)
+        self.assertAlmostEqual(f(100, ceiling_s=3.5), 3.5)  # clamped
+
+    def test_auto_restore_marks_device_offline_when_ack_times_out(self):
+        """Plan P2-6: async worker calls mark_offline if SET_GROUP returns False."""
+        controller = FakeController()
+        controller.dev.groupId = 3
+        # Override setNodeGroupId to simulate an ACK timeout.
+        def _no_ack(dev, forceSet=False, wait_for_ack=True):
+            controller.group_assignments.append((dev.addr, dev.groupId, forceSet, wait_for_ack))
+            return False
+        controller.setNodeGroupId = _no_ack
+        service = GatewayService(controller)
+
+        service.on_transport_event(
+            {
+                "opc": LP.OPC_DEVICES,
+                "reply": "IDENTIFY_REPLY",
+                "mac6": bytes.fromhex("AABBCCDDEEFF"),
+                "groupId": 0,
+                "caps": 1,
+                "version": 7,
+            }
+        )
+        service._join_auto_restore_workers(timeout=2.0)
+
+        self.assertFalse(controller.dev.link_online)
+        self.assertEqual(controller.dev.link_error, "Auto-restore SET_GROUP timeout")
 
 
 if __name__ == "__main__":

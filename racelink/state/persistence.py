@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import logging
 from typing import Any, Iterable
@@ -9,6 +10,39 @@ from typing import Any, Iterable
 logger = logging.getLogger(__name__)
 
 CURRENT_SCHEMA_VERSION = 1
+
+
+def try_parse_legacy_repr(raw: Any) -> list[dict] | None:
+    """One-shot migration helper for pre-JSON (Python-repr) option values.
+
+    Plan P1-3: the regular ``load_records`` intentionally no longer falls back
+    to ``ast.literal_eval``. But if an operator upgrades an old RotorHazard
+    deployment whose ``rl_device_config`` was written in the Python-repr era,
+    their devices would silently vanish.
+
+    This function is a one-shot bridge: callers detect a malformed JSON value
+    in a legacy option key, pass it here, and -- if it parses as a Python
+    literal -- receive the normalized records. The caller is then responsible
+    for re-serializing via :func:`dump_records` / :func:`dump_state` and
+    overwriting the legacy value. Returns ``None`` if the payload cannot be
+    salvaged; the controller then logs a WARNING and falls back to defaults.
+
+    ``ast.literal_eval`` only evaluates literals (dicts, lists, strings,
+    numbers, tuples, booleans, None) -- it does not execute arbitrary code.
+    """
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if text == "":
+        return None
+    try:
+        decoded = ast.literal_eval(text)
+    except (ValueError, SyntaxError):
+        return None
+    try:
+        return _normalize_records(decoded)
+    except TypeError:
+        return None
 
 
 def _as_record(obj: Any) -> dict:
@@ -63,6 +97,7 @@ def load_records(raw: Any, *, default: Any = None, source: str = "") -> list[dic
     try:
         decoded = json.loads(text)
     except Exception as ex:
+        # swallow-ok: best-effort fallback; caller proceeds with safe default
         _log_decode_failure(source, ex, text)
         return _normalize_records(default)
 
@@ -122,6 +157,7 @@ def load_state(
         try:
             payload = json.loads(text)
         except Exception as ex:
+            # swallow-ok: best-effort fallback; caller proceeds with safe default
             _log_decode_failure(source, ex, text)
             return (
                 _normalize_records(default_devices),
@@ -143,6 +179,7 @@ def load_state(
     try:
         version = int(payload.get("schema_version", 0) or 0)
     except Exception:
+        # swallow-ok: best-effort fallback; caller proceeds with safe default
         version = 0
 
     devices_raw = payload.get("devices", default_devices)

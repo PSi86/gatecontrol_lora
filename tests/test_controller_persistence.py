@@ -7,7 +7,7 @@ import unittest
 from typing import Any
 
 from controller import RaceLink_Host
-from racelink.domain import RL_Device, RL_DeviceGroup
+from racelink.domain import RL_Device, RL_DeviceGroup, state_scope
 
 
 class FakeDb:
@@ -146,6 +146,73 @@ class ControllerPersistenceTests(unittest.TestCase):
         # Legacy keys are preserved for rollback safety.
         self.assertEqual(db.option("rl_device_config", None), legacy_devices)
         self.assertEqual(db.option("rl_groups_config", None), legacy_groups)
+
+    def test_load_from_db_migrates_legacy_python_repr(self):
+        """Plan P1-3: pre-JSON Python-repr values are salvaged once + re-saved."""
+        # Old RotorHazard option written with ast.literal-compatible format.
+        legacy_devices_repr = (
+            "[{'addr': 'AA11BB22CC33', 'dev_type': 10, 'name': 'OldRepr', "
+            "'groupId': 2, 'flags': 1, 'presetId': 2, 'brightness': 32}]"
+        )
+        legacy_groups_repr = (
+            "[{'name': 'Repr Group', 'static_group': 0, 'dev_type': 0}, "
+            "{'name': 'All WLED Nodes', 'static_group': 1, 'dev_type': 0}]"
+        )
+        db = FakeDb(
+            {
+                "rl_device_config": legacy_devices_repr,
+                "rl_groups_config": legacy_groups_repr,
+            }
+        )
+        host = _make_host(db)
+        host.load_from_db()
+
+        devices = host.device_repository.list()
+        self.assertEqual(len(devices), 1)
+        self.assertEqual(devices[0].addr, "AA11BB22CC33")
+        self.assertEqual(devices[0].groupId, 2)
+
+        # Combined key was saved -- legacy payload is now bridged.
+        combined = db.option("rl_state_v1", None)
+        self.assertIsNotNone(combined)
+        payload = json.loads(combined)
+        self.assertEqual(payload["devices"][0]["name"], "OldRepr")
+
+    def test_save_to_db_forwards_scopes_to_persistence_callback(self):
+        db = FakeDb()
+        host = _make_host(db)
+        received: list = []
+        host.on_persistence_changed = lambda scopes=None: received.append(scopes)
+
+        host.save_to_db({}, scopes={state_scope.DEVICE_SPECIALS})
+
+        self.assertEqual(len(received), 1)
+        self.assertEqual(set(received[0]), {state_scope.DEVICE_SPECIALS})
+
+    def test_save_to_db_default_scope_is_full(self):
+        db = FakeDb()
+        host = _make_host(db)
+        received: list = []
+        host.on_persistence_changed = lambda scopes=None: received.append(scopes)
+
+        host.save_to_db({})
+
+        self.assertEqual(len(received), 1)
+        self.assertEqual(set(received[0]), {state_scope.FULL})
+
+    def test_save_to_db_supports_legacy_no_arg_callback(self):
+        """Plugins written before the scopes hook still receive a plain call."""
+        db = FakeDb()
+        host = _make_host(db)
+        called = []
+
+        def legacy_callback():
+            called.append(True)
+
+        host.on_persistence_changed = legacy_callback
+        host.save_to_db({}, scopes={state_scope.GROUPS})
+
+        self.assertEqual(called, [True])
 
     def test_load_from_db_fresh_install_seeds_from_backups(self):
         db = FakeDb()

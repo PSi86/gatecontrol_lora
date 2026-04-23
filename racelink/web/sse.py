@@ -16,19 +16,23 @@ try:
 
     _DefaultLock = _RLLock
 except Exception:  # pragma: no cover
+    # swallow-ok: best-effort fallback; caller proceeds with safe default
     try:
         from gevent.lock import RLock as _RLLock  # type: ignore
 
         _DefaultLock = _RLLock
     except Exception:  # pragma: no cover
+        # swallow-ok: gevent absent -> use threading.Lock
         _DefaultLock = threading.Lock
 
 try:
     from gevent.queue import Queue as _RLQueue  # type: ignore
 except Exception:  # pragma: no cover
+    # swallow-ok: best-effort fallback; caller proceeds with safe default
     try:
         from queue import Queue as _RLQueue  # type: ignore
     except Exception:  # pragma: no cover
+        # swallow-ok: no queue impl available -> callers handle None
         _RLQueue = None
 
 from ..transport import EV_ERROR, EV_RX_WINDOW_CLOSED, EV_RX_WINDOW_OPEN, EV_TX_DONE
@@ -83,6 +87,7 @@ class SSEBridge:
             else:
                 print(msg)
         except Exception:
+            # swallow-ok: logger implementations vary - fall back to print
             print(msg)
 
     def broadcast(self, event_name: str, payload):
@@ -116,6 +121,7 @@ class SSEBridge:
                 self.log("RaceLink: transport event listener installed (add_listener)")
                 return
             except Exception as ex:
+                # swallow-ok: best-effort fallback; caller proceeds with safe default
                 self.log(f"RaceLink: add_listener failed, falling back to on_event: {ex}")
 
         if not hasattr(transport, "on_event"):
@@ -139,6 +145,7 @@ class SSEBridge:
             self._hooked_transport["ok"] = True
             self.log("RaceLink: transport event hook installed")
         except Exception as ex:
+            # swallow-ok: best-effort fallback; caller proceeds with safe default
             self.log(f"RaceLink: transport hook failed: {ex}")
 
     def _task_is_running(self):
@@ -262,6 +269,7 @@ class SSEBridge:
                         try:
                             item = q.get(timeout=1.0)
                         except Exception:
+                            # swallow-ok: queue-get timeout/empty -> idle tick, send ping
                             item = None
 
                         now = time.time()

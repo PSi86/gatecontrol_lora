@@ -70,6 +70,7 @@ class RL_Device:
         try:
             self.mark_online()
         except Exception:
+            # swallow-ok: best-effort fallback; caller proceeds with safe default
             pass
 
     def update_from_status(self, flags, configByte, presetId, brightness, vbat_mV, node_rssi, node_snr, host_rssi=None, host_snr=None):
@@ -91,6 +92,7 @@ class RL_Device:
         try:
             self.mark_online()
         except Exception:
+            # swallow-ok: best-effort fallback; caller proceeds with safe default
             pass
 
     def mark_online(self) -> None:
@@ -123,6 +125,7 @@ class RL_Device:
         try:
             self.mark_online()
         except Exception:
+            # swallow-ok: best-effort fallback; caller proceeds with safe default
             pass
 
     def ack_ok(self) -> bool:

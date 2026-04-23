@@ -29,13 +29,39 @@ class FakeGateway:
     def install_transport_hooks(self):
         self.installed = True
 
-    def wait_rx_window(self, send_fn, collect_pred=None, fail_safe_s=8.0):
+    def wait_rx_window(self, send_fn, collect_pred=None, fail_safe_s=8.0, *, stop_on_match=False):
         send_fn()
         collected = []
         for ev in self.events:
             if collect_pred and collect_pred(ev):
                 collected.append(ev)
+                if stop_on_match:
+                    break
         return collected, self.got_closed
+
+    def send_and_collect(
+        self,
+        send_fn,
+        collect_pred,
+        *,
+        expected=None,
+        idle_timeout_s=0.6,
+        max_timeout_s=5.0,
+    ):
+        """Test shim -- prod collector uses idle/max timeouts + Condition."""
+        send_fn()
+        collected = []
+        for ev in self.events:
+            if collect_pred(ev):
+                collected.append(ev)
+                if expected is not None and len(collected) >= int(expected):
+                    break
+        return collected
+
+    @staticmethod
+    def compute_collect_max_timeout(expected, *, base_s=1.0, per_device_s=0.15, ceiling_s=5.0):
+        n = max(0, int(expected))
+        return min(ceiling_s, base_s + n * float(per_device_s))
 
 
 class FakeController:

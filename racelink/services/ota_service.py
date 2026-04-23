@@ -103,6 +103,7 @@ class OTAService:
                 if have and have.lower() == want.lower():
                     return int(getattr(dev, "groupId", 0) or 0)
         except Exception:
+            # swallow-ok: best-effort fallback; caller proceeds with safe default
             pass
         return 0
 
@@ -129,6 +130,7 @@ class OTAService:
             payload = self.http_get_bytes(f"{base_url}/json/info", timeout_s=timeout_s)
             return json.loads(payload.decode("utf-8", errors="replace") or "{}")
         except Exception:
+            # swallow-ok: best-effort fallback; caller proceeds with safe default
             return None
 
     def wait_for_expected_node(self, base_url: str, expected_mac: str, timeout_s: float = 90.0, poll_s: float = 1.0):

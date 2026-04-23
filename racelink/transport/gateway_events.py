@@ -48,6 +48,7 @@ if _HAVE_AUTO:
 
         LP.make_type = staticmethod(_make_type)
     except Exception:
+        # swallow-ok: best-effort fallback; caller proceeds with safe default
         pass
 
 

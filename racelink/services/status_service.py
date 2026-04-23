@@ -56,9 +56,11 @@ class StatusService:
                             if isinstance(sender3, (bytes, bytearray)) and len(sender3) == 3:
                                 responders.add(bytes(sender3).hex().upper())
                     except Exception:
+                        # swallow-ok: best-effort fallback; caller proceeds with safe default
                         pass
                     return True
             except Exception:
+                # swallow-ok: best-effort fallback; caller proceeds with safe default
                 pass
             return False
 
@@ -67,36 +69,61 @@ class StatusService:
         except Exception:
             logger.debug("RaceLink: drain_events before get_status raised", exc_info=True)
 
-        _collected, got_closed = self.gateway_service.wait_rx_window(
-            lambda: transport.send_get_status(recv3=recv3, group_id=group_id, flags=0),
-            collect_pred=_collect,
-            fail_safe_s=8.0,
+        # Plan Phase C (revised): expected-count is known from the device
+        # repository. Early-exit on count; otherwise 600 ms idle-timeout; max
+        # ceiling scales with the target population.
+        if target_device is not None:
+            expected_count = 1
+        elif group_filter == 255:
+            expected_count = len(list(self.controller.device_repository.list()))
+        else:
+            expected_count = sum(
+                1
+                for dev in self.controller.device_repository.list()
+                if int(getattr(dev, "groupId", 0)) == int(group_filter)
+            )
+
+        max_timeout_s = self.gateway_service.compute_collect_max_timeout(
+            expected_count, ceiling_s=5.0
         )
 
-        if got_closed:
-            if target_device is not None:
-                if updated == 0:
-                    try:
-                        target_device.mark_offline("Missing reply (STATUS)")
-                    except Exception:
-                        pass
-            else:
-                if group_filter == 255:
-                    targets = list(self.controller.device_repository.list())
-                else:
-                    targets = [
-                        dev
-                        for dev in self.controller.device_repository.list()
-                        if int(getattr(dev, "groupId", 0)) == int(group_filter)
-                    ]
-                for dev in targets:
-                    try:
-                        mac = (dev.addr or "").upper()
-                        if not mac:
-                            continue
-                        if mac not in responders and mac[-6:] not in responders:
-                            dev.mark_offline("Missing reply (STATUS)")
-                    except Exception:
-                        pass
+        self.gateway_service.send_and_collect(
+            lambda: transport.send_get_status(recv3=recv3, group_id=group_id, flags=0),
+            _collect,
+            expected=expected_count if expected_count > 0 else None,
+            idle_timeout_s=0.6,
+            max_timeout_s=max_timeout_s,
+        )
 
-        return {"updated": updated, "responders": responders, "got_closed": got_closed}
+        # After the collection window, any device in the targeted set that
+        # did not respond is considered offline. This logic used to be gated
+        # on ``got_closed`` -- now that the Host owns the clock, the window
+        # is always "closed" by the time we reach here.
+        if target_device is not None:
+            if updated == 0:
+                try:
+                    target_device.mark_offline("Missing reply (STATUS)")
+                except Exception:
+                    # swallow-ok: best-effort fallback; caller proceeds with safe default
+                    pass
+        else:
+            if group_filter == 255:
+                targets = list(self.controller.device_repository.list())
+            else:
+                targets = [
+                    dev
+                    for dev in self.controller.device_repository.list()
+                    if int(getattr(dev, "groupId", 0)) == int(group_filter)
+                ]
+            for dev in targets:
+                try:
+                    mac = (dev.addr or "").upper()
+                    if not mac:
+                        continue
+                    if mac not in responders and mac[-6:] not in responders:
+                        dev.mark_offline("Missing reply (STATUS)")
+                except Exception:
+                    # swallow-ok: best-effort fallback; caller proceeds with safe default
+                    pass
+
+        return {"updated": updated, "responders": responders, "got_closed": True}

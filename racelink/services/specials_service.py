@@ -54,6 +54,7 @@ class SpecialsService:
         try:
             return int(value)
         except Exception:
+            # swallow-ok: best-effort fallback; caller proceeds with safe default
             return default
 
     def validate_option_value(self, option_info: dict, value_int: int) -> None:

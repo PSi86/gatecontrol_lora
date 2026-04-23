@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 
-from ..domain import RL_Device, get_dev_type_info
+from ..domain import RL_Device, get_dev_type_info, state_scope
 from ..transport import mac_last3_from_hex
 
 _STARTBLOCK_VER = 0x01
@@ -94,8 +94,11 @@ class StartblockService:
         target_device.specials["startblock_slots"] = slots & 0xFF
         target_device.specials["startblock_first_slot"] = first_slot & 0xFF
         try:
-            self.controller.save_to_db({"manual": True})
+            self.controller.save_to_db(
+                {"manual": True}, scopes={state_scope.DEVICE_SPECIALS}
+            )
         except Exception:
+            # swallow-ok: best-effort fallback; caller proceeds with safe default
             pass
         return True
 
@@ -105,6 +108,7 @@ class StartblockService:
             info = get_dev_type_info(type_id)
             return bool(info.get("STARTBLOCK"))
         except Exception:
+            # swallow-ok: best-effort fallback; caller proceeds with safe default
             return False
 
     def iter_startblock_devices(self, *, target_device=None, target_group=None) -> list[RL_Device]:
@@ -155,6 +159,7 @@ class StartblockService:
                 slot_count = int(dev.specials["startblock_slots"])
                 first_slot = int(dev.specials["startblock_first_slot"])
             except Exception:
+                # swallow-ok: best-effort fallback; caller proceeds with safe default
                 slot_count = 8
                 first_slot = 1
 

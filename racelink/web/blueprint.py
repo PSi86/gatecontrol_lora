@@ -120,6 +120,7 @@ class _WebContext:
             else:
                 print(msg)
         except Exception:
+            # swallow-ok: best-effort fallback; caller proceeds with safe default
             print(msg)
 
     def devices(self):
@@ -180,6 +181,19 @@ def create_racelink_web_blueprint(
     attach_task_manager = getattr(runtime.rl_instance, "attach_task_manager", None)
     if callable(attach_task_manager):
         attach_task_manager(tasks)
+
+    # Plan P1-1: push gateway-readiness changes over SSE so the UI can keep a
+    # persistent banner in sync without polling /api/gateway.
+    try:
+        setattr(
+            runtime.rl_instance,
+            "on_gateway_status_changed",
+            lambda status: sse.broadcast("gateway", status),
+        )
+    except Exception:
+        # swallow-ok: not every host exposes the attribute; degrade to polling
+        pass
+
     ctx.sse = sse
     ctx.tasks = tasks
 
