@@ -145,7 +145,7 @@ jobs:
           PY
 
       - name: Publish GitHub release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.host_version.outputs.tag }}
           target_commitish: ${{ inputs.target_branch }}

@@ -65,20 +65,90 @@ class SpecialsService:
         if max_v is not None and value_int > int(max_v):
             raise ValueError(f"value must be <= {max_v}")
 
+    @staticmethod
+    def _coerce_color(raw) -> tuple[int, int, int]:
+        """Accept ``{r, g, b}``, ``[r, g, b]``, or ``"#RRGGBB"`` and return an RGB tuple."""
+
+        if isinstance(raw, str):
+            s = raw.strip()
+            if s.startswith("#"):
+                s = s[1:]
+            if len(s) == 6:
+                try:
+                    r = int(s[0:2], 16)
+                    g = int(s[2:4], 16)
+                    b = int(s[4:6], 16)
+                    return r & 0xFF, g & 0xFF, b & 0xFF
+                except ValueError as ex:
+                    raise ValueError(f"invalid hex color {raw!r}") from ex
+            raise ValueError(f"invalid color string {raw!r}")
+        if isinstance(raw, dict):
+            try:
+                return int(raw["r"]) & 0xFF, int(raw["g"]) & 0xFF, int(raw["b"]) & 0xFF
+            except (KeyError, TypeError, ValueError) as ex:
+                raise ValueError(f"invalid color object {raw!r}") from ex
+        if isinstance(raw, (list, tuple)) and len(raw) == 3:
+            try:
+                return int(raw[0]) & 0xFF, int(raw[1]) & 0xFF, int(raw[2]) & 0xFF
+            except (TypeError, ValueError) as ex:
+                raise ValueError(f"invalid color array {raw!r}") from ex
+        raise ValueError(f"unsupported color value {raw!r}")
+
+    @staticmethod
+    def _coerce_toggle(raw) -> bool:
+        if isinstance(raw, bool):
+            return raw
+        if isinstance(raw, (int, float)):
+            return bool(raw)
+        if isinstance(raw, str):
+            return raw.strip().lower() in ("1", "true", "yes", "on")
+        return bool(raw)
+
     def coerce_action_params(self, fn_info: dict, options_by_key: dict, params: dict | None):
+        """Coerce raw request params into Python types per widget.
+
+        Typing per widget:
+        - ``color`` -> ``tuple[int, int, int]``
+        - ``toggle`` -> ``bool``
+        - ``slider`` / ``select`` / legacy -> ``int`` (min/max validated)
+
+        **Missing values are NOT defaulted** — if a var is absent from the
+        request (typical for A12 when the WebUI hides effect-irrelevant fields),
+        it stays out of the coerced dict. Downstream services can treat missing
+        keys as "leave that slot untouched" (see ``build_control_adv_body`` which
+        emits fieldMask/extMask bits only for provided kwargs). Callers that
+        need a legacy default (e.g. ``send_wled_control``) already apply
+        ``params.get(key, fallback)`` themselves.
+        """
+
         params = params or {}
-        coerced = {}
+        ui_meta = fn_info.get("ui") or {}
+        coerced: dict = {}
         for var in fn_info.get("vars", []) or []:
-            raw_val = params.get(var, None)
-            if raw_val is None:
-                raw_val = options_by_key.get(var, {}).get("min", 0)
+            if var not in params:
+                continue
+
+            raw_val = params.get(var)
+            widget = (ui_meta.get(var) or {}).get("widget")
+
+            if widget == "color":
+                coerced[var] = self._coerce_color(raw_val)
+                continue
+
+            if widget == "toggle":
+                coerced[var] = self._coerce_toggle(raw_val)
+                continue
+
+            # Default: numeric slider/select/legacy
             try:
                 value_int = int(raw_val)
             except Exception as ex:
                 raise ValueError(f"invalid value for {var}") from ex
-            opt_meta = options_by_key.get(var, {})
-            min_v = opt_meta.get("min")
-            max_v = opt_meta.get("max")
+            # Range bounds: prefer UI widget bounds, fall back to options_by_key (legacy).
+            ui_bounds = ui_meta.get(var) or {}
+            bounds_src = ui_bounds if ("min" in ui_bounds or "max" in ui_bounds) else options_by_key.get(var, {})
+            min_v = bounds_src.get("min")
+            max_v = bounds_src.get("max")
             if min_v is not None and value_int < int(min_v):
                 raise ValueError(f"{var} must be >= {min_v}")
             if max_v is not None and value_int > int(max_v):

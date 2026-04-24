@@ -847,6 +847,12 @@ class RaceLink_Host:
         """Compatibility entrypoint forwarding WLED actions to ControlService."""
         return self.control_service.send_wled_control(targetDevice=targetDevice, targetGroup=targetGroup, params=params)
 
+    def sendWledControlAdvanced(self, *, targetDevice=None, targetGroup=None, params=None):
+        """Dispatch WLED_Advanced (OPC_CONTROL_ADV) via ControlService."""
+        return self.control_service.send_wled_control_advanced(
+            targetDevice=targetDevice, targetGroup=targetGroup, params=params
+        )
+
     def sendStartblockConfig(self, *, targetDevice=None, targetGroup=None, params=None):
         """Compatibility entrypoint forwarding startblock config to StartblockService."""
         return self.startblock_service.send_startblock_config(

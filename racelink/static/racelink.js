@@ -193,22 +193,79 @@ function getSpecialsForDevice(dev){
 
 function buildSpecialVarInput({varKey, varMeta, uiMeta, dev}){
   const currentVal = dev ? dev[varKey] : undefined;
+  const widget = uiMeta && typeof uiMeta.widget === "string" ? uiMeta.widget : null;
+  const options = uiMeta && Array.isArray(uiMeta.options) ? uiMeta.options : null;
+
+  // ---- slider (range + live number display) ----
+  if(widget === "slider"){
+    const min = (uiMeta && uiMeta.min !== undefined) ? Number(uiMeta.min) : 0;
+    const max = (uiMeta && uiMeta.max !== undefined) ? Number(uiMeta.max) : 255;
+    // A13: Default = 50% of the range (e.g. 128 for 0..255, 16 for 0..31) when
+    // no device-cached value is available.
+    const defaultVal = (currentVal !== undefined && currentVal !== null)
+      ? Number(currentVal)
+      : Math.round((min + max) / 2);
+    const wrap = document.createElement("div");
+    wrap.className = "rl-slider-wrap";
+    const input = document.createElement("input");
+    input.type = "range";
+    input.min = String(min);
+    input.max = String(max);
+    input.step = "1";
+    input.value = String(defaultVal);
+    const readout = document.createElement("span");
+    readout.className = "rl-slider-value";
+    readout.textContent = String(defaultVal);
+    input.addEventListener("input", () => { readout.textContent = input.value; });
+    wrap.appendChild(input);
+    wrap.appendChild(readout);
+    // Expose the slider's element as the interactive node, but return the wrap
+    // as the DOM to insert. Submit handler reads the widget type and queries
+    // wrap.querySelector("input[type=range]") if needed; we stash the input on
+    // the wrapper for convenience.
+    wrap.rlInput = input;
+    return { input: wrap, value: defaultVal, widget };
+  }
+
+  // ---- toggle (checkbox) ----
+  if(widget === "toggle"){
+    const defaultBool = Boolean(currentVal);
+    const wrap = document.createElement("label");
+    wrap.className = "rl-toggle-wrap";
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.checked = defaultBool;
+    wrap.appendChild(input);
+    wrap.rlInput = input;
+    return { input: wrap, value: defaultBool, widget };
+  }
+
+  // ---- color (native color picker) ----
+  if(widget === "color"){
+    const input = document.createElement("input");
+    input.type = "color";
+    input.value = (typeof currentVal === "string" && /^#[0-9a-fA-F]{6}$/.test(currentVal))
+      ? currentVal
+      : "#000000";
+    return { input, value: input.value, widget };
+  }
+
   const defaultVal = (currentVal !== undefined && currentVal !== null)
     ? currentVal
     : (varMeta && varMeta.min !== undefined ? varMeta.min : 0);
-  const options = uiMeta && Array.isArray(uiMeta.options) ? uiMeta.options : null;
 
-  if(options){
+  if(widget === "select" || options){
     const select = document.createElement("select");
-    if(!options.length){
+    const opts = options || [];
+    if(!opts.length){
       const opt = document.createElement("option");
       opt.value = "";
       opt.textContent = "No presets available";
       select.appendChild(opt);
       select.disabled = true;
-      return { input: select, value: defaultVal };
+      return { input: select, value: defaultVal, widget: "select" };
     }
-    options.forEach(optInfo => {
+    opts.forEach(optInfo => {
       const opt = document.createElement("option");
       opt.value = String(optInfo.value);
       opt.textContent = String(optInfo.label ?? optInfo.value);
@@ -216,27 +273,28 @@ function buildSpecialVarInput({varKey, varMeta, uiMeta, dev}){
     });
     const desiredNum = Number(defaultVal);
     const match = Number.isFinite(desiredNum)
-      ? options.find(optInfo => Number(optInfo.value) === desiredNum)
+      ? opts.find(optInfo => Number(optInfo.value) === desiredNum)
       : null;
     if(match){
       select.value = String(match.value);
     }else{
-      const desired = String(defaultVal ?? options[0].value ?? "");
+      const desired = String(defaultVal ?? opts[0].value ?? "");
       if(desired && Array.from(select.options).some(o => o.value === desired)){
         select.value = desired;
       }else{
-        select.value = String(options[0].value ?? "");
+        select.value = String(opts[0].value ?? "");
       }
     }
-    return { input: select, value: select.value };
+    return { input: select, value: select.value, widget: "select" };
   }
 
+  // Default: plain number input
   const input = document.createElement("input");
   input.type = "number";
   if(varMeta && varMeta.min !== undefined) input.min = String(varMeta.min);
   if(varMeta && varMeta.max !== undefined) input.max = String(varMeta.max);
   if(defaultVal !== undefined && defaultVal !== null) input.value = String(defaultVal);
-  return { input, value: defaultVal };
+  return { input, value: defaultVal, widget: "number" };
 }
 
 function renderSpecialTabs(){
@@ -371,15 +429,47 @@ function renderSpecialTabs(){
       const uiMeta = (fn.ui && fn.ui[varKey]) ? fn.ui[varKey] : {};
       const fieldWrap = document.createElement("div");
       fieldWrap.className = "rl-special-input";
+      fieldWrap.dataset.field = varKey;
       const fieldLabel = document.createElement("span");
       fieldLabel.className = "rl-special-input-label";
-      fieldLabel.textContent = varMeta.label || varKey;
-      const { input } = buildSpecialVarInput({varKey, varMeta, uiMeta, dev});
+      const defaultLabelText = varMeta.label || varKey;
+      fieldLabel.textContent = defaultLabelText;
+      fieldLabel.dataset.defaultLabel = defaultLabelText;
+      const { input, widget } = buildSpecialVarInput({varKey, varMeta, uiMeta, dev});
       fieldWrap.appendChild(fieldLabel);
       fieldWrap.appendChild(input);
       inputsWrap.appendChild(fieldWrap);
-      inputMeta.push({ key: varKey, input, uiMeta });
+      inputMeta.push({ key: varKey, input, uiMeta, widget, wrap: fieldWrap, labelEl: fieldLabel });
     });
+
+    // A12: dynamische effect-spezifische UI für wled_control_advanced.
+    // Wenn die Action ein "mode"-Select mit slots-Metadaten (pro Option) enthält,
+    // passen Labels und Sichtbarkeit aller abhängigen Felder am Mode-Wechsel an.
+    const modeMeta = inputMeta.find(m => m.key === "mode");
+    const modeOptions = modeMeta && modeMeta.uiMeta && Array.isArray(modeMeta.uiMeta.options)
+      ? modeMeta.uiMeta.options
+      : null;
+    const hasSlots = modeOptions && modeOptions.some(o => o && o.slots);
+    if(modeMeta && hasSlots){
+      const optionByValue = new Map(modeOptions.map(o => [String(o.value), o]));
+      const applyEffectSlots = () => {
+        const selected = optionByValue.get(String(modeMeta.input.value));
+        const slots = selected && selected.slots ? selected.slots : null;
+        for(const m of inputMeta){
+          if(m.key === "mode") continue; // Mode-Select bleibt immer sichtbar
+          // Slot fehlt / unbekannt -> konservativer Fallback: Feld anzeigen, generisches Label.
+          const slot = slots ? slots[m.key] : null;
+          const used = slot ? Boolean(slot.used) : true;
+          m.wrap.style.display = used ? "" : "none";
+          if(m.labelEl){
+            const custom = slot && typeof slot.label === "string" && slot.label ? slot.label : null;
+            m.labelEl.textContent = custom || m.labelEl.dataset.defaultLabel || m.key;
+          }
+        }
+      };
+      modeMeta.input.addEventListener("change", applyEffectSlots);
+      applyEffectSlots();
+    }
     const actions = document.createElement("div");
     actions.className = "rl-special-actions";
     const sendBtn = document.createElement("button");
@@ -396,8 +486,48 @@ function renderSpecialTabs(){
       if(!state.specialDevice) return;
       const params = {};
       for(const meta of inputMeta){
+        // A12: ausgeblendete Felder (effect-spezifisch unused) nicht mitschicken.
+        // Das Backend belässt sie dann aus fieldMask/extMask raus -> der WLED-Node
+        // überschreibt nichts Irrelevantes.
+        if(meta.wrap && meta.wrap.style.display === "none"){
+          continue;
+        }
+        const widget = meta.widget;
+
+        if(widget === "toggle"){
+          const cb = meta.input.rlInput || meta.input;
+          params[meta.key] = Boolean(cb.checked);
+          continue;
+        }
+
+        if(widget === "slider"){
+          const sl = meta.input.rlInput || meta.input;
+          const n = Number(sl.value);
+          if(!Number.isFinite(n)){
+            $("#specialHint").textContent = `Enter a valid number for ${meta.key}.`;
+            return;
+          }
+          params[meta.key] = n;
+          continue;
+        }
+
+        if(widget === "color"){
+          const hex = String(meta.input.value || "#000000").replace(/^#/, "");
+          if(!/^[0-9a-fA-F]{6}$/.test(hex)){
+            $("#specialHint").textContent = `Enter a valid color for ${meta.key}.`;
+            return;
+          }
+          params[meta.key] = {
+            r: parseInt(hex.slice(0, 2), 16),
+            g: parseInt(hex.slice(2, 4), 16),
+            b: parseInt(hex.slice(4, 6), 16),
+          };
+          continue;
+        }
+
+        // select / number / legacy fallback
         const el = meta.input;
-        let value = el.value;
+        const value = el.value;
         if(meta.uiMeta && Array.isArray(meta.uiMeta.options) && !value){
           $("#specialHint").textContent = "Select a preset.";
           return;

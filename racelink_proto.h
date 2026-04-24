@@ -2,8 +2,8 @@
 #include <stdint.h>
 #include <stddef.h>
 
-// RaceLink protocol v1.1 -- shared, header-only protocol for ESP32 + SX1262
-// Packet = Header7 (3B sender + 3B receiver + 1B type) + Body (0..20B)
+// RaceLink protocol v2.0 -- shared, header-only protocol for SX1262 / LLCC68 based nodes
+// Packet = Header7 (3B sender + 3B receiver + 1B type) + Body (0..BODY_MAX B, currently 22)
 // Direction bit (0x80): 0 = Master->Node, 1 = Node->Master
 // Broadcast: receiver3 == FF:FF:FF
 // NOTE: All multi-byte fields are little-endian.
@@ -22,13 +22,18 @@ enum RL_Dev_Type : uint8_t {
 namespace RaceLinkProto {
 
 // -------------------- Versioning --------------------
-static const uint8_t PROTO_VER_MAJOR = 1;
-static const uint8_t PROTO_VER_MINOR = 4;
+static const uint8_t PROTO_VER_MAJOR = 2;
+static const uint8_t PROTO_VER_MINOR = 0;
 
 // -------------------- Direction/Type helpers --------------------
 static const uint8_t DIR_M2N = 0x00;  // Master -> Node
 static const uint8_t DIR_N2M = 0x80;  // Node   -> Master
-static const uint8_t BODY_MAX = 20;
+// BODY_MAX: max. Body-Länge aller RaceLink-Pakete.
+// Historisch 20; 2026-04-24 auf 22 angehoben für OPC_CONTROL_ADV
+// (erstes variable-length Paket, 3..21 B Body). +1 B Reserve.
+// Fallback auf fixed-length P_ControlAdv: siehe Plan-Doku
+// (plane-f-r-mich-ein-refactored-boole.md, Abschnitt "Fallback zu fixed-length").
+static const uint8_t BODY_MAX = 22;
 
 inline uint8_t type_dir(uint8_t t)  { return t & 0x80; }
 inline uint8_t type_base(uint8_t t) { return t & 0x7F; }
@@ -52,6 +57,7 @@ enum Opcode7 : uint8_t {
   OPC_CONFIG        = 0x05, // CONFIG (M2N)
   OPC_SYNC          = 0x06, // SYNC Pulse (M2N)
   OPC_STREAM        = 0x07, // STREAM_M2N (M2N)
+  OPC_CONTROL_ADV   = 0x08, // CONTROL_ADV (M2N) -- variable-length body, see P_ControlAdv layout below
   OPC_ACK           = 0x7E, // ACK (both directions, as response only)
   // (optional future: 0x05 STATUS_UPDATE N2M unrequested telemetry)
 };
@@ -66,24 +72,54 @@ struct __attribute__((packed)) P_Config      { uint8_t option; uint8_t data0; ui
 struct __attribute__((packed)) P_Sync        { uint8_t ts24_0; uint8_t ts24_1; uint8_t ts24_2; uint8_t brightness; }; // 4B // 24-bit timestamp LSB first + bri
 struct __attribute__((packed)) P_Stream      { uint8_t ctrl; uint8_t data[8];         }; // 9B
 
-struct StreamCtrl {
-  bool start;
-  bool stop;
-  uint8_t packets_left;
-};
+// -------------------- P_ControlAdv (variable-length, 3..21 B) --------------------
+// Master -> Node, OPC_CONTROL_ADV. First variable-length packet in RaceLink.
+// Layout:
+//   Byte 0   : groupId               (always)
+//   Byte 1   : flags                 (always)  -- same RL_FLAG_* as OPC_CONTROL (POWER_ON, ARM_ON_SYNC,
+//                                                 HAS_BRI, FORCE_TT0, FORCE_REAPPLY); bits 5-7 reserved
+//   Byte 2   : fieldMask             (always)  -- which single-byte fields follow, in fixed order:
+//                bit 0 RL_ADV_F_BRIGHTNESS     -> +1 B u8
+//                bit 1 RL_ADV_F_MODE           -> +1 B u8   (WLED effect index)
+//                bit 2 RL_ADV_F_SPEED          -> +1 B u8
+//                bit 3 RL_ADV_F_INTENSITY      -> +1 B u8
+//                bit 4 RL_ADV_F_CUSTOM1        -> +1 B u8
+//                bit 5 RL_ADV_F_CUSTOM2        -> +1 B u8
+//                bit 6 RL_ADV_F_CUSTOM3_CHECKS -> +1 B (bits 0-4 custom3, bits 5-7 check1/2/3)
+//                bit 7 RL_ADV_F_EXT            -> extMask byte + extended payload follows
+//   Byte X   : extMask               (only if RL_ADV_F_EXT set) -- extended fields in fixed order:
+//                bit 0 RL_ADV_E_PALETTE        -> +1 B u8
+//                bit 1 RL_ADV_E_COLOR1         -> +3 B RGB
+//                bit 2 RL_ADV_E_COLOR2         -> +3 B RGB
+//                bit 3 RL_ADV_E_COLOR3         -> +3 B RGB
+//                bits 4-7 reserved
+// Max body when all fields present: 3 + 7 + 1 + 1 + 9 = 21 bytes  (<= BODY_MAX=22, 1 B reserve).
+// Variable length: RULES[] uses req_len=0 -> decide_response() skips length check.
+// Fallback to fixed-length struct: see project plan doc, section "Fallback zu fixed-length".
 
-inline uint8_t encode_stream_ctrl(bool start, bool stop, uint8_t packets_left) {
-  uint8_t ctrl = (start ? 0x80U : 0x00U) | (stop ? 0x40U : 0x00U);
-  return static_cast<uint8_t>(ctrl | (packets_left & 0x3FU));
-}
+static const uint8_t RL_ADV_F_BRIGHTNESS     = 0x01;
+static const uint8_t RL_ADV_F_MODE           = 0x02;
+static const uint8_t RL_ADV_F_SPEED          = 0x04;
+static const uint8_t RL_ADV_F_INTENSITY      = 0x08;
+static const uint8_t RL_ADV_F_CUSTOM1        = 0x10;
+static const uint8_t RL_ADV_F_CUSTOM2        = 0x20;
+static const uint8_t RL_ADV_F_CUSTOM3_CHECKS = 0x40;
+static const uint8_t RL_ADV_F_EXT            = 0x80;
 
-inline StreamCtrl decode_stream_ctrl(uint8_t ctrl) {
-  StreamCtrl decoded{};
-  decoded.start = (ctrl & 0x80U) != 0U;
-  decoded.stop = (ctrl & 0x40U) != 0U;
-  decoded.packets_left = static_cast<uint8_t>(ctrl & 0x3FU);
-  return decoded;
-}
+static const uint8_t RL_ADV_E_PALETTE        = 0x01;
+static const uint8_t RL_ADV_E_COLOR1         = 0x02;
+static const uint8_t RL_ADV_E_COLOR2         = 0x04;
+static const uint8_t RL_ADV_E_COLOR3         = 0x08;
+
+// Packing of custom3_checks byte
+static const uint8_t RL_ADV_C3_MASK     = 0x1F; // bits 0-4
+static const uint8_t RL_ADV_CHECK1_BIT  = 0x20; // bit 5
+static const uint8_t RL_ADV_CHECK2_BIT  = 0x40; // bit 6
+static const uint8_t RL_ADV_CHECK3_BIT  = 0x80; // bit 7
+
+// Worst-case body size for P_ControlAdv (all fields present incl. extMask + all 3 colors).
+static const uint8_t MAX_P_CONTROL_ADV = 21;
+static_assert(MAX_P_CONTROL_ADV <= BODY_MAX, "MAX_P_CONTROL_ADV exceeds BODY_MAX");
 
 // Node -> Master
 //struct __attribute__((packed)) P_IdentifyReply { uint8_t proto_ver_major; uint8_t proto_ver_minor; uint8_t caps; uint8_t groupId; uint8_t mac6[6]; }; // 10B
@@ -129,6 +165,10 @@ static constexpr PacketRule RULES[] = {
   { OPC_STATUS,     DIR_M2N, RESP_SPECIFIC, OPC_STATUS,  SZ<P_GetStatus>(),   SZ<P_StatusReply>(),   "STATUS" },
   // OPC_CONTROL: CONTROL (M2N, 4B) -> no response
   { OPC_CONTROL,    DIR_M2N, RESP_NONE,     0,           SZ<P_Control>(),     0,                     "CONTROL" },
+  // OPC_CONTROL_ADV: CONTROL_ADV (M2N, variable length 3..21B) -> no response
+  // req_len = 0 signals variable length; decide_response() at the check below skips the
+  // length comparison when req_len == 0. Body layout is documented above near P_ControlAdv.
+  { OPC_CONTROL_ADV,DIR_M2N, RESP_NONE,     0,           0 /*variable*/,      0,                     "CONTROL_ADV" },
   // CONFIG (M2N, 5B) -> ACK
   { OPC_CONFIG,     DIR_M2N, RESP_ACK,      OPC_ACK,     SZ<P_Config>(),      SZ<P_Ack>(),           "CONFIG" },
   // OPC_SYNC: SYNC (M2N, 4B) -> no response
@@ -160,6 +200,7 @@ inline RespDecision decide_response(uint8_t in_type, uint8_t in_body_len) {
   // only requests (from req_dir side) trigger a response
   if (r->req_dir != dir) return d;
   // basic body length sanity (optional: relax in production)
+  // NOTE: req_len == 0 means "variable length" (e.g. OPC_CONTROL_ADV) -- length check is skipped.
   if (r->req_len && in_body_len != r->req_len) {
     // we could return NACK here, but NACK not requested now
     return d;
@@ -176,7 +217,7 @@ inline RespDecision decide_response(uint8_t in_type, uint8_t in_body_len) {
 
 // -------------------- Pack/Unpack helpers --------------------
 inline void put3(uint8_t dst[3], const uint8_t src[3]) { dst[0]=src[0]; dst[1]=src[1]; dst[2]=src[2]; }
-inline bool isBroadcast3(const uint8_t r3[3]) { return r3[0]==0xFF && r3[1]==0xFF && r3[2]==0xFF; } // TODO: add more helpers from the shared link core here, or move all helpers into a shared link-core header.
+inline bool isBroadcast3(const uint8_t r3[3]) { return r3[0]==0xFF && r3[1]==0xFF && r3[2]==0xFF; } // TODO: put all helpers in racelink_transport_core.h or collect all here?
 
 inline bool parseHeader(const uint8_t* buf, uint8_t len, Header7& h) {
   if (len < sizeof(Header7)) return false;
@@ -189,7 +230,7 @@ inline bool parseHeader(const uint8_t* buf, uint8_t len, Header7& h) {
 template<typename PayloadT>
 inline bool parseBody(const uint8_t* buf, uint8_t len, PayloadT& out) {
   const uint8_t need = (uint8_t)(sizeof(Header7) + sizeof(PayloadT));
-  if (len != need) return false;                      // an exact match is safer here
+  if (len != need) return false;                      // exakter Match ist hier safer
   const uint8_t* body = buf + sizeof(Header7);
   memcpy(&out, body, sizeof(PayloadT));               // direkter memcpy reicht (PayloadT packed!)
   return true;
@@ -209,6 +250,25 @@ inline uint8_t build_empty(uint8_t* out, const uint8_t s3[3], const uint8_t r3[3
   Header7* h = reinterpret_cast<Header7*>(out);
   put3(h->sender, s3); put3(h->receiver, r3); h->type = full_type;
   return (uint8_t)sizeof(Header7);
+}
+
+struct StreamCtrl {
+  bool start;
+  bool stop;
+  uint8_t packets_left;
+};
+
+inline uint8_t encode_stream_ctrl(bool start, bool stop, uint8_t packets_left) {
+  uint8_t ctrl = (start ? 0x80U : 0x00U) | (stop ? 0x40U : 0x00U);
+  return static_cast<uint8_t>(ctrl | (packets_left & 0x3FU));
+}
+
+inline StreamCtrl decode_stream_ctrl(uint8_t ctrl) {
+  StreamCtrl decoded{};
+  decoded.start = (ctrl & 0x80U) != 0U;
+  decoded.stop = (ctrl & 0x40U) != 0U;
+  decoded.packets_left = static_cast<uint8_t>(ctrl & 0x3FU);
+  return decoded;
 }
 
 } // namespace RaceLinkProto

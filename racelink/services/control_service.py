@@ -118,3 +118,67 @@ class ControlService:
             self.send_device_control(targetDevice, flags, preset_id, brightness)
             return True
         return False
+
+    def send_wled_control_advanced(self, *, targetDevice=None, targetGroup=None, params=None):
+        """Send OPC_CONTROL_ADV with the WLED effect parameters from ``params``.
+
+        Full-state semantics: every field present in ``params`` is included in
+        the serialized body. Fields set to ``None`` (or missing entirely) are
+        omitted via the ``fieldMask``/``extMask`` presence bits, so the
+        WLED node leaves them untouched.
+
+        Flag handling matches :meth:`send_wled_control` (Zeile 107-120):
+        ``POWER_ON`` derived from brightness, ``HAS_BRI`` always set when
+        brightness is provided.
+        """
+        transport = self._require_transport("sendWledControlAdvanced")
+        if transport is None:
+            return False
+
+        params = params or {}
+        brightness = params.get("brightness")
+        brightness_val = int(brightness) & 0xFF if brightness is not None else 0
+        flags = (RL_FLAG_POWER_ON if brightness_val > 0 else 0) | RL_FLAG_HAS_BRI
+
+        # Collect the kwargs for build_control_adv_body(). Only pass fields
+        # actually present in params so the builder emits a minimal body (any
+        # unsupplied field stays out of fieldMask/extMask).
+        adv_kwargs: dict = {}
+        if brightness is not None:
+            adv_kwargs["brightness"] = brightness_val
+        for key in ("mode", "speed", "intensity", "custom1", "custom2", "custom3", "palette"):
+            if key in params and params[key] is not None:
+                adv_kwargs[key] = int(params[key]) & 0xFF
+        for key in ("check1", "check2", "check3"):
+            if key in params and params[key] is not None:
+                adv_kwargs[key] = bool(params[key])
+        for key in ("color1", "color2", "color3"):
+            if key in params and params[key] is not None:
+                adv_kwargs[key] = tuple(int(c) & 0xFF for c in params[key])
+
+        if targetGroup is not None:
+            group_b = int(targetGroup) & 0xFF
+            transport.send_control_adv(
+                recv3=b"\xFF\xFF\xFF",
+                group_id=group_b,
+                flags=flags,
+                **adv_kwargs,
+            )
+            return True
+        if targetDevice is not None:
+            recv3 = mac_last3_from_hex(targetDevice.addr)
+            group_b = int(getattr(targetDevice, "groupId", 0)) & 0xFF
+            transport.send_control_adv(
+                recv3=recv3,
+                group_id=group_b,
+                flags=flags,
+                **adv_kwargs,
+            )
+            logger.debug(
+                "RL: Sent CONTROL_ADV to %s: flags=0x%02X fields=%s",
+                targetDevice.addr,
+                flags,
+                sorted(adv_kwargs.keys()),
+            )
+            return True
+        return False

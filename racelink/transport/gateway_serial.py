@@ -14,6 +14,7 @@ from .gateway_events import EV_ERROR, EV_RX_WINDOW_CLOSED, EV_RX_WINDOW_OPEN, EV
 from ..protocol.codec import parse_reply_event
 from ..protocol.packets import (
     build_config_body,
+    build_control_adv_body,
     build_control_body,
     build_get_devices_body,
     build_set_group_body,
@@ -270,6 +271,18 @@ class GatewaySerialTransport:
     def send_control(self, recv3: bytes, group_id: int, flags: int, preset_id: int, brightness: int):
         body = build_control_body(group_id=group_id, flags=flags, preset_id=preset_id, brightness=brightness)
         self._send_m2n(LP.make_type(LP.DIR_M2N, LP.OPC_CONTROL), recv3, body)
+
+    def send_control_adv(self, recv3: bytes, group_id: int, flags: int, **params):
+        """Send an OPC_CONTROL_ADV packet (variable-length body, 3..21 B).
+
+        Forwards all kwargs to ``build_control_adv_body``; see that builder for
+        the accepted field names (brightness, mode, speed, intensity, custom1,
+        custom2, custom3, check1/2/3, palette, color1/2/3). Body length varies
+        with which fields are provided and is framed via the generic
+        ``_send_m2n`` path, which already handles variable-length bodies.
+        """
+        body = build_control_adv_body(group_id=group_id, flags=flags, **params)
+        self._send_m2n(LP.make_type(LP.DIR_M2N, LP.OPC_CONTROL_ADV), recv3, body)
 
     def send_config(self, recv3: bytes = b"\xFF\xFF\xFF", option: int = 0, data0: int = 0, data1: int = 0, data2: int = 0, data3: int = 0):
         body = build_config_body(option=option, data0=data0, data1=data1, data2=data2, data3=data3)
