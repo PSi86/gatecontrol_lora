@@ -75,6 +75,7 @@ class TaskManager:
                 )
                 self._broadcast("refresh", {"what": ["groups", "devices"]})
             except Exception as ex:
+                # swallow-ok: best-effort fallback; caller proceeds with safe default
                 self.update(state="error", ended_ts=time.time(), last_error=str(ex))
                 self._master_state.set(
                     state="ERROR",
@@ -85,6 +86,7 @@ class TaskManager:
                     try:
                         self._logger.exception("RaceLink task %s failed", name)
                     except Exception:
+                        # swallow-ok: logger itself failed - we already captured the error above
                         pass
 
         thread = threading.Thread(target=runner, daemon=True)

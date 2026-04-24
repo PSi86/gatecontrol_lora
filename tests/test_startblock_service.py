@@ -39,7 +39,7 @@ class FakeSource:
 
 class FakeController:
     def __init__(self, devices=None):
-        self._rhapi = SimpleNamespace(event_source=FakeSource())
+        self._host_api = SimpleNamespace(event_source=FakeSource())
         self.saved = []
         self.send_config_calls = []
         self._devices = devices or []
@@ -55,8 +55,8 @@ class FakeController:
         self.send_config_calls.append(kwargs)
         return True
 
-    def save_to_db(self, args):
-        self.saved.append(args)
+    def save_to_db(self, args, scopes=None):
+        self.saved.append((args, scopes))
 
 
 class StartblockServiceTests(unittest.TestCase):
@@ -80,7 +80,12 @@ class StartblockServiceTests(unittest.TestCase):
         self.assertEqual(len(controller.send_config_calls), 2)
         self.assertEqual(device.specials["startblock_slots"], 3)
         self.assertEqual(device.specials["startblock_first_slot"], 2)
-        self.assertEqual(controller.saved, [{"manual": True}])
+        from racelink.domain import state_scope
+
+        self.assertEqual(len(controller.saved), 1)
+        args, scopes = controller.saved[0]
+        self.assertEqual(args, {"manual": True})
+        self.assertEqual(set(scopes or set()), {state_scope.DEVICE_SPECIALS})
 
     def test_send_startblock_control_in_group_mode_sends_all_slots(self):
         controller = FakeController()

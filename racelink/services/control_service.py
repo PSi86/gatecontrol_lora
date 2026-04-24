@@ -20,10 +20,17 @@ class ControlService:
         return getattr(self.controller, "transport", None)
 
     def _require_transport(self, context: str):
-        if self.transport:
-            return True
-        logger.warning("%s: communicator not ready", context)
-        return False
+        """Return the active transport or ``None`` after logging a warning.
+
+        Callers should bind the return value to a local variable and guard on
+        it so both the runtime check and the static type-narrowing apply at
+        the same site.
+        """
+        transport = self.transport
+        if transport is None:
+            logger.warning("%s: communicator not ready", context)
+            return None
+        return transport
 
     @staticmethod
     def _coerce_control_values(flags, preset_id, brightness, *, fallback=None):
@@ -42,11 +49,13 @@ class ControlService:
                 device.presetId = preset_id
                 device.brightness = brightness
             except Exception:
+                # swallow-ok: best-effort fallback; caller proceeds with safe default
                 continue
 
     def send_device_control(self, target_device, flags=None, preset_id=None, brightness=None):
         """Send CONTROL to a single node (receiver = last3 of targetDevice.addr)."""
-        if not self._require_transport("sendRaceLink"):
+        transport = self._require_transport("sendRaceLink")
+        if transport is None:
             return
 
         recv3 = mac_last3_from_hex(target_device.addr)
@@ -58,7 +67,7 @@ class ControlService:
             fallback=target_device,
         )
 
-        self.transport.send_control(
+        transport.send_control(
             recv3=recv3,
             group_id=group_id,
             flags=flags_b,
@@ -79,14 +88,15 @@ class ControlService:
 
     def send_group_control(self, group_id, flags, preset_id, brightness):
         """Broadcast CONTROL to a group; update local cache for matching devices."""
-        if not self._require_transport("sendGroupControl"):
+        transport = self._require_transport("sendGroupControl")
+        if transport is None:
             return
 
         group_b = int(group_id) & 0xFF
         flags_b, preset_b, brightness_b = self._coerce_control_values(flags, preset_id, brightness)
         self._update_group_control_cache(group_b, flags_b, preset_b, brightness_b)
 
-        self.transport.send_control(
+        transport.send_control(
             recv3=b"\xFF\xFF\xFF",
             group_id=group_b,
             flags=flags_b,

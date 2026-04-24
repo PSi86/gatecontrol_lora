@@ -27,6 +27,10 @@ sys.modules.setdefault("serial.tools", serial_tools_stub)
 sys.modules.setdefault("serial.tools.list_ports", serial_list_ports_stub)
 
 from racelink.transport.gateway_serial import GatewaySerialTransport
+from racelink.transport.gateway_events import (
+    EV_RX_WINDOW_CLOSED,
+    EV_RX_WINDOW_OPEN,
+)
 
 
 class GatewaySerialTransportTests(unittest.TestCase):
@@ -51,6 +55,29 @@ class GatewaySerialTransportTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0]["recv3"], b"\xAA\xBB\xCC")
         self.assertEqual(calls[0]["body"], b"\x01\x02")
+
+    def test_rx_window_state_is_idempotent_for_duplicate_open(self):
+        """Gateway firmware may emit OPEN(Timed) without a prior CLOSE for the
+        preceding Continuous RX; tracking must not blow up or log an error."""
+        transport = GatewaySerialTransport(port="COM1")
+
+        self.assertEqual(transport.rx_window_state, 0)
+        # Initial Continuous RX after boot.
+        transport._update_rx_window_state(EV_RX_WINDOW_OPEN)
+        self.assertEqual(transport.rx_window_state, 1)
+        # Host TX triggers Continuous -> Idle -> Timed RX. No CLOSE in between.
+        transport._update_rx_window_state(EV_RX_WINDOW_OPEN)
+        self.assertEqual(transport.rx_window_state, 1)
+        # Timed window ends.
+        transport._update_rx_window_state(EV_RX_WINDOW_CLOSED)
+        self.assertEqual(transport.rx_window_state, 0)
+        # Post-Timed default kicks back to Continuous.
+        transport._update_rx_window_state(EV_RX_WINDOW_OPEN)
+        self.assertEqual(transport.rx_window_state, 1)
+        # Double CLOSE should also not underflow.
+        transport._update_rx_window_state(EV_RX_WINDOW_CLOSED)
+        transport._update_rx_window_state(EV_RX_WINDOW_CLOSED)
+        self.assertEqual(transport.rx_window_state, 0)
 
 
 if __name__ == "__main__":

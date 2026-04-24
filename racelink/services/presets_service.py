@@ -66,6 +66,7 @@ class PresetsService:
                 stat = os.stat(path)
                 rows.append({"name": name, "size": int(stat.st_size), "saved_ts": float(stat.st_mtime)})
         except Exception:
+            # swallow-ok: best-effort fallback; caller proceeds with safe default
             return []
         rows.sort(key=lambda row: row.get("saved_ts", 0), reverse=True)
         return rows
@@ -75,6 +76,7 @@ class PresetsService:
             if self._option_getter:
                 return str(self._option_getter("rl_wled_presets_file", "") or "")
         except Exception:
+            # swallow-ok: best-effort fallback; caller proceeds with safe default
             pass
         return ""
 
@@ -83,6 +85,7 @@ class PresetsService:
             if self._option_setter:
                 self._option_setter("rl_wled_presets_file", name or "")
         except Exception:
+            # swallow-ok: best-effort fallback; caller proceeds with safe default
             pass
 
     def parse_wled_presets_minimal(self, presets: Union[str, bytes, Dict[str, Any]]) -> List[Tuple[int, str]]:
@@ -121,6 +124,7 @@ class PresetsService:
             self.apply_options(parsed)
             return True
         except Exception:
+            # swallow-ok: best-effort fallback; caller proceeds with safe default
             return False
 
     def ensure_loaded(self) -> None:

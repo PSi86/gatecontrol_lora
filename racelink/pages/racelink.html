@@ -27,6 +27,25 @@
     </div>
   </header>
 
+  <!-- Transient banner: shown while the WebUI cannot reach the server
+       (RotorHazard restarting, SSE dropped). Auto-recovers; no retry button. -->
+  <div id="transientBanner" class="rl-banner rl-banner-transient hidden" role="status">
+    <span class="rl-banner-icon" aria-hidden="true">&#8635;</span>
+    <span id="transientBannerMessage">Reconnecting…</span>
+  </div>
+
+  <!-- Persistent banner: shown when the server is reachable but the RF
+       gateway is not ready. Retry button is visible unless an automatic
+       retry is already scheduled (PORT_BUSY / LINK_LOST). -->
+  <div id="gatewayBanner" class="rl-banner rl-gateway-banner hidden" role="alert">
+    <span class="rl-banner-icon rl-gateway-banner-icon" aria-hidden="true">&#9888;</span>
+    <span id="gatewayBannerMessage">RaceLink Gateway is not available.</span>
+    <button type="button" id="btnGatewayRetry" class="rl-gateway-banner-retry">Retry connection</button>
+  </div>
+
+  <!-- Ephemeral toast (reconnected, etc.). -->
+  <div id="rlToast" class="rl-toast hidden" role="status" aria-live="polite"></div>
+
   <main class="rl-main">
     <aside class="rl-sidebar">
       <div class="rl-side-head">

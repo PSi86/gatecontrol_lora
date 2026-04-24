@@ -48,6 +48,11 @@ class GatewaySerialTransport:
         self._listeners = []
         self._tx_listeners = []
         self._rx_window_state = 0
+        # Set to True by ``discover_and_open`` when at least one candidate
+        # port was skipped because another process held its exclusive lock.
+        # Controllers use this to pick PORT_BUSY over NOT_FOUND when
+        # ``discover_and_open`` returns False.
+        self.last_discovery_had_busy_port = False
 
     @staticmethod
     def _is_usb_port(portinfo):
@@ -61,16 +66,19 @@ class GatewaySerialTransport:
             if "USB" in desc:
                 return True
         except Exception:
+            # swallow-ok: best-effort fallback; caller proceeds with safe default
             pass
         return False
 
     def discover_and_open(self) -> bool:
+        self.last_discovery_had_busy_port = False
         if self.port:
             try:
                 self.ser.port = self.port
                 try:
                     self.ser.exclusive = True  # type: ignore[attr-defined]
                 except Exception:
+                    # swallow-ok: best-effort fallback; caller proceeds with safe default
                     pass
                 self.ser.open()
                 return True
@@ -97,6 +105,7 @@ class GatewaySerialTransport:
                 try:
                     self.ser.exclusive = True  # type: ignore[attr-defined]
                 except Exception:
+                    # swallow-ok: best-effort fallback; caller proceeds with safe default
                     pass
                 self.ser.open()
                 time.sleep(0.5)
@@ -115,6 +124,7 @@ class GatewaySerialTransport:
                     try:
                         mac_ascii = resp[len(ident):].decode("ascii", errors="ignore").strip().strip("\x00")
                     except Exception:
+                        # swallow-ok: best-effort fallback; caller proceeds with safe default
                         mac_ascii = ""
 
                     self.ident_mac = mac_ascii if mac_ascii else None
@@ -133,12 +143,14 @@ class GatewaySerialTransport:
                 msg = str(e)
                 if "Could not exclusively lock port" in msg or "Resource temporarily unavailable" in msg:
                     logger.debug("Skip busy port %s (exclusive lock failed)", p.device)
+                    self.last_discovery_had_busy_port = True
                 else:
                     logger.debug("Open/identify failed on %s: %s", p.device, msg)
                 try:
                     if getattr(self.ser, "is_open", False):
                         self.ser.close()
                 except Exception:
+                    # swallow-ok: best-effort fallback; caller proceeds with safe default
                     pass
 
         return False
@@ -166,7 +178,13 @@ class GatewaySerialTransport:
         try:
             self.ser.close()
         except Exception:
-            pass
+            # A failed close leaves the exclusive lock on the OS FD -- the next
+            # RH process will see it as ``PORT_BUSY`` until the kernel
+            # eventually releases it. Log loud so it shows up in the hardware
+            # log; do not re-raise (callers treat close as best-effort).
+            logger.warning(
+                "RaceLink transport close failed on %s", self.port, exc_info=True,
+            )
 
     def add_listener(self, cb):
         if cb and cb not in self._listeners:
@@ -177,6 +195,7 @@ class GatewaySerialTransport:
             if cb in self._listeners:
                 self._listeners.remove(cb)
         except Exception:
+            # swallow-ok: best-effort fallback; caller proceeds with safe default
             pass
 
     def add_tx_listener(self, cb):
@@ -188,6 +207,7 @@ class GatewaySerialTransport:
             if cb in self._tx_listeners:
                 self._tx_listeners.remove(cb)
         except Exception:
+            # swallow-ok: best-effort fallback; caller proceeds with safe default
             pass
 
     def _emit_tx(self, ev: dict):
@@ -195,6 +215,7 @@ class GatewaySerialTransport:
             try:
                 cb(ev)
             except Exception:
+                # swallow-ok: best-effort fallback; caller proceeds with safe default
                 pass
 
     def _handle_disconnect(self, msg: str) -> None:
@@ -204,6 +225,7 @@ class GatewaySerialTransport:
         try:
             self.ser.close()
         except Exception:
+            # swallow-ok: best-effort fallback; caller proceeds with safe default
             pass
 
     def _send_m2n(self, type_full: int, recv3: bytes, body: bytes = b""):
@@ -308,26 +330,33 @@ class GatewaySerialTransport:
             try:
                 cb(ev)
             except Exception:
+                # swallow-ok: best-effort fallback; caller proceeds with safe default
                 pass
 
         if self.on_event and self.on_event not in self._listeners:
             try:
                 self.on_event(ev)
             except Exception:
+                # swallow-ok: best-effort fallback; caller proceeds with safe default
                 pass
 
     def _update_rx_window_state(self, event_type: int) -> int:
-        delta = 1 if event_type == EV_RX_WINDOW_OPEN else -1
-        new_state = int(self._rx_window_state) + delta
-        if new_state not in (0, 1):
-            logger.error(
-                "RX window state invalid after %s: %s -> %s",
-                "OPEN" if event_type == EV_RX_WINDOW_OPEN else "CLOSED",
-                self._rx_window_state,
-                new_state,
-            )
-            new_state = 1 if event_type == EV_RX_WINDOW_OPEN else 0
-        self._rx_window_state = new_state
+        """Track RX window state from OPEN/CLOSED events idempotently.
+
+        The gateway firmware emits ``EV_RX_WINDOW_OPEN`` both when entering a
+        Timed RX (window_ms>0) and when entering Continuous RX (window_ms=0).
+        ``EV_RX_WINDOW_CLOSED`` is only sent when a Timed window ends; the
+        Continuous -> TX transition is silent by design (Continuous is the
+        resting state). That means two OPEN events can legitimately arrive
+        back-to-back across a TX cycle. Treat the events as state signals
+        (OPEN -> 1, CLOSED -> 0) rather than counter deltas so we do not emit
+        spurious error-level log records that RotorHazard surfaces as UI
+        alerts.
+        """
+        if event_type == EV_RX_WINDOW_OPEN:
+            self._rx_window_state = 1
+        elif event_type == EV_RX_WINDOW_CLOSED:
+            self._rx_window_state = 0
         return self._rx_window_state
 
     @property

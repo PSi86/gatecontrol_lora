@@ -1065,12 +1065,197 @@ async function openSpecialsDialog(mac){
     $("#dlgFwUpdate").close();
   });
 
-  // SSE connection
+  // Transient banner (server unreachable / restarting) -----------------------
+  function showTransientBanner(message){
+    const banner = document.getElementById("transientBanner");
+    const msgEl = document.getElementById("transientBannerMessage");
+    if(!banner || !msgEl) return;
+    msgEl.textContent = message;
+    banner.classList.remove("hidden");
+  }
+  function hideTransientBanner(){
+    const banner = document.getElementById("transientBanner");
+    if(banner) banner.classList.add("hidden");
+  }
+
+  // Ephemeral toast -----------------------------------------------------------
+  let _toastTimer = null;
+  function showToast(message, durationMs){
+    const toast = document.getElementById("rlToast");
+    if(!toast) return;
+    toast.textContent = message;
+    toast.classList.remove("hidden");
+    toast.classList.remove("rl-toast-fade");
+    if(_toastTimer) clearTimeout(_toastTimer);
+    _toastTimer = setTimeout(()=>{
+      toast.classList.add("rl-toast-fade");
+      setTimeout(()=>toast.classList.add("hidden"), 300);
+    }, durationMs || 3000);
+  }
+
+  // Gateway banner render -----------------------------------------------------
+  // Structured ``last_error.code`` drives both wording and retry-button
+  // visibility: PORT_BUSY / LINK_LOST are auto-retried by the Host, so the
+  // button is hidden while an auto-retry is scheduled (see ``next_retry_in_s``).
+  let _retryCountdownTimer = null;
+  function _stopRetryCountdown(){
+    if(_retryCountdownTimer){ clearInterval(_retryCountdownTimer); _retryCountdownTimer = null; }
+  }
+  function _describeGatewayError(err){
+    if(!err) return "RaceLink Gateway is not available.";
+    const code = err.code || "";
+    switch(code){
+      case "PORT_BUSY":
+        return "Gateway port busy (another process is using it).";
+      case "NOT_FOUND":
+        return "No RaceLink Gateway detected. Plug in the USB dongle.";
+      case "LINK_LOST":
+        return "Gateway link lost.";
+      default:
+        return err.reason ? `RaceLink Gateway unavailable: ${err.reason}` : "RaceLink Gateway is not available.";
+    }
+  }
+
+  function updateGatewayStatus(status){
+    const banner = document.getElementById("gatewayBanner");
+    const msgEl = document.getElementById("gatewayBannerMessage");
+    const retryBtn = document.getElementById("btnGatewayRetry");
+    if(!banner || !msgEl) return;
+
+    const ready = !!(status && status.ready);
+    if(ready){
+      _stopRetryCountdown();
+      if(!banner.classList.contains("hidden")){
+        showToast("RaceLink Gateway connected");
+      }
+      banner.classList.add("hidden");
+      return;
+    }
+
+    const err = (status && status.last_error) || null;
+    const base = _describeGatewayError(err);
+
+    const autoRetry = err && err.next_retry_in_s != null;
+    if(autoRetry){
+      _stopRetryCountdown();
+      // Run a local countdown so the user sees a live timer without waiting
+      // for the next SSE update. Start from now + next_retry_in_s.
+      let secondsLeft = Math.max(1, Math.round(Number(err.next_retry_in_s) || 1));
+      const render = () => {
+        msgEl.textContent = `${base} Next automatic retry in ${secondsLeft}s.`;
+      };
+      render();
+      _retryCountdownTimer = setInterval(()=>{
+        secondsLeft -= 1;
+        if(secondsLeft <= 0){
+          msgEl.textContent = `${base} Retrying now…`;
+          _stopRetryCountdown();
+          return;
+        }
+        render();
+      }, 1000);
+      if(retryBtn) retryBtn.classList.add("hidden");
+    }else{
+      _stopRetryCountdown();
+      msgEl.textContent = base;
+      if(retryBtn) retryBtn.classList.remove("hidden");
+    }
+    banner.classList.remove("hidden");
+  }
+
+  // SSE connection with auto-reconnect ----------------------------------------
+  // Plan: on any error/close we enter a transient "reconnecting" state and
+  // retry with exp-backoff 1s → 2s → 4s → 8s → 10s. Every reconnect also hits
+  // /api/health for a cheap liveness probe, and once SSE is back up we
+  // rehydrate state from /api/master so the banner is never stale.
+  const _RECONNECT_DELAYS_MS = [1000, 2000, 4000, 8000, 10000];
+  // Grace before showing the "reconnecting" banner -- keeps short network
+  // blips (where the browser auto-reconnects within a second) silent.
+  const _TRANSIENT_GRACE_MS = 2000;
+
+  let _es = null;
+  let _esReconnectAttempt = 0;
+  let _esReconnectTimer = null;
+  let _esKnownBad = false;
+  let _esHadOpen = false;
+  let _transientGraceTimer = null;
+
+  function _armTransientBanner(message){
+    // Only show the banner if we do not regain an OPEN connection within the
+    // grace window. onopen cancels the timer.
+    if(_transientGraceTimer) return;
+    _transientGraceTimer = setTimeout(()=>{
+      _transientGraceTimer = null;
+      if(!_es || _es.readyState !== EventSource.OPEN){
+        showTransientBanner(message);
+      }
+    }, _TRANSIENT_GRACE_MS);
+  }
+  function _clearTransientGrace(){
+    if(_transientGraceTimer){ clearTimeout(_transientGraceTimer); _transientGraceTimer = null; }
+  }
+
+  function _scheduleReconnect(){
+    if(_esReconnectTimer) return;
+    const idx = Math.min(_esReconnectAttempt, _RECONNECT_DELAYS_MS.length - 1);
+    const delay = _RECONNECT_DELAYS_MS[idx];
+    _esReconnectAttempt += 1;
+    _esReconnectTimer = setTimeout(()=>{
+      _esReconnectTimer = null;
+      _probeHealthAndConnect();
+    }, delay);
+  }
+
+  function _probeHealthAndConnect(){
+    // Fast liveness check so we can distinguish "server coming back up" from
+    // "truly offline". Even if health fails we still attempt SSE; the
+    // transient banner keeps the user informed either way.
+    apiGet("/racelink/api/health").then((r)=>{
+      if(r && r.ok){
+        if(r.phase === "booting"){
+          showTransientBanner("RotorHazard is starting…");
+        }
+      }
+    }).catch(()=>{}).finally(()=>{
+      connectEvents();
+    });
+  }
+
   function connectEvents(){
     try{
+      if(_es){
+        try{ _es.close(); }catch{}
+        _es = null;
+      }
+      _esHadOpen = false;
       const es = new EventSource(withBasePath("/api/events"), {withCredentials:true});
+      _es = es;
+
+      es.onopen = () => {
+        // Successful (re)connect -- reset backoff, hide transient banner and
+        // the armed grace timer, rehydrate state from /api/master so the
+        // user sees authoritative server state rather than a stale cache.
+        _esReconnectAttempt = 0;
+        _clearTransientGrace();
+        hideTransientBanner();
+        if(_esHadOpen && _esKnownBad){
+          showToast("Connection restored");
+        }else if(_esKnownBad){
+          // First open after a page-load where the initial connection had
+          // been failing -- same toast is appropriate.
+          showToast("Connection restored");
+        }
+        _esHadOpen = true;
+        _esKnownBad = false;
+        apiGet("/racelink/api/master").then(r=>{
+          if(r && r.master) updateMaster(r.master);
+          if(r && r.task) updateTask(r.task);
+          if(r && r.gateway) updateGatewayStatus(r.gateway);
+        }).catch(()=>{});
+      };
       es.addEventListener("master", (e)=>{ try{ updateMaster(JSON.parse(e.data)); }catch{} });
       es.addEventListener("task", (e)=>{ try{ updateTask(JSON.parse(e.data)); }catch{} });
+      es.addEventListener("gateway", (e)=>{ try{ updateGatewayStatus(JSON.parse(e.data)); }catch{} });
       es.addEventListener("refresh", async (e)=>{
         try{
           const p = JSON.parse(e.data);
@@ -1082,16 +1267,48 @@ async function openSpecialsDialog(mac){
         }
       });
       es.onerror = () => {
-        // If SSE fails, do a one-shot fetch so UI isn't empty
-        apiGet("/racelink/api/master").then(r=>{
-          if(r.master) updateMaster(r.master);
-          if(r.task) updateTask(r.task);
-        }).catch(()=>{});
+        // Browsers fire onerror both when the stream permanently closes
+        // (readyState == CLOSED, e.g. CORS / initial-open failure) and while
+        // the built-in auto-reconnect is running (readyState == CONNECTING).
+        // The typical RotorHazard restart case hits us in CONNECTING, so we
+        // arm the banner on any non-OPEN state and cancel it in onopen.
+        _esKnownBad = true;
+        if(es.readyState === EventSource.CLOSED){
+          _clearTransientGrace();
+          showTransientBanner("RotorHazard not reachable — retrying…");
+          _scheduleReconnect();
+        }else{
+          _armTransientBanner("RotorHazard not reachable — retrying…");
+        }
       };
     }catch(e){
       console.warn("SSE not available", e);
+      _esKnownBad = true;
+      showTransientBanner("RotorHazard not reachable — retrying…");
+      _scheduleReconnect();
     }
   }
+
+  // Plan P1-1: wire the retry button + seed the banner from /api/gateway on load.
+  (function initGatewayBanner(){
+    const retryBtn = document.getElementById("btnGatewayRetry");
+    if(retryBtn){
+      retryBtn.addEventListener("click", async () => {
+        retryBtn.disabled = true;
+        try{
+          const r = await apiPost("/racelink/api/gateway/retry", {});
+          if(r && r.gateway) updateGatewayStatus(r.gateway);
+        }catch(e){
+          console.warn("Gateway retry failed", e);
+        }finally{
+          retryBtn.disabled = false;
+        }
+      });
+    }
+    apiGet("/racelink/api/gateway").then(r=>{
+      if(r && r.gateway) updateGatewayStatus(r.gateway);
+    }).catch(()=>{});
+  })();
 
   // Buttons
   $("#btnSave").addEventListener("click", async ()=>{

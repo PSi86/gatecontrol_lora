@@ -103,7 +103,10 @@ class _WebContext:
         self.services = services or {}
         self.RL_DeviceGroup = RL_DeviceGroup
         self.logger = logger
-        self.rl_lock = _DefaultLock()
+        # Reuse the state-repository lock when available so HTTP routes and
+        # the transport thread serialize against the same mutex (plan P1-4).
+        state_lock = getattr(state_repository, "lock", None) if state_repository else None
+        self.rl_lock = state_lock if state_lock is not None else _DefaultLock()
         self.device_repo = getattr(state_repository, "devices", None)
         self.group_repo = getattr(state_repository, "groups", None)
 
@@ -117,6 +120,7 @@ class _WebContext:
             else:
                 print(msg)
         except Exception:
+            # swallow-ok: best-effort fallback; caller proceeds with safe default
             print(msg)
 
     def devices(self):
@@ -174,6 +178,22 @@ def create_racelink_web_blueprint(
     sse = SSEBridge(logger=runtime.logger)
     tasks = TaskManager(broadcaster=sse.broadcast, master_state=sse.master, logger=runtime.logger)
     sse.attach_task_manager(tasks)
+    attach_task_manager = getattr(runtime.rl_instance, "attach_task_manager", None)
+    if callable(attach_task_manager):
+        attach_task_manager(tasks)
+
+    # Plan P1-1: push gateway-readiness changes over SSE so the UI can keep a
+    # persistent banner in sync without polling /api/gateway.
+    try:
+        setattr(
+            runtime.rl_instance,
+            "on_gateway_status_changed",
+            lambda status: sse.broadcast("gateway", status),
+        )
+    except Exception:
+        # swallow-ok: not every host exposes the attribute; degrade to polling
+        pass
+
     ctx.sse = sse
     ctx.tasks = tasks
 

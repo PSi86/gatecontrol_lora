@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import logging
 from types import SimpleNamespace
+from typing import Optional
 
 from flask import Flask
 
 from ...app import RaceLinkApp, create_runtime
-from ...core import NullSink, NullSource
+from ...core import HostApi, HostEventBus, HostOptionStore, HostUiNotifier, NullSink, NullSource
 from ...domain import RL_DeviceGroup
 from ...web import RaceLinkWebRuntime, register_racelink_web
 from controller import RaceLink_Host
@@ -44,29 +45,44 @@ class _StandaloneFieldsShim:
 
 
 class StandaloneHostApiShim:
-    """Small host-API shim so the shared controller and web code can run standalone."""
+    """Host-API shim so the shared controller and web code can run standalone.
+
+    Satisfies :class:`racelink.core.HostApi` structurally: exposes ``db`` (an
+    option store), an optional ``ui`` surface, and a callable ``__`` for
+    translations. ``events`` is deliberately ``None`` because the standalone
+    runtime does not emit lifecycle events.
+    """
+
+    # Explicit type annotations aid static checkers verifying HostApi
+    # compliance without forcing nominal inheritance.
+    db: HostOptionStore
+    ui: Optional[HostUiNotifier]
+    events: Optional[HostEventBus]
 
     def __init__(self, app: Flask, config: StandaloneConfig):
         self.app = app
         self.config = config
         self.db = StandaloneOptionStore(config)
         self.ui = _StandaloneUiShim(app)
+        self.events = None
         self.fields = _StandaloneFieldsShim()
         self.race = SimpleNamespace(frequencyset=SimpleNamespace(frequencies='{"b":[],"c":[]}'))
         self._racecontext = SimpleNamespace(rhdata=None, race=SimpleNamespace(current_heat=0))
 
-    def __(self, text):
+    def __(self, text: str) -> str:
         return text
 
 
 def create_standalone_app(config: StandaloneConfig | None = None) -> tuple[Flask, RaceLinkApp]:
     cfg = config or StandaloneConfig.load()
     app = Flask("racelink_standalone")
-    host_api = StandaloneHostApiShim(app, cfg)
+    host_api: HostApi = StandaloneHostApiShim(app, cfg)
     event_source = NullSource()
     data_sink = NullSink()
-    host_api.event_source = event_source
-    host_api.data_sink = data_sink
+    # Auxiliary slots carried through the shim for downstream services;
+    # not part of HostApi itself but tolerated by structural typing.
+    host_api.event_source = event_source  # type: ignore[attr-defined]
+    host_api.data_sink = data_sink  # type: ignore[attr-defined]
 
     rl_app = create_runtime(
         host_api,

@@ -1,8 +1,8 @@
 import pathlib
 import sys
+import tempfile
 import types
 import unittest
-from uuid import uuid4
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -97,7 +97,15 @@ class StandaloneRuntimeTests(unittest.TestCase):
         cls.create_standalone_app = staticmethod(create_standalone_app)
 
     def _temp_path(self, filename: str) -> pathlib.Path:
-        return ROOT / f".standalone-test-{uuid4().hex}-{filename}"
+        """Return a temp-dir path scoped to the current test.
+
+        Using ``tempfile.TemporaryDirectory`` keeps artifacts outside the repo
+        root so a mid-run crash cannot leave ``.standalone-test-*`` files
+        behind for ``git status`` to surface.
+        """
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        return pathlib.Path(tmp.name) / filename
 
     def test_default_config_load_returns_expected_defaults(self):
         config_path = self._temp_path("standalone_config.json")

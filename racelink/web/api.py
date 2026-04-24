@@ -2,12 +2,159 @@
 
 from __future__ import annotations
 
+import time
+
 from flask import jsonify, request
 
-from ..domain import effect_select_options
+from ..domain import effect_select_options, state_scope
 from ..services import OTAWorkflowService, SpecialsService
 from .dto import group_counts, serialize_device
 from .request_helpers import parse_recv3_from_addr, parse_wifi_options
+
+
+def _sse_refresh(ctx, scopes) -> None:
+    """Broadcast an SSE ``refresh`` event derived from a state-scope set.
+
+    Central helper so WebUI topics stay in sync with plugin-side scope tokens
+    (one source of truth in :mod:`racelink.domain.state_scope`).
+    """
+    what = state_scope.sse_what_from_scopes(scopes)
+    if not what:
+        return
+    ctx.sse.broadcast("refresh", {"what": what})
+
+
+def _apply_device_meta_updates(
+    ctx,
+    *,
+    macs: list,
+    new_group,
+    new_name,
+) -> int:
+    """Apply rename + regroup updates (plan P2-4, deadlock-fix).
+
+    **Important locking rule:** we must NOT hold ``ctx.rl_lock`` across the
+    blocking ``setNodeGroupId`` call. That lock is the same one
+    ``GatewayService.handle_ack_event`` acquires when the reply comes back
+    over USB. If we hold it while waiting for the ACK, the reader thread
+    stalls in ``handle_ack_event`` for the previous device, USB frames for
+    the current device stack up in pyserial's RX buffer, and the current
+    device times out even though its ACK is sitting in the queue.
+
+    So the lock scope here is limited to the in-memory mutations. The TX
+    itself runs lock-free (the transport has its own thread safety).
+    """
+    changed = 0
+    for mac in macs:
+        with ctx.rl_lock:
+            dev = ctx.rl_instance.getDeviceFromAddress(mac)
+            if dev is None:
+                continue
+            if new_name and isinstance(new_name, str) and len(macs) == 1:
+                dev.name = new_name
+                changed += 1
+            if new_group is None:
+                continue
+            dev.groupId = int(new_group)
+        # Lock released -- the reader thread can now drain ACKs from the
+        # previous iteration and complete matches for the *current* one.
+        try:
+            ctx.rl_instance.setNodeGroupId(dev)
+            changed += 1
+        except Exception as ex:
+            # swallow-ok: best-effort fallback; caller proceeds with safe default
+            ctx.log(f"RaceLink: setNodeGroupId failed for {mac}: {ex}")
+    return changed
+
+
+def _prepare_discover_target(ctx, *, target_gid, new_group_name):
+    """Create a group if requested and return ``(target_gid, created_gid)``.
+
+    Extracted from ``api_discover`` (plan P2-4) so the locking+group-creation
+    logic can be unit-tested without a Flask request context.
+    """
+    created_gid = None
+    with ctx.rl_lock:
+        if new_group_name:
+            group = ctx.RL_DeviceGroup(str(new_group_name), static_group=0, dev_type=0)
+            if ctx.group_repo is not None:
+                created_gid = ctx.group_repo.append(group)
+            else:
+                ctx.rl_grouplist.append(group)
+                created_gid = len(ctx.rl_grouplist) - 1
+            ctx.log(f"RaceLink: Created group '{new_group_name}' (id={created_gid})")
+        if target_gid is None and created_gid is not None:
+            target_gid = created_gid
+    return target_gid, created_gid
+
+
+def _resolve_special_config_request(ctx, body, specials_service):
+    """Parse+validate a ``/api/specials/config`` body. Returns ``(ok, payload, status)``.
+
+    On success, ``payload`` is a dict with the validated request data; on
+    failure, ``payload`` is an error dict and ``status`` is the HTTP code.
+    Extracted from ``api_specials_config`` (plan P2-4).
+    """
+    mac = body.get("mac", None)
+    key = body.get("key", None)
+    value = body.get("value", None)
+    if not mac or not key:
+        return False, {"ok": False, "error": "missing mac/key"}, 400
+
+    recv3 = parse_recv3_from_addr(mac)
+    if not recv3:
+        return False, {"ok": False, "error": "invalid mac/address"}, 400
+    if recv3 == b"\xFF\xFF\xFF":
+        return False, {"ok": False, "error": "broadcast not allowed for config"}, 400
+
+    try:
+        value_int = int(value)
+    except Exception:
+        # swallow-ok: bad user input -> 400, not a bug
+        return False, {"ok": False, "error": "invalid value"}, 400
+
+    mac_str = str(mac).upper()
+    with ctx.rl_lock:
+        dev = ctx.rl_instance.getDeviceFromAddress(mac_str)
+        if not dev:
+            return False, {"ok": False, "error": "device not found"}, 404
+        option_info = specials_service.resolve_option(dev, key)
+
+    if not option_info:
+        return False, {"ok": False, "error": "option not supported for device"}, 400
+    option = option_info.get("option", None)
+    if option is None:
+        return False, {"ok": False, "error": "option not writable"}, 400
+    try:
+        specials_service.validate_option_value(option_info, value_int)
+    except ValueError as ex:
+        return False, {"ok": False, "error": str(ex)}, 400
+
+    return True, {
+        "mac_str": mac_str,
+        "key": key,
+        "recv3": recv3,
+        "option": option,
+        "value_int": value_int,
+    }, 200
+
+
+def _gateway_status(ctx) -> dict:
+    """Return a UI-friendly gateway readiness snapshot (plan P1-1)."""
+    rl = ctx.rl_instance
+    getter = getattr(rl, "gateway_status", None)
+    if callable(getter):
+        try:
+            return getter()
+        except Exception:
+            # swallow-ok: best-effort fallback; caller proceeds with safe default
+            # Fall through to the synthetic snapshot below rather than 500-ing.
+            pass
+    return {
+        "ready": bool(getattr(rl, "ready", False)),
+        "last_error": None,
+        "failure_count": 0,
+    }
 
 
 def register_api_routes(bp, ctx):
@@ -58,7 +205,42 @@ def register_api_routes(bp, ctx):
 
     @bp.route("/api/master", methods=["GET"])
     def api_master():
-        return jsonify({"ok": True, "master": ctx.sse.master.snapshot(), "task": ctx.tasks.snapshot()})
+        gateway = _gateway_status(ctx)
+        return jsonify({
+            "ok": True,
+            "master": ctx.sse.master.snapshot(),
+            "task": ctx.tasks.snapshot(),
+            "gateway": gateway,
+        })
+
+    @bp.route("/api/gateway", methods=["GET"])
+    def api_gateway_status():
+        return jsonify({"ok": True, "gateway": _gateway_status(ctx)})
+
+    @bp.route("/api/health", methods=["GET"])
+    def api_health():
+        """Cheap liveness probe for the WebUI's auto-reconnect path.
+
+        Kept separate from ``/api/master`` so the browser can hammer it during
+        reconnect without paying for the full state roundtrip.
+        """
+        rl = getattr(ctx, "rl_instance", None)
+        startup_done = bool(getattr(rl, "_startup_done", False)) if rl else True
+        return jsonify({
+            "ok": True,
+            "ts": time.time(),
+            "phase": "ready" if startup_done else "booting",
+        })
+
+    @bp.route("/api/gateway/retry", methods=["POST"])
+    def api_gateway_retry():
+        rl = ctx.rl_instance
+        retry = getattr(rl, "retry_gateway", None)
+        if callable(retry):
+            status = retry()
+        else:  # pragma: no cover - legacy host without retry helper
+            status = _gateway_status(ctx)
+        return jsonify({"ok": bool(status.get("ready")), "gateway": status})
 
     @bp.route("/api/task", methods=["GET"])
     def api_task():
@@ -75,20 +257,11 @@ def register_api_routes(bp, ctx):
             return ctx.tasks.busy_response()
 
         body = request.get_json(silent=True) or {}
-        target_gid = body.get("targetGroupId", None)
-        new_group_name = body.get("newGroupName", None)
-        created_gid = None
-        with ctx.rl_lock:
-            if new_group_name:
-                group = ctx.RL_DeviceGroup(str(new_group_name), static_group=0, dev_type=0)
-                if ctx.group_repo is not None:
-                    created_gid = ctx.group_repo.append(group)
-                else:
-                    ctx.rl_grouplist.append(group)
-                    created_gid = len(ctx.rl_grouplist) - 1
-                ctx.log(f"RaceLink: Created group '{new_group_name}' (id={created_gid})")
-            if target_gid is None and created_gid is not None:
-                target_gid = created_gid
+        target_gid, created_gid = _prepare_discover_target(
+            ctx,
+            target_gid=body.get("targetGroupId", None),
+            new_group_name=body.get("newGroupName", None),
+        )
 
         def do_discover():
             add_to_group = -1
@@ -140,30 +313,31 @@ def register_api_routes(bp, ctx):
         new_group = body.get("groupId", None)
         new_name = body.get("name", None)
 
-        changed = 0
         if new_group is not None:
             ctx.sse.ensure_transport_hooked(ctx.rl_instance)
-        with ctx.rl_lock:
-            for mac in macs:
-                dev = ctx.rl_instance.getDeviceFromAddress(mac)
-                if not dev:
-                    continue
-                if new_name and isinstance(new_name, str) and len(macs) == 1:
-                    dev.name = new_name
-                    changed += 1
-                if new_group is not None:
-                    try:
-                        dev.groupId = int(new_group)
-                        ctx.rl_instance.setNodeGroupId(dev)
-                        changed += 1
-                    except Exception as ex:
-                        ctx.log(f"RaceLink: setNodeGroupId failed for {mac}: {ex}")
-        try:
-            ctx.rl_instance.save_to_db({"manual": True})
-        except Exception:
-            pass
 
-        ctx.sse.broadcast("refresh", {"what": ["groups", "devices"]})
+        changed = _apply_device_meta_updates(
+            ctx,
+            macs=macs,
+            new_group=new_group,
+            new_name=new_name,
+        )
+
+        scopes: set[str] = set()
+        if new_group is not None:
+            scopes.add(state_scope.DEVICE_MEMBERSHIP)
+        if new_name is not None:
+            scopes.add(state_scope.DEVICES)
+        if not scopes:
+            scopes.add(state_scope.NONE)
+
+        try:
+            ctx.rl_instance.save_to_db({"manual": True}, scopes=scopes)
+        except Exception:
+            # swallow-ok: best-effort fallback; caller proceeds with safe default
+            ctx.log("RaceLink: save_to_db after update-meta failed")
+
+        _sse_refresh(ctx, scopes)
         return jsonify({"ok": True, "changed": changed})
 
     @bp.route("/api/groups/create", methods=["POST"])
@@ -180,10 +354,13 @@ def register_api_routes(bp, ctx):
                 ctx.rl_grouplist.append(ctx.RL_DeviceGroup(name, static_group=0, dev_type=dev_type))
                 gid = len(ctx.rl_grouplist) - 1
             try:
-                ctx.rl_instance.save_to_db({"manual": True})
+                ctx.rl_instance.save_to_db(
+                    {"manual": True}, scopes={state_scope.GROUPS}
+                )
             except Exception:
+                # swallow-ok: best-effort fallback; caller proceeds with safe default
                 pass
-        ctx.sse.broadcast("refresh", {"what": ["groups"]})
+        _sse_refresh(ctx, {state_scope.GROUPS})
         return jsonify({"ok": True, "id": gid})
 
     @bp.route("/api/groups/rename", methods=["POST"])
@@ -199,10 +376,13 @@ def register_api_routes(bp, ctx):
                 return jsonify({"ok": False, "error": "static group"}), 400
             group.name = name or group.name
             try:
-                ctx.rl_instance.save_to_db({"manual": True})
+                ctx.rl_instance.save_to_db(
+                    {"manual": True}, scopes={state_scope.GROUPS}
+                )
             except Exception:
+                # swallow-ok: best-effort fallback; caller proceeds with safe default
                 pass
-        ctx.sse.broadcast("refresh", {"what": ["groups"]})
+        _sse_refresh(ctx, {state_scope.GROUPS})
         return jsonify({"ok": True})
 
     @bp.route("/api/groups/delete", methods=["POST"])
@@ -223,10 +403,13 @@ def register_api_routes(bp, ctx):
             else:
                 del ctx.rl_grouplist[gid]
             try:
-                ctx.rl_instance.save_to_db({"manual": True})
+                ctx.rl_instance.save_to_db(
+                    {"manual": True}, scopes={state_scope.GROUPS}
+                )
             except Exception:
+                # swallow-ok: best-effort fallback; caller proceeds with safe default
                 pass
-        ctx.sse.broadcast("refresh", {"what": ["groups"]})
+        _sse_refresh(ctx, {state_scope.GROUPS})
         return jsonify({"ok": True})
 
     @bp.route("/api/groups/force", methods=["POST"])
@@ -236,9 +419,10 @@ def register_api_routes(bp, ctx):
         try:
             ctx.rl_instance.forceGroups(args=None, sanityCheck=True)
         except Exception as ex:
+            # swallow-ok: best-effort fallback; caller proceeds with safe default
             ctx.log(f"RaceLink: forceGroups failed: {ex}")
             return jsonify({"ok": False, "error": str(ex)}), 500
-        ctx.sse.broadcast("refresh", {"what": ["groups", "devices"]})
+        _sse_refresh(ctx, {state_scope.DEVICE_MEMBERSHIP})
         return jsonify({"ok": True})
 
     @bp.route("/api/save", methods=["POST"])
@@ -246,8 +430,11 @@ def register_api_routes(bp, ctx):
         if ctx.tasks.is_running():
             return ctx.tasks.busy_response()
         try:
-            ctx.rl_instance.save_to_db({"manual": True})
+            ctx.rl_instance.save_to_db(
+                {"manual": True}, scopes={state_scope.NONE}
+            )
         except Exception as ex:
+            # swallow-ok: best-effort fallback; caller proceeds with safe default
             return jsonify({"ok": False, "error": str(ex)}), 500
         return jsonify({"ok": True})
 
@@ -258,8 +445,9 @@ def register_api_routes(bp, ctx):
         try:
             ctx.rl_instance.load_from_db()
         except Exception as ex:
+            # swallow-ok: best-effort fallback; caller proceeds with safe default
             return jsonify({"ok": False, "error": str(ex)}), 500
-        ctx.sse.broadcast("refresh", {"what": ["groups", "devices"]})
+        _sse_refresh(ctx, {state_scope.FULL})
         return jsonify({"ok": True})
 
     @bp.route("/api/config", methods=["POST"])
@@ -288,6 +476,7 @@ def register_api_routes(bp, ctx):
             data2 = int(body.get("data2", 0)) & 0xFF
             data3 = int(body.get("data3", 0)) & 0xFF
         except Exception:
+            # swallow-ok: best-effort fallback; caller proceeds with safe default
             return jsonify({"ok": False, "error": "invalid option/data"}), 400
 
         if option not in {0x01, 0x03, 0x04, 0x80, 0x81}:
@@ -299,6 +488,7 @@ def register_api_routes(bp, ctx):
             else:
                 ctx.rl_instance.transport.send_config(recv3=recv3, option=option, data0=data0, data1=data1, data2=data2, data3=data3)
         except Exception as ex:
+            # swallow-ok: best-effort fallback; caller proceeds with safe default
             ctx.log(f"RaceLink: config failed: {ex}")
             return jsonify({"ok": False, "error": str(ex)}), 500
 
@@ -311,39 +501,15 @@ def register_api_routes(bp, ctx):
             return ctx.tasks.busy_response()
 
         body = request.get_json(silent=True) or {}
-        mac = body.get("mac", None)
-        key = body.get("key", None)
-        value = body.get("value", None)
-        if not mac or not key:
-            return jsonify({"ok": False, "error": "missing mac/key"}), 400
+        ok, payload, status = _resolve_special_config_request(ctx, body, specials_service)
+        if not ok:
+            return jsonify(payload), status
 
-        recv3 = parse_recv3_from_addr(mac)
-        if not recv3:
-            return jsonify({"ok": False, "error": "invalid mac/address"}), 400
-        if recv3 == b"\xFF\xFF\xFF":
-            return jsonify({"ok": False, "error": "broadcast not allowed for config"}), 400
-
-        try:
-            value_int = int(value)
-        except Exception:
-            return jsonify({"ok": False, "error": "invalid value"}), 400
-
-        mac_str = str(mac).upper()
-        with ctx.rl_lock:
-            dev = ctx.rl_instance.getDeviceFromAddress(mac_str)
-            if not dev:
-                return jsonify({"ok": False, "error": "device not found"}), 404
-            option_info = specials_service.resolve_option(dev, key)
-
-        if not option_info:
-            return jsonify({"ok": False, "error": "option not supported for device"}), 400
-        option = option_info.get("option", None)
-        if option is None:
-            return jsonify({"ok": False, "error": "option not writable"}), 400
-        try:
-            specials_service.validate_option_value(option_info, value_int)
-        except ValueError as ex:
-            return jsonify({"ok": False, "error": str(ex)}), 400
+        mac_str = payload["mac_str"]
+        key = payload["key"]
+        recv3 = payload["recv3"]
+        option = payload["option"]
+        value_int = payload["value_int"]
 
         ctx.sse.ensure_transport_hooked(ctx.rl_instance)
 
@@ -360,9 +526,13 @@ def register_api_routes(bp, ctx):
                     dev2.specials = {}
                 dev2.specials[key] = int(value_int) & 0xFF
                 try:
-                    ctx.rl_instance.save_to_db({"manual": True})
+                    ctx.rl_instance.save_to_db(
+                        {"manual": True}, scopes={state_scope.DEVICE_SPECIALS}
+                    )
                 except Exception:
+                    # swallow-ok: best-effort fallback; caller proceeds with safe default
                     pass
+            _sse_refresh(ctx, {state_scope.DEVICE_SPECIALS})
             return {"mac": mac_str, "key": key, "value": value_int}
 
         task = ctx.tasks.start("special_config", do_special_config, meta={"mac": mac_str, "key": key, "message": "Preparing special config"})
@@ -441,6 +611,7 @@ def register_api_routes(bp, ctx):
             try:
                 return int(value)
             except Exception:
+                # swallow-ok: best-effort fallback; caller proceeds with safe default
                 return default
 
         flags = _toint(body.get("flags", None), None)
@@ -469,6 +640,7 @@ def register_api_routes(bp, ctx):
             else:
                 return jsonify({"ok": False, "error": "missing macs or groupId"}), 400
         except Exception as ex:
+            # swallow-ok: best-effort fallback; caller proceeds with safe default
             ctx.log(f"RaceLink: control failed: {ex}")
             return jsonify({"ok": False, "error": str(ex)}), 500
 
@@ -483,6 +655,7 @@ def register_api_routes(bp, ctx):
             info = ota_service.store_upload(request.files.get("file", None), (request.form.get("kind") or "").strip().lower())
             return jsonify({"ok": True, "file": {k: info[k] for k in ("id", "kind", "name", "size", "sha256", "uploaded_ts")}})
         except Exception as ex:
+            # swallow-ok: best-effort fallback; caller proceeds with safe default
             return jsonify({"ok": False, "error": str(ex)}), 400
 
     @bp.route("/api/presets/upload", methods=["POST"])
@@ -494,6 +667,7 @@ def register_api_routes(bp, ctx):
             info = presets_service.store_uploaded_file(file_obj)
             return jsonify({"ok": True, "file": {"name": info["name"], "size": info["size"], "saved_ts": info["saved_ts"]}, "files": presets_service.list_files()})
         except Exception as ex:
+            # swallow-ok: best-effort fallback; caller proceeds with safe default
             return jsonify({"ok": False, "error": str(ex)}), 400
 
     @bp.route("/api/presets/list", methods=["GET"])
@@ -596,6 +770,7 @@ def register_api_routes(bp, ctx):
         try:
             retries = int(body.get("retries") or 3)
         except Exception:
+            # swallow-ok: best-effort fallback; caller proceeds with safe default
             retries = 3
         retries = max(1, min(retries, 10))
         wifi = parse_wifi_options(body, ota_service)

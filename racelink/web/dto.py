@@ -55,6 +55,7 @@ def group_counts(devices: Iterable) -> dict:
             gid = int(getattr(dev, "groupId", 0) or 0)
             counts[gid] = counts.get(gid, 0) + 1
     except Exception:
+        # swallow-ok: best-effort fallback; caller proceeds with safe default
         pass
     return counts
 
@@ -67,5 +68,6 @@ def wled_count(devices: Iterable) -> int:
             if is_wled_dev_type(dtype):
                 count += 1
     except Exception:
+        # swallow-ok: best-effort fallback; caller proceeds with safe default
         pass
     return count

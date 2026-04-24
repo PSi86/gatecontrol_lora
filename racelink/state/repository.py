@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+
 from .defaults import default_backup_devices, default_backup_groups
 
 
@@ -79,6 +81,13 @@ class GroupRepository:
 
 
 class StateRepository:
+    """Holds device/group repositories together with a shared mutation lock.
+
+    The lock (``self.lock``) is a re-entrant lock protecting mutations to
+    devices and groups (see plan P1-4). Services and web handlers that both
+    read and write state acquire it as ``with state_repository.lock: ...``.
+    """
+
     def __init__(
         self,
         *,
@@ -86,11 +95,17 @@ class StateRepository:
         groups=None,
         backup_devices=None,
         backup_groups=None,
+        lock: "threading.RLock | None" = None,
     ):
         self.devices = DeviceRepository(devices if devices is not None else [])
         self.groups = GroupRepository(groups if groups is not None else [])
         self.backup_devices = DeviceRepository(backup_devices if backup_devices is not None else default_backup_devices())
         self.backup_groups = GroupRepository(backup_groups if backup_groups is not None else default_backup_groups())
+        self._lock = lock if lock is not None else threading.RLock()
+
+    @property
+    def lock(self):
+        return self._lock
 
 
 _runtime_state_repository = StateRepository()

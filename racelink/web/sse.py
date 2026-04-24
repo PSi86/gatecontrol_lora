@@ -3,29 +3,36 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 
 from flask import Response, stream_with_context
+
+logger = logging.getLogger(__name__)
 
 try:
     from gevent.lock import Semaphore as _RLLock  # type: ignore
 
     _DefaultLock = _RLLock
 except Exception:  # pragma: no cover
+    # swallow-ok: best-effort fallback; caller proceeds with safe default
     try:
         from gevent.lock import RLock as _RLLock  # type: ignore
 
         _DefaultLock = _RLLock
     except Exception:  # pragma: no cover
+        # swallow-ok: gevent absent -> use threading.Lock
         _DefaultLock = threading.Lock
 
 try:
     from gevent.queue import Queue as _RLQueue  # type: ignore
 except Exception:  # pragma: no cover
+    # swallow-ok: best-effort fallback; caller proceeds with safe default
     try:
         from queue import Queue as _RLQueue  # type: ignore
     except Exception:  # pragma: no cover
+        # swallow-ok: no queue impl available -> callers handle None
         _RLQueue = None
 
 from ..transport import EV_ERROR, EV_RX_WINDOW_CLOSED, EV_RX_WINDOW_OPEN, EV_TX_DONE
@@ -80,6 +87,7 @@ class SSEBridge:
             else:
                 print(msg)
         except Exception:
+            # swallow-ok: logger implementations vary - fall back to print
             print(msg)
 
     def broadcast(self, event_name: str, payload):
@@ -88,12 +96,14 @@ class SSEBridge:
             for q in list(self._clients):
                 try:
                     q.put((event_name, payload), timeout=0.01)
-                except Exception:
+                except Exception as ex:
+                    logger.debug("SSE queue put failed for %r, dropping client: %s", event_name, ex)
                     dead.append(q)
             for q in dead:
                 try:
                     self._clients.remove(q)
-                except Exception:
+                except KeyError:
+                    # Client was already removed by another iteration.
                     pass
 
     def ensure_transport_hooked(self, rl_instance):
@@ -111,6 +121,7 @@ class SSEBridge:
                 self.log("RaceLink: transport event listener installed (add_listener)")
                 return
             except Exception as ex:
+                # swallow-ok: best-effort fallback; caller proceeds with safe default
                 self.log(f"RaceLink: add_listener failed, falling back to on_event: {ex}")
 
         if not hasattr(transport, "on_event"):
@@ -122,18 +133,19 @@ class SSEBridge:
             try:
                 self.on_transport_event(ev)
             except Exception:
-                pass
+                logger.exception("RaceLink: SSE transport handler raised")
             try:
                 if prev and prev is not _mux:
                     prev(ev)
             except Exception:
-                pass
+                logger.exception("RaceLink: previous on_event handler raised")
 
         try:
             transport.on_event = _mux
             self._hooked_transport["ok"] = True
             self.log("RaceLink: transport event hook installed")
         except Exception as ex:
+            # swallow-ok: best-effort fallback; caller proceeds with safe default
             self.log(f"RaceLink: transport hook failed: {ex}")
 
     def _task_is_running(self):
@@ -204,7 +216,7 @@ class SSEBridge:
                 if isinstance(raw, (bytes, bytearray)):
                     raw = raw.hex().upper()
             except Exception:
-                pass
+                logger.debug("SSE: unable to stringify EV_ERROR payload", exc_info=True)
             self.master.set(state="ERROR", last_event="USB_ERROR", last_error=str(raw))
             if self._task_is_running():
                 self._task_update(last_error=str(raw))
@@ -244,7 +256,7 @@ class SSEBridge:
                 q.put(("master", self.master.snapshot()), timeout=0.01)
                 q.put(("task", task_manager.snapshot()), timeout=0.01)
             except Exception:
-                pass
+                logger.debug("SSE: unable to seed initial client snapshots", exc_info=True)
 
             def _encode(event_name: str, payload) -> str:
                 return f"event: {event_name}\ndata: {json.dumps(payload, separators=(',', ':'))}\n\n"
@@ -257,6 +269,7 @@ class SSEBridge:
                         try:
                             item = q.get(timeout=1.0)
                         except Exception:
+                            # swallow-ok: queue-get timeout/empty -> idle tick, send ping
                             item = None
 
                         now = time.time()
@@ -272,7 +285,8 @@ class SSEBridge:
                     with self._clients_lock:
                         try:
                             self._clients.remove(q)
-                        except Exception:
+                        except KeyError:
+                            # Client already removed by broadcast() cleanup.
                             pass
 
             headers = {

@@ -22,11 +22,13 @@ class HostWifiService:
                 if os.path.isdir(os.path.join(base, name, "wireless")):
                     interfaces.append(name)
         except Exception:
+            # swallow-ok: best-effort fallback; caller proceeds with safe default
             interfaces = []
         if not interfaces:
             try:
                 interfaces = [name for name in os.listdir(base) if not name.startswith(".")]
             except Exception:
+                # swallow-ok: best-effort fallback; caller proceeds with safe default
                 interfaces = []
         return sorted(set(interfaces))
 
@@ -43,6 +45,7 @@ class HostWifiService:
                 return "enabled" in raw and "disabled" not in raw
             return (proc.stdout or "").strip().lower() == "enabled"
         except Exception:
+            # swallow-ok: best-effort fallback; caller proceeds with safe default
             return False
 
     def set_radio(self, enabled: bool) -> None:
@@ -117,6 +120,7 @@ class HostWifiService:
             try:
                 self.rescan(iface)
             except Exception:
+                # swallow-ok: best-effort fallback; caller proceeds with safe default
                 pass
 
             if ssid:

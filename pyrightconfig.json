@@ -1,0 +1,19 @@
+{
+  "include": [
+    "controller.py",
+    "racelink/core",
+    "racelink/services",
+    "racelink/state",
+    "racelink/integrations/standalone"
+  ],
+  "exclude": [
+    "**/__pycache__",
+    ".venv",
+    "build",
+    "dist",
+    "tests"
+  ],
+  "reportMissingImports": "warning",
+  "pythonVersion": "3.11",
+  "typeCheckingMode": "basic"
+}

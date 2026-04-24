@@ -20,6 +20,8 @@ from .specials import (
     effect_select_options,
     get_specials_config,
 )
+from . import state_scope
+from .state_scope import normalize_scopes, sse_what_from_scopes
 
 __all__ = [
     "RL_Device",
@@ -40,6 +42,9 @@ __all__ = [
     "get_special_keys_for_caps",
     "get_specials_config",
     "is_wled_dev_type",
+    "normalize_scopes",
+    "sse_what_from_scopes",
+    "state_scope",
     "rl_backup_devicelist",
     "rl_backup_grouplist",
     "rl_devicelist",

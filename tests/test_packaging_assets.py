@@ -6,6 +6,7 @@ import unittest
 import zipfile
 
 from racelink import _build_backend
+from racelink._version import VERSION
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -13,8 +14,16 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 class PackagingAssetsTests(unittest.TestCase):
     def test_artifact_filenames_are_stable(self):
-        self.assertEqual(_build_backend._wheel_name(), "racelink_host-0.1.0-py3-none-any.whl")
-        self.assertEqual(_build_backend._sdist_name(), "racelink-host-0.1.0.tar.gz")
+        # Track the canonical version rather than hardcoding it -- the
+        # packaging contract is "name follows VERSION", not "name is 0.1.0".
+        self.assertEqual(
+            _build_backend._wheel_name(),
+            f"racelink_host-{VERSION}-py3-none-any.whl",
+        )
+        self.assertEqual(
+            _build_backend._sdist_name(),
+            f"racelink-host-{VERSION}.tar.gz",
+        )
 
     def test_iter_sources_includes_webui_assets(self):
         rel_paths = {rel_path for _src, rel_path in _build_backend._iter_sources()}

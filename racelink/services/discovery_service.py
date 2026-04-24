@@ -19,7 +19,8 @@ class DiscoveryService:
         return getattr(self.controller, "transport", None)
 
     def discover_devices(self, *, group_filter=255, target_device=None, add_to_group=-1) -> dict:
-        if not self.transport:
+        transport = self.transport
+        if transport is None:
             logger.warning("getDevices: communicator not ready")
             return {"found": 0, "responders": set(), "assigned_group": None}
 
@@ -50,20 +51,27 @@ class DiscoveryService:
                             responders.add(sender_hex.upper())
                     return True
             except Exception:
+                # swallow-ok: best-effort fallback; caller proceeds with safe default
                 pass
             return False
 
         logger.debug("GET_DEVICES -> recv3=%s group=%d flags=%d", recv3.hex().upper(), group_id, 0)
 
         try:
-            self.transport.drain_events(0.0)
+            transport.drain_events(0.0)
         except Exception:
-            pass
+            logger.debug("RaceLink: drain_events before discover raised", exc_info=True)
 
-        self.gateway_service.wait_rx_window(
-            lambda: self.transport.send_get_devices(recv3=recv3, group_id=group_id, flags=0),
-            collect_pred=_collect,
-            fail_safe_s=8.0,
+        # Plan Phase C (revised): GET_DEVICES is the one call where the
+        # responder count is genuinely unknown (a fresh device could answer),
+        # so we keep the hard ceiling at 5 s. Idle-based termination still
+        # lets us return early once the last late-comer has gone quiet for
+        # 600 ms.
+        self.gateway_service.send_and_collect(
+            lambda: transport.send_get_devices(recv3=recv3, group_id=group_id, flags=0),
+            _collect,
+            idle_timeout_s=0.6,
+            max_timeout_s=5.0,
         )
 
         assigned_group = None

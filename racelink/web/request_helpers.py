@@ -9,6 +9,7 @@ def parse_recv3_from_addr(addr_str):
     try:
         value = str(addr_str)
     except Exception:
+        # swallow-ok: best-effort fallback; caller proceeds with safe default
         return None
     hexchars = "0123456789abcdefABCDEF"
     value = "".join(ch for ch in value if ch in hexchars)
@@ -17,6 +18,7 @@ def parse_recv3_from_addr(addr_str):
     try:
         return bytes.fromhex(value[-6:])
     except Exception:
+        # swallow-ok: best-effort fallback; caller proceeds with safe default
         return None
 
 

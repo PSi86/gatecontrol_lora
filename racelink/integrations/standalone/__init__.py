@@ -1,6 +1,12 @@
 """Standalone runtime integration package placeholder."""
 
+from typing import TYPE_CHECKING
+
 from .config import StandaloneConfig, StandaloneOptionStore
+
+if TYPE_CHECKING:  # pragma: no cover - import purely for static checkers
+    from .bootstrap import build_standalone_runtime
+    from .webapp import create_standalone_app, run_standalone
 
 __all__ = [
     "build_standalone_runtime",
