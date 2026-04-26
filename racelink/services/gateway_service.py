@@ -328,10 +328,10 @@ class GatewayService:
         recv3_hex = recv3.hex().upper() if isinstance(recv3, (bytes, bytearray)) else ""
         dev = None
         if recv3_hex and recv3_hex != "FFFFFF":
-            self.controller._pending_config[recv3_hex] = {
-                "option": int(option) & 0xFF,
-                "data0": int(data0) & 0xFF,
-            }
+            # Locked stash — paired with ``take_pending_config`` on the RX
+            # path below. See controller docstring for the threading
+            # contract.
+            self.controller.stash_pending_config(recv3_hex, option, data0)
             dev = self.controller.getDeviceFromAddress(recv3_hex)
             if dev and wait_for_ack:
                 dev.ack_clear()
@@ -385,7 +385,17 @@ class GatewayService:
         if device is None:
             assert groupId is not None  # narrowed by the guard above
             group_filter = int(groupId)
-            targets = [dev for dev in self.controller.device_repository.list() if int(getattr(dev, "groupId", 0) or 0) == group_filter]
+            # A6: snapshot the matching devices under the state lock so a
+            # concurrent IDENTIFY append / device delete cannot raise on
+            # iteration. The list comprehension materialises the result
+            # immediately, so the lock can be released before the slower
+            # downstream stream-send work begins.
+            with self._state_lock():
+                targets = [
+                    dev
+                    for dev in self.controller.device_repository.list()
+                    if int(getattr(dev, "groupId", 0) or 0) == group_filter
+                ]
         else:
             targets = [device]
 
@@ -610,7 +620,11 @@ class GatewayService:
                 dev.ack_update(int(ack_of), int(ack_status), ack_seq, host_rssi, host_snr)
 
                 if int(ack_of) == int(LP.OPC_CONFIG) and int(ack_status) == 0:
-                    pending = self.controller._pending_config.pop(sender3_hex, None)
+                    # Locked pop — paired with ``stash_pending_config`` on
+                    # the TX path. ``_apply_config_update`` runs outside
+                    # the pending-config lock so a slow ConfigService
+                    # callback cannot delay the next stash.
+                    pending = self.controller.take_pending_config(sender3_hex)
                     if pending:
                         self.controller._apply_config_update(dev, pending.get("option", 0), pending.get("data0", 0))
 
@@ -685,13 +699,15 @@ class GatewayService:
             if not dev:
                 return
 
-            self.controller._pending_expect = {
-                "dev": dev,
-                "rule": rule,
-                "opcode7": opcode7,
-                "sender_last3": (dev.addr or "").upper()[-6:],
-                "ts": time.time(),
-            }
+            # A5: stash via the controller helper so the TX-listener
+            # write is atomic against the RX-reader's match/clear path.
+            self.controller.set_pending_expect(
+                dev=dev,
+                rule=rule,
+                opcode7=opcode7,
+                sender_last3=(dev.addr or "").upper()[-6:],
+                ts=time.time(),
+            )
         except Exception:
             logger.exception("RaceLink: TX hook failed")
 
@@ -964,7 +980,10 @@ class GatewayService:
         threading.Thread(target=_reconnect, daemon=True).start()
 
     def pending_try_match(self, ev: dict) -> None:
-        p = self.controller._pending_expect
+        # A5: snapshot via the controller helper, then use compare-and-
+        # clear semantics so a freshly-stamped expectation from the TX
+        # thread cannot be silently wiped by our clear below.
+        p = self.controller.read_pending_expect()
         if not p:
             return
 
@@ -978,26 +997,34 @@ class GatewayService:
             opcode7 = int(p.get("opcode7", -1)) & 0x7F
             policy = int(response_policy(opcode7))
 
+            matched = False
             if policy == int(protocol_rules.RESP_ACK):
                 if int(ev.get("opc", -1)) == int(LP.OPC_ACK) and int(ev.get("ack_of", -2)) == opcode7:
-                    dev = p.get("dev")
-                    with self._state_lock():
-                        if dev:
-                            dev.mark_online()
-                        self.controller._pending_expect = None
+                    matched = True
             elif policy == int(protocol_rules.RESP_SPECIFIC):
                 rsp_opc = int(response_opcode(opcode7))
                 if int(ev.get("opc", -1)) == rsp_opc:
-                    dev = p.get("dev")
-                    with self._state_lock():
-                        if dev:
-                            dev.mark_online()
-                        self.controller._pending_expect = None
+                    matched = True
+
+            if matched:
+                dev = p.get("dev")
+                with self._state_lock():
+                    if dev:
+                        dev.mark_online()
+                # CAS-clear: only drops the expectation if it's still the
+                # one we matched on. If the TX thread has stamped a new
+                # one mid-flight, leave it alone.
+                self.controller.clear_pending_expect_if(p)
         except Exception:
             logger.exception("RaceLink: pending match failed")
 
     def pending_window_closed(self, ev: dict) -> None:
-        p = self.controller._pending_expect
+        # A5: snapshot + CAS-clear, same shape as pending_try_match. A
+        # window-closed without a reply means *the expectation we were
+        # tracking* timed out — if the TX thread has since stamped a
+        # new one, that new request is for a different operation and
+        # must not be wiped.
+        p = self.controller.read_pending_expect()
         if not p:
             return
 
@@ -1010,4 +1037,4 @@ class GatewayService:
                 if dev:
                     dev.mark_offline(f"Missing reply ({name})")
         finally:
-            self.controller._pending_expect = None
+            self.controller.clear_pending_expect_if(p)

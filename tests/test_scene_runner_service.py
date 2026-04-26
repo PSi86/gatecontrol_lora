@@ -49,10 +49,13 @@ class _FakeController:
 class _RecordingControlService:
     """Captures every send_* call so tests can assert on routing + flags."""
 
-    def __init__(self, *, fail_kinds=()):
+    def __init__(self, *, fail_kinds=(), fail_offsets_for=()):
         self.preset_calls = []
         self.control_calls = []
+        self.offset_calls = []
         self._fail_kinds = set(fail_kinds)
+        # set of group ids whose send_offset should return False
+        self._fail_offsets_for = set(int(g) for g in fail_offsets_for)
 
     def send_wled_preset(self, *, targetDevice=None, targetGroup=None, params=None):
         self.preset_calls.append({
@@ -69,6 +72,17 @@ class _RecordingControlService:
             "params": dict(params or {}),
         })
         return "wled_control" not in self._fail_kinds
+
+    def send_offset(self, *, targetDevice=None, targetGroup=None, mode="none", **mode_params):
+        self.offset_calls.append({
+            "targetDevice": getattr(targetDevice, "addr", None),
+            "targetGroup": targetGroup,
+            "mode": mode,
+            "params": dict(mode_params),
+        })
+        if targetGroup is not None and int(targetGroup) in self._fail_offsets_for:
+            return False
+        return True
 
 
 class _RecordingSyncService:
@@ -477,6 +491,348 @@ class SceneRunnerProgressCallbackTests(_SceneFixture):
         result = runner.run("b")
         self.assertTrue(result.ok)
         self.assertEqual(len(sync.sync_calls), 1)
+
+
+class OffsetGroupContainerTests(_SceneFixture):
+    """Container dispatch for the ``offset_group`` action kind.
+
+    The runner plans the OPC_OFFSET sequence via the optimizer, then
+    dispatches each child action with OFFSET_MODE forced on. No OPC_SYNC
+    is auto-emitted — scenes use an explicit ``sync`` action.
+    """
+
+    def _preset(self, **flags):
+        flag_dict = {"arm_on_sync": False, "force_tt0": False, "force_reapply": False, "offset_mode": False}
+        flag_dict.update(flags)
+        return _StubRlPresets([{
+            "id": 1,
+            "key": "cascade_red",
+            "label": "Cascade Red",
+            "params": {"mode": 1, "color1": [255, 0, 0]},
+            "flags": flag_dict,
+        }])
+
+    def _container(self, *, groups, offset, children):
+        return {
+            "kind": "offset_group",
+            "groups": groups,
+            "offset": offset,
+            "actions": children,
+        }
+
+    def _wled_control_child(self, target=None, params=None):
+        return {
+            "kind": "wled_control",
+            "target": target or {"kind": "scope"},
+            "params": params or {"mode": 5, "brightness": 200},
+        }
+
+    def test_offset_group_all_groups_linear_uses_broadcast_formula(self):
+        """The big win: one broadcast OPC_OFFSET (mode=linear) configures
+        every device. Plus one broadcast OPC_CONTROL per child."""
+        self.scenes.create(label="LinearAll", actions=[
+            self._container(
+                groups="all",
+                offset={"mode": "linear", "base_ms": 0, "step_ms": 100},
+                children=[self._wled_control_child()],
+            ),
+        ])
+        ctrl = _RecordingControlService()
+        runner, _ = _make_runner(scenes=self.scenes, control_service=ctrl)
+        result = runner.run("linearall")
+
+        self.assertTrue(result.ok)
+        # ONE broadcast OPC_OFFSET with formula params.
+        self.assertEqual(len(ctrl.offset_calls), 1)
+        op = ctrl.offset_calls[0]
+        self.assertEqual(op["targetGroup"], 255)
+        self.assertEqual(op["mode"], "linear")
+        self.assertEqual(op["params"], {"base_ms": 0, "step_ms": 100})
+        # Child fires as broadcast control with offset_mode forced on.
+        self.assertEqual(len(ctrl.control_calls), 1)
+        self.assertEqual(ctrl.control_calls[0]["targetGroup"], 255)
+        self.assertTrue(ctrl.control_calls[0]["params"]["offset_mode"])
+        # Detail records the optimizer strategy.
+        detail = result.actions[0].detail
+        self.assertEqual(detail["wire_path"], "A_broadcast_formula")
+        self.assertEqual(detail["offset_mode"], "linear")
+        self.assertEqual(detail["offset_packet_count"], 1)
+        self.assertEqual(len(detail["children"]), 1)
+        self.assertTrue(detail["children"][0]["ok"])
+
+    def test_offset_group_sparse_explicit_per_group_then_broadcast_control(self):
+        self.scenes.create(label="Cascade", actions=[
+            self._container(
+                groups=[1, 3, 5],
+                offset={
+                    "mode": "explicit",
+                    "values": [
+                        {"id": 1, "offset_ms": 0},
+                        {"id": 3, "offset_ms": 100},
+                        {"id": 5, "offset_ms": 250},
+                    ],
+                },
+                children=[self._wled_control_child()],
+            ),
+        ])
+        ctrl = _RecordingControlService()
+        runner, _ = _make_runner(scenes=self.scenes, control_service=ctrl)
+        result = runner.run("cascade")
+
+        self.assertTrue(result.ok)
+        # 3 OPC_OFFSET (mode=explicit), one per participating group.
+        self.assertEqual(
+            [(c["targetGroup"], c["mode"], c["params"].get("offset_ms")) for c in ctrl.offset_calls],
+            [(1, "explicit", 0), (3, "explicit", 100), (5, "explicit", 250)],
+        )
+        # ONE broadcast control via the acceptance gate.
+        self.assertEqual(len(ctrl.control_calls), 1)
+        self.assertEqual(ctrl.control_calls[0]["targetGroup"], 255)
+        detail = result.actions[0].detail
+        self.assertEqual(detail["wire_path"], "B_per_group_explicit")
+
+    def test_offset_group_vshape_all_groups_broadcast_formula(self):
+        self.scenes.create(label="V", actions=[
+            self._container(
+                groups="all",
+                offset={"mode": "vshape", "base_ms": 0, "step_ms": 50, "center": 8},
+                children=[self._wled_control_child()],
+            ),
+        ])
+        ctrl = _RecordingControlService()
+        runner, _ = _make_runner(scenes=self.scenes, control_service=ctrl)
+        runner.run("v")
+        self.assertEqual(len(ctrl.offset_calls), 1)
+        self.assertEqual(ctrl.offset_calls[0]["mode"], "vshape")
+        self.assertEqual(ctrl.offset_calls[0]["params"],
+                         {"base_ms": 0, "step_ms": 50, "center": 8})
+
+    def test_offset_group_sparse_linear_evaluates_host_side(self):
+        """Sparse selection with a formula → host evaluates per group and
+        emits N OPC_OFFSET (mode=explicit) packets. Optimizer prefers B
+        when there are no known devices to compute Strategy C against."""
+        self.scenes.create(label="LinearSparse", actions=[
+            self._container(
+                groups=[1, 5],
+                offset={"mode": "linear", "base_ms": 0, "step_ms": 100},
+                children=[self._wled_control_child()],
+            ),
+        ])
+        ctrl = _RecordingControlService()
+        runner, _ = _make_runner(scenes=self.scenes, control_service=ctrl)
+        runner.run("linearsparse")
+        self.assertEqual(
+            [(c["targetGroup"], c["mode"], c["params"].get("offset_ms")) for c in ctrl.offset_calls],
+            [(1, "explicit", 100), (5, "explicit", 500)],
+        )
+
+    def test_offset_group_forces_offset_mode_on_children(self):
+        """OFFSET_MODE flag is forced on regardless of child flags_override
+        — the wire-level acceptance gate depends on it being present."""
+        self.scenes.create(label="X", actions=[
+            self._container(
+                groups="all",
+                offset={"mode": "linear", "base_ms": 0, "step_ms": 100},
+                children=[{
+                    "kind": "wled_control",
+                    "target": {"kind": "scope"},
+                    "params": {"mode": 5},
+                    "flags_override": {"offset_mode": False, "arm_on_sync": True},
+                }],
+            ),
+        ])
+        ctrl = _RecordingControlService()
+        runner, _ = _make_runner(scenes=self.scenes, control_service=ctrl)
+        runner.run("x")
+        self.assertEqual(len(ctrl.control_calls), 1)
+        # offset_mode is forced True even though the override said False.
+        self.assertTrue(ctrl.control_calls[0]["params"]["offset_mode"])
+        # arm_on_sync override passes through.
+        self.assertTrue(ctrl.control_calls[0]["params"]["arm_on_sync"])
+
+    def test_offset_group_child_target_group_unicasts(self):
+        """A child with target.kind=group sends a unicast OPC_CONTROL to
+        that group instead of broadcasting."""
+        self.scenes.create(label="X", actions=[
+            self._container(
+                groups=[1, 3],
+                offset={"mode": "linear", "base_ms": 0, "step_ms": 100},
+                children=[{
+                    "kind": "wled_control",
+                    "target": {"kind": "group", "value": 3},
+                    "params": {"mode": 5},
+                }],
+            ),
+        ])
+        ctrl = _RecordingControlService()
+        runner, _ = _make_runner(scenes=self.scenes, control_service=ctrl)
+        runner.run("x")
+        self.assertEqual(len(ctrl.control_calls), 1)
+        self.assertEqual(ctrl.control_calls[0]["targetGroup"], 3)
+
+    def test_offset_group_wled_preset_child_routes_via_send_wled_preset(self):
+        self.scenes.create(label="X", actions=[
+            self._container(
+                groups="all",
+                offset={"mode": "linear", "base_ms": 0, "step_ms": 100},
+                children=[{
+                    "kind": "wled_preset",
+                    "target": {"kind": "scope"},
+                    "params": {"presetId": 7, "brightness": 128},
+                }],
+            ),
+        ])
+        ctrl = _RecordingControlService()
+        runner, _ = _make_runner(scenes=self.scenes, control_service=ctrl)
+        runner.run("x")
+        self.assertEqual(ctrl.control_calls, [])
+        self.assertEqual(len(ctrl.preset_calls), 1)
+        self.assertEqual(ctrl.preset_calls[0]["targetGroup"], 255)
+
+    def test_offset_group_rl_preset_child_resolves_persisted_preset(self):
+        rl = self._preset()
+        self.scenes.create(label="X", actions=[
+            self._container(
+                groups="all",
+                offset={"mode": "linear", "base_ms": 0, "step_ms": 100},
+                children=[{
+                    "kind": "rl_preset",
+                    "target": {"kind": "scope"},
+                    "params": {"presetId": "cascade_red", "brightness": 200},
+                }],
+            ),
+        ])
+        ctrl = _RecordingControlService()
+        runner, _ = _make_runner(scenes=self.scenes, control_service=ctrl, rl_presets=rl)
+        runner.run("x")
+        # rl_preset goes through send_wled_control with the resolved preset's params.
+        self.assertEqual(len(ctrl.control_calls), 1)
+        call = ctrl.control_calls[0]
+        self.assertEqual(call["params"]["mode"], 1)            # from preset
+        self.assertEqual(call["params"]["brightness"], 200)    # action override
+        self.assertTrue(call["params"]["offset_mode"])
+
+    def test_offset_group_multiple_children_share_one_offset_setup(self):
+        """A container with N children emits ONE OPC_OFFSET phase shared
+        across all children — the bandwidth win the hierarchy enables."""
+        self.scenes.create(label="Multi", actions=[
+            self._container(
+                groups="all",
+                offset={"mode": "linear", "base_ms": 0, "step_ms": 100},
+                children=[
+                    {"kind": "wled_control",
+                     "target": {"kind": "scope"},
+                     "params": {"mode": 1}},
+                    {"kind": "wled_preset",
+                     "target": {"kind": "scope"},
+                     "params": {"presetId": 7, "brightness": 128}},
+                    {"kind": "wled_control",
+                     "target": {"kind": "scope"},
+                     "params": {"mode": 9}},
+                ],
+            ),
+        ])
+        ctrl = _RecordingControlService()
+        runner, _ = _make_runner(scenes=self.scenes, control_service=ctrl)
+        runner.run("multi")
+        # ONE offset packet shared across 3 children.
+        self.assertEqual(len(ctrl.offset_calls), 1)
+        # Each child fires its own control / preset.
+        self.assertEqual(len(ctrl.control_calls), 2)
+        self.assertEqual(len(ctrl.preset_calls), 1)
+
+    def test_offset_send_failure_marks_action_failed_but_runs_children(self):
+        """If one OPC_OFFSET fails, the action is partial-failure. Children
+        still dispatch — the failed group will be in NORMAL state on the
+        device and rejects the broadcast control via the acceptance gate.
+        """
+        self.scenes.create(label="C", actions=[
+            self._container(
+                groups=[1, 2],
+                offset={
+                    "mode": "explicit",
+                    "values": [
+                        {"id": 1, "offset_ms": 0},
+                        {"id": 2, "offset_ms": 100},
+                    ],
+                },
+                children=[self._wled_control_child()],
+            ),
+        ])
+        ctrl = _RecordingControlService(fail_offsets_for=[2])
+        runner, _ = _make_runner(scenes=self.scenes, control_service=ctrl)
+        result = runner.run("c")
+        self.assertFalse(result.ok)
+        self.assertEqual([c["targetGroup"] for c in ctrl.offset_calls], [1, 2])
+        # Child broadcast still fires.
+        self.assertEqual(len(ctrl.control_calls), 1)
+        # Detail records the failure on the offset_packets map.
+        detail = result.actions[0].detail
+        self.assertFalse(detail["offset_packets"]["2"]["ok"])
+        self.assertTrue(detail["offset_packets"]["1"]["ok"])
+
+    def test_offset_group_linear_params_round_trip_through_save_reload(self):
+        self.scenes.create(label="LinearAll", actions=[
+            self._container(
+                groups="all",
+                offset={"mode": "linear", "base_ms": 500, "step_ms": 200},
+                children=[self._wled_control_child()],
+            ),
+        ])
+        reloaded = SceneService(storage_path=self.scenes.path)
+        scene = reloaded.get("linearall")
+        self.assertIsNotNone(scene)
+        action = scene["actions"][0]
+        self.assertEqual(action["kind"], "offset_group")
+        self.assertEqual(action["groups"], "all")
+        self.assertEqual(action["offset"],
+                         {"mode": "linear", "base_ms": 500, "step_ms": 200})
+
+        ctrl = _RecordingControlService()
+        runner, _ = _make_runner(scenes=reloaded, control_service=ctrl)
+        runner.run("linearall")
+        self.assertEqual(len(ctrl.offset_calls), 1)
+        self.assertEqual(ctrl.offset_calls[0]["mode"], "linear")
+        self.assertEqual(ctrl.offset_calls[0]["params"],
+                         {"base_ms": 500, "step_ms": 200})
+
+    def test_offset_group_does_not_auto_emit_sync(self):
+        self.scenes.create(label="C", actions=[
+            self._container(
+                groups="all",
+                offset={"mode": "linear", "base_ms": 0, "step_ms": 100},
+                children=[self._wled_control_child()],
+            ),
+        ])
+        sync = _RecordingSyncService()
+        ctrl = _RecordingControlService()
+        runner, _ = _make_runner(scenes=self.scenes, control_service=ctrl, sync_service=sync)
+        runner.run("c")
+        self.assertEqual(sync.sync_calls, [])
+
+    def test_legacy_groups_offset_target_action_runs_via_migration(self):
+        """A legacy ``rl_preset`` action with ``target.kind=groups_offset``
+        is migrated to an offset_group container on load and dispatches
+        through the new path."""
+        rl = self._preset()
+        self.scenes.create(label="L", actions=[{
+            "kind": KIND_RL_PRESET,
+            "target": {
+                "kind": "groups_offset",
+                "groups": "all",
+                "offset": {"mode": "linear", "base_ms": 0, "step_ms": 100},
+            },
+            "params": {"presetId": "cascade_red"},
+        }])
+        ctrl = _RecordingControlService()
+        runner, _ = _make_runner(scenes=self.scenes, control_service=ctrl, rl_presets=rl)
+        result = runner.run("l")
+        self.assertTrue(result.ok)
+        # Migrated to offset_group container with one rl_preset child →
+        # one broadcast OPC_OFFSET + one OPC_CONTROL via send_wled_control.
+        self.assertEqual(len(ctrl.offset_calls), 1)
+        self.assertEqual(ctrl.offset_calls[0]["mode"], "linear")
+        self.assertEqual(len(ctrl.control_calls), 1)
 
 
 if __name__ == "__main__":

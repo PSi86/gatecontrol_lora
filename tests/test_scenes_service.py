@@ -10,11 +10,17 @@ from unittest.mock import MagicMock
 
 from racelink.services.scenes_service import (
     KIND_DELAY,
+    KIND_OFFSET_GROUP,
     KIND_RL_PRESET,
+    KIND_STARTBLOCK,
     KIND_SYNC,
+    KIND_WLED_CONTROL,
     KIND_WLED_PRESET,
     MAX_ACTIONS_PER_SCENE,
     MAX_DELAY_MS,
+    MAX_GROUPS_OFFSET_ENTRIES,
+    MAX_OFFSET_GROUP_CHILDREN,
+    OFFSET_MS_MAX,
     SCHEMA_VERSION,
     SceneService,
 )
@@ -213,6 +219,331 @@ class SceneServiceValidationTests(unittest.TestCase):
         self.assertIn("arm_on_sync", flags)
         self.assertIn("offset_mode", flags)
         self.assertNotIn("unknown_flag", flags)
+
+    # ---- offset_group container ---------------------------------------
+
+    def _wled_control_child(self, target=None, params=None):
+        return {
+            "kind": KIND_WLED_CONTROL,
+            "target": target or {"kind": "scope"},
+            "params": params or {"presetId": 1, "brightness": 200},
+        }
+
+    def test_offset_group_explicit_canonicalises_and_sorts(self):
+        scene = self.svc.create(label="Cascade", actions=[{
+            "kind": KIND_OFFSET_GROUP,
+            "groups": [5, 1, 3],
+            "offset": {
+                "mode": "explicit",
+                "values": [
+                    {"id": 5, "offset_ms": 250},
+                    {"id": 1, "offset_ms": 0},
+                    {"id": 3, "offset_ms": 100},
+                ],
+            },
+            "actions": [self._wled_control_child()],
+        }])
+        action = scene["actions"][0]
+        self.assertEqual(action["kind"], KIND_OFFSET_GROUP)
+        # Group IDs sorted; values sorted by id for deterministic order.
+        self.assertEqual(action["groups"], [1, 3, 5])
+        self.assertEqual(action["offset"], {
+            "mode": "explicit",
+            "values": [
+                {"id": 1, "offset_ms": 0},
+                {"id": 3, "offset_ms": 100},
+                {"id": 5, "offset_ms": 250},
+            ],
+        })
+        self.assertEqual(action["actions"][0]["kind"], KIND_WLED_CONTROL)
+        self.assertEqual(action["actions"][0]["target"], {"kind": "scope"})
+
+    def test_offset_group_linear_all_groups_canonicalises(self):
+        scene = self.svc.create(label="Cascade", actions=[{
+            "kind": KIND_OFFSET_GROUP,
+            "groups": "all",
+            "offset": {"mode": "linear", "base_ms": 0, "step_ms": 100},
+            "actions": [],
+        }])
+        action = scene["actions"][0]
+        self.assertEqual(action["groups"], "all")
+        self.assertEqual(action["offset"],
+                         {"mode": "linear", "base_ms": 0, "step_ms": 100})
+        self.assertEqual(action["actions"], [])
+
+    def test_offset_group_vshape_carries_center(self):
+        scene = self.svc.create(label="VS", actions=[{
+            "kind": KIND_OFFSET_GROUP,
+            "groups": "all",
+            "offset": {"mode": "vshape", "base_ms": 0, "step_ms": 50, "center": 8},
+            "actions": [],
+        }])
+        offset = scene["actions"][0]["offset"]
+        self.assertEqual(offset, {"mode": "vshape", "base_ms": 0, "step_ms": 50, "center": 8})
+
+    def test_offset_group_modulo_carries_cycle(self):
+        scene = self.svc.create(label="MO", actions=[{
+            "kind": KIND_OFFSET_GROUP,
+            "groups": "all",
+            "offset": {"mode": "modulo", "base_ms": 0, "step_ms": 100, "cycle": 4},
+            "actions": [],
+        }])
+        offset = scene["actions"][0]["offset"]
+        self.assertEqual(offset, {"mode": "modulo", "base_ms": 0, "step_ms": 100, "cycle": 4})
+
+    def test_offset_group_explicit_requires_concrete_groups(self):
+        with self.assertRaises(ValueError):
+            self.svc.create(label="X", actions=[{
+                "kind": KIND_OFFSET_GROUP,
+                "groups": "all",
+                "offset": {"mode": "explicit", "values": []},
+                "actions": [],
+            }])
+
+    def test_offset_group_rejects_empty_groups_list(self):
+        with self.assertRaises(ValueError):
+            self.svc.create(label="X", actions=[{
+                "kind": KIND_OFFSET_GROUP,
+                "groups": [],
+                "offset": {"mode": "linear", "base_ms": 0, "step_ms": 100},
+                "actions": [],
+            }])
+
+    def test_offset_group_rejects_duplicate_ids(self):
+        with self.assertRaises(ValueError):
+            self.svc.create(label="X", actions=[{
+                "kind": KIND_OFFSET_GROUP,
+                "groups": [1, 1],
+                "offset": {"mode": "linear", "base_ms": 0, "step_ms": 100},
+                "actions": [],
+            }])
+
+    def test_offset_group_rejects_id_255(self):
+        # 255 is the broadcast sentinel; "all" is the documented spelling.
+        with self.assertRaises(ValueError):
+            self.svc.create(label="X", actions=[{
+                "kind": KIND_OFFSET_GROUP,
+                "groups": [255],
+                "offset": {"mode": "linear", "base_ms": 0, "step_ms": 100},
+                "actions": [],
+            }])
+
+    def test_offset_group_caps_entry_count(self):
+        too_many = list(range(MAX_GROUPS_OFFSET_ENTRIES + 1))
+        with self.assertRaises(ValueError):
+            self.svc.create(label="X", actions=[{
+                "kind": KIND_OFFSET_GROUP,
+                "groups": too_many,
+                "offset": {"mode": "linear", "base_ms": 0, "step_ms": 100},
+                "actions": [],
+            }])
+
+    def test_offset_group_rejects_unknown_mode(self):
+        with self.assertRaises(ValueError):
+            self.svc.create(label="X", actions=[{
+                "kind": KIND_OFFSET_GROUP,
+                "groups": "all",
+                "offset": {"mode": "log2"},
+                "actions": [],
+            }])
+
+    def test_offset_group_rejects_out_of_range_explicit_offset(self):
+        with self.assertRaises(ValueError):
+            self.svc.create(label="X", actions=[{
+                "kind": KIND_OFFSET_GROUP,
+                "groups": [1],
+                "offset": {
+                    "mode": "explicit",
+                    "values": [{"id": 1, "offset_ms": OFFSET_MS_MAX + 1}],
+                },
+                "actions": [],
+            }])
+
+    # ---- offset_group children -----------------------------------------
+
+    def test_offset_group_rejects_invalid_child_kinds(self):
+        # Sync, delay, startblock, and another offset_group are all forbidden.
+        for forbidden in (
+            {"kind": KIND_SYNC},
+            {"kind": KIND_DELAY, "duration_ms": 100},
+            {"kind": KIND_STARTBLOCK,
+             "target": {"kind": "scope"},
+             "params": {"fn_key": "startblock_control"}},
+            {"kind": KIND_OFFSET_GROUP,
+             "groups": "all",
+             "offset": {"mode": "linear", "base_ms": 0, "step_ms": 100},
+             "actions": []},
+        ):
+            with self.assertRaises(ValueError):
+                self.svc.create(label="X", actions=[{
+                    "kind": KIND_OFFSET_GROUP,
+                    "groups": "all",
+                    "offset": {"mode": "linear", "base_ms": 0, "step_ms": 100},
+                    "actions": [forbidden],
+                }])
+
+    def test_offset_group_caps_children_count(self):
+        too_many = [self._wled_control_child() for _ in range(MAX_OFFSET_GROUP_CHILDREN + 1)]
+        with self.assertRaises(ValueError):
+            self.svc.create(label="X", actions=[{
+                "kind": KIND_OFFSET_GROUP,
+                "groups": "all",
+                "offset": {"mode": "linear", "base_ms": 0, "step_ms": 100},
+                "actions": too_many,
+            }])
+
+    def test_offset_group_child_target_scope_is_default(self):
+        scene = self.svc.create(label="X", actions=[{
+            "kind": KIND_OFFSET_GROUP,
+            "groups": "all",
+            "offset": {"mode": "linear", "base_ms": 0, "step_ms": 100},
+            "actions": [
+                {"kind": KIND_WLED_PRESET,
+                 "target": {"kind": "scope"},
+                 "params": {"presetId": 7, "brightness": 128}},
+            ],
+        }])
+        child = scene["actions"][0]["actions"][0]
+        self.assertEqual(child["target"], {"kind": "scope"})
+
+    def test_offset_group_child_group_must_be_in_parent(self):
+        # parent groups [1, 3] — child target group 2 is rejected.
+        with self.assertRaises(ValueError):
+            self.svc.create(label="X", actions=[{
+                "kind": KIND_OFFSET_GROUP,
+                "groups": [1, 3],
+                "offset": {"mode": "linear", "base_ms": 0, "step_ms": 100},
+                "actions": [{
+                    "kind": KIND_WLED_CONTROL,
+                    "target": {"kind": "group", "value": 2},
+                    "params": {"presetId": 1},
+                }],
+            }])
+        # ... but group 3 is fine.
+        ok = self.svc.create(label="OK", actions=[{
+            "kind": KIND_OFFSET_GROUP,
+            "groups": [1, 3],
+            "offset": {"mode": "linear", "base_ms": 0, "step_ms": 100},
+            "actions": [{
+                "kind": KIND_WLED_CONTROL,
+                "target": {"kind": "group", "value": 3},
+                "params": {"presetId": 1},
+            }],
+        }])
+        self.assertEqual(ok["actions"][0]["actions"][0]["target"],
+                         {"kind": "group", "value": 3})
+
+    def test_offset_group_child_group_filter_skipped_when_all(self):
+        # parent.groups == "all" → any group id passes the membership check.
+        scene = self.svc.create(label="X", actions=[{
+            "kind": KIND_OFFSET_GROUP,
+            "groups": "all",
+            "offset": {"mode": "linear", "base_ms": 0, "step_ms": 100},
+            "actions": [{
+                "kind": KIND_WLED_CONTROL,
+                "target": {"kind": "group", "value": 42},
+                "params": {"presetId": 1},
+            }],
+        }])
+        self.assertEqual(scene["actions"][0]["actions"][0]["target"],
+                         {"kind": "group", "value": 42})
+
+    def test_offset_group_child_device_target_format(self):
+        # MAC must be 12-char hex; case is normalised to upper.
+        scene = self.svc.create(label="X", actions=[{
+            "kind": KIND_OFFSET_GROUP,
+            "groups": "all",
+            "offset": {"mode": "linear", "base_ms": 0, "step_ms": 100},
+            "actions": [{
+                "kind": KIND_WLED_CONTROL,
+                "target": {"kind": "device", "value": "aabbccddeeff"},
+                "params": {"presetId": 1},
+            }],
+        }])
+        self.assertEqual(scene["actions"][0]["actions"][0]["target"],
+                         {"kind": "device", "value": "AABBCCDDEEFF"})
+        with self.assertRaises(ValueError):
+            self.svc.create(label="Y", actions=[{
+                "kind": KIND_OFFSET_GROUP,
+                "groups": "all",
+                "offset": {"mode": "linear", "base_ms": 0, "step_ms": 100},
+                "actions": [{
+                    "kind": KIND_WLED_CONTROL,
+                    "target": {"kind": "device", "value": "ABCD"},
+                    "params": {"presetId": 1},
+                }],
+            }])
+
+    def test_offset_group_top_level_only_no_nesting(self):
+        # An offset_group at the top of a scene is fine, but nesting it
+        # inside another offset_group must fail (covered by
+        # test_offset_group_rejects_invalid_child_kinds).
+        scene = self.svc.create(label="OK", actions=[{
+            "kind": KIND_OFFSET_GROUP,
+            "groups": "all",
+            "offset": {"mode": "linear", "base_ms": 0, "step_ms": 100},
+            "actions": [self._wled_control_child()],
+        }])
+        self.assertEqual(scene["actions"][0]["kind"], KIND_OFFSET_GROUP)
+
+    def test_offset_group_rejects_stray_top_level_fields(self):
+        for stray in ("target", "params", "flags_override", "duration_ms"):
+            with self.assertRaises(ValueError):
+                self.svc.create(label="X", actions=[{
+                    "kind": KIND_OFFSET_GROUP,
+                    "groups": "all",
+                    "offset": {"mode": "linear", "base_ms": 0, "step_ms": 100},
+                    "actions": [],
+                    stray: "bogus",
+                }])
+
+    # ---- legacy migration: groups_offset target -> offset_group action ---
+
+    def test_legacy_groups_offset_target_migrated_to_offset_group(self):
+        # Pre-hierarchy shape: kind=rl_preset with target.kind=groups_offset.
+        # The loader rewrites the whole action into an offset_group container
+        # with a single child whose target is "scope".
+        scene = self.svc.create(label="Legacy", actions=[{
+            "kind": KIND_RL_PRESET,
+            "target": {
+                "kind": "groups_offset",
+                "groups": "all",
+                "offset": {"mode": "linear", "base_ms": 0, "step_ms": 100},
+            },
+            "params": {"presetId": "start_red"},
+        }])
+        action = scene["actions"][0]
+        self.assertEqual(action["kind"], KIND_OFFSET_GROUP)
+        self.assertEqual(action["groups"], "all")
+        self.assertEqual(action["offset"],
+                         {"mode": "linear", "base_ms": 0, "step_ms": 100})
+        self.assertEqual(len(action["actions"]), 1)
+        child = action["actions"][0]
+        self.assertEqual(child["kind"], KIND_RL_PRESET)
+        self.assertEqual(child["target"], {"kind": "scope"})
+        self.assertEqual(child["params"], {"presetId": "start_red"})
+
+    def test_legacy_groups_offset_pre_formula_shape_migrated(self):
+        # The original {id, offset_ms} list (with optional ui_hints) also
+        # round-trips into the new container form.
+        scene = self.svc.create(label="OldOld", actions=[{
+            "kind": KIND_WLED_CONTROL,
+            "target": {
+                "kind": "groups_offset",
+                "groups": [
+                    {"id": 1, "offset_ms": 0},
+                    {"id": 3, "offset_ms": 100},
+                ],
+                "ui_hints": {"mode": "linear", "base_ms": 0, "step_ms": 100},
+            },
+            "params": {"presetId": 7},
+        }])
+        action = scene["actions"][0]
+        self.assertEqual(action["kind"], KIND_OFFSET_GROUP)
+        self.assertEqual(action["groups"], [1, 3])
+        self.assertEqual(action["offset"],
+                         {"mode": "linear", "base_ms": 0, "step_ms": 100})
+        self.assertEqual(action["actions"][0]["kind"], KIND_WLED_CONTROL)
 
     def test_kind_with_target_requires_target(self):
         with self.assertRaises(ValueError):

@@ -36,6 +36,146 @@ def build_sync_body(ts24: int = 0, brightness: int = 0) -> bytes:
     return bytes([(ts & 0xFF), ((ts >> 8) & 0xFF), ((ts >> 16) & 0xFF), (int(brightness) & 0xFF)])
 
 
+# OPC_OFFSET modes — mirrors the OffsetMode enum in racelink_proto.h.
+OFFSET_MODE_NONE     = 0x00
+OFFSET_MODE_EXPLICIT = 0x01
+OFFSET_MODE_LINEAR   = 0x02
+OFFSET_MODE_VSHAPE   = 0x03
+OFFSET_MODE_MODULO   = 0x04
+
+OFFSET_MODE_NAMES = {
+    OFFSET_MODE_NONE:     "none",
+    OFFSET_MODE_EXPLICIT: "explicit",
+    OFFSET_MODE_LINEAR:   "linear",
+    OFFSET_MODE_VSHAPE:   "vshape",
+    OFFSET_MODE_MODULO:   "modulo",
+}
+OFFSET_MODE_VALUES = {v: k for k, v in OFFSET_MODE_NAMES.items()}
+
+# Bounds on the formula parameters. ``base_ms`` and ``step_ms`` are signed
+# 16-bit so reverse cascades work via negative ``step_ms``; the device
+# clamps the computed offset to [0, 65535] before snapshotting.
+OFFSET_MS_MIN     = 0
+OFFSET_MS_MAX     = 0xFFFF
+OFFSET_BASE_MIN   = -32768
+OFFSET_BASE_MAX   = 32767
+OFFSET_STEP_MIN   = -32768
+OFFSET_STEP_MAX   = 32767
+OFFSET_CENTER_MIN = 0
+OFFSET_CENTER_MAX = 254
+OFFSET_CYCLE_MIN  = 1
+OFFSET_CYCLE_MAX  = 255
+
+
+OffsetModeArg = "int | str"  # cosmetic alias for the docstring; real type below
+
+
+def _coerce_mode(mode: int | str) -> int:
+    """Accept either the int enum value or its lowercase string name."""
+    if isinstance(mode, int):
+        if mode in OFFSET_MODE_NAMES:
+            return mode
+        raise ValueError(f"unknown offset mode int: {mode}")
+    if isinstance(mode, str):
+        m = OFFSET_MODE_VALUES.get(mode.lower())
+        if m is None:
+            raise ValueError(
+                f"unknown offset mode {mode!r}; expected one of {sorted(OFFSET_MODE_VALUES)}"
+            )
+        return m
+    raise TypeError(f"offset mode must be int or str, got {type(mode).__name__}")
+
+
+def build_offset_body(
+    group_id: int,
+    mode: int | str = OFFSET_MODE_NONE,
+    *,
+    offset_ms: int = 0,
+    base_ms: int = 0,
+    step_ms: int = 0,
+    center: int = 0,
+    cycle: int = 1,
+) -> bytes:
+    """Serialize a variable-length OPC_OFFSET body (2..7 B).
+
+    Mirrors the variable-length wire format documented in ``racelink_proto.h``:
+    every body starts with ``groupId`` and ``mode``; the remaining payload
+    depends on ``mode``. ``mode`` may be passed either as the int enum value
+    (``OFFSET_MODE_LINEAR``) or its lowercase name (``"linear"``).
+
+    Per-mode payload contract:
+      * ``NONE``     — no extra fields. Receiver clears stored config.
+      * ``EXPLICIT`` — ``offset_ms`` (uint16 LE; clamped 0..65535).
+      * ``LINEAR``   — ``base_ms`` (int16 LE) + ``step_ms`` (int16 LE).
+                       Receiver computes ``base + groupId * step`` per device.
+      * ``VSHAPE``   — ``base_ms`` (int16) + ``step_ms`` (int16) + ``center`` (uint8).
+                       Receiver computes ``base + |groupId - center| * step``.
+      * ``MODULO``   — ``base_ms`` (int16) + ``step_ms`` (int16) + ``cycle`` (uint8 1..255).
+                       Receiver computes ``base + (groupId % cycle) * step``.
+
+    Use ``group_id=255`` to broadcast: every device matches the body filter,
+    and the wire-level acceptance gate on subsequent OPC_CONTROLs picks the
+    participating subset by their offset_mode flag matching the new state.
+    """
+    g = int(group_id) & 0xFF
+    m = _coerce_mode(mode)
+
+    if m == OFFSET_MODE_NONE:
+        return struct.pack("<BB", g, m)
+    if m == OFFSET_MODE_EXPLICIT:
+        ms = max(OFFSET_MS_MIN, min(OFFSET_MS_MAX, int(offset_ms)))
+        return struct.pack("<BBH", g, m, ms)
+    if m == OFFSET_MODE_LINEAR:
+        b = max(OFFSET_BASE_MIN, min(OFFSET_BASE_MAX, int(base_ms)))
+        s = max(OFFSET_STEP_MIN, min(OFFSET_STEP_MAX, int(step_ms)))
+        return struct.pack("<BBhh", g, m, b, s)
+    if m == OFFSET_MODE_VSHAPE:
+        b = max(OFFSET_BASE_MIN, min(OFFSET_BASE_MAX, int(base_ms)))
+        s = max(OFFSET_STEP_MIN, min(OFFSET_STEP_MAX, int(step_ms)))
+        c = max(OFFSET_CENTER_MIN, min(OFFSET_CENTER_MAX, int(center))) & 0xFF
+        return struct.pack("<BBhhB", g, m, b, s, c)
+    if m == OFFSET_MODE_MODULO:
+        b = max(OFFSET_BASE_MIN, min(OFFSET_BASE_MAX, int(base_ms)))
+        s = max(OFFSET_STEP_MIN, min(OFFSET_STEP_MAX, int(step_ms)))
+        cy = max(OFFSET_CYCLE_MIN, min(OFFSET_CYCLE_MAX, int(cycle))) & 0xFF
+        return struct.pack("<BBhhB", g, m, b, s, cy)
+    raise AssertionError(f"unhandled mode {m!r}")  # unreachable
+
+
+def parse_offset_body(body: bytes) -> dict:
+    """Inverse of :func:`build_offset_body`. Used by tests; the WLED firmware
+    has its own equivalent. Raises ``ValueError`` on malformed bodies."""
+    if len(body) < 2:
+        raise ValueError(f"OPC_OFFSET body too short: {len(body)} B")
+    g = body[0]
+    m = body[1]
+    if m == OFFSET_MODE_NONE:
+        if len(body) != 2:
+            raise ValueError("OPC_OFFSET (NONE) body must be 2 B")
+        return {"group_id": g, "mode": "none"}
+    if m == OFFSET_MODE_EXPLICIT:
+        if len(body) != 4:
+            raise ValueError(f"OPC_OFFSET (EXPLICIT) body must be 4 B, got {len(body)}")
+        (ms,) = struct.unpack("<H", body[2:4])
+        return {"group_id": g, "mode": "explicit", "offset_ms": ms}
+    if m == OFFSET_MODE_LINEAR:
+        if len(body) != 6:
+            raise ValueError(f"OPC_OFFSET (LINEAR) body must be 6 B, got {len(body)}")
+        b, s = struct.unpack("<hh", body[2:6])
+        return {"group_id": g, "mode": "linear", "base_ms": b, "step_ms": s}
+    if m == OFFSET_MODE_VSHAPE:
+        if len(body) != 7:
+            raise ValueError(f"OPC_OFFSET (VSHAPE) body must be 7 B, got {len(body)}")
+        b, s, c = struct.unpack("<hhB", body[2:7])
+        return {"group_id": g, "mode": "vshape", "base_ms": b, "step_ms": s, "center": c}
+    if m == OFFSET_MODE_MODULO:
+        if len(body) != 7:
+            raise ValueError(f"OPC_OFFSET (MODULO) body must be 7 B, got {len(body)}")
+        b, s, cy = struct.unpack("<hhB", body[2:7])
+        return {"group_id": g, "mode": "modulo", "base_ms": b, "step_ms": s, "cycle": cy}
+    raise ValueError(f"unknown OPC_OFFSET mode byte 0x{m:02X}")
+
+
 # -------------------- OPC_CONTROL (variable-length, 3..21 B) --------------------
 # Phase-D rename: this is the packet formerly known as OPC_CONTROL_ADV /
 # P_ControlAdv. Wire format is byte-identical; only the identifiers changed.

@@ -61,6 +61,7 @@ enum Opcode7 : uint8_t {
   OPC_SYNC          = 0x06, // SYNC Pulse (M2N)
   OPC_STREAM        = 0x07, // STREAM_M2N (M2N)
   OPC_CONTROL       = 0x08, // CONTROL (M2N) -- variable-length direct effect params (see layout below)
+  OPC_OFFSET        = 0x09, // OFFSET (M2N) -- per-group offset_ms snapshot used by ARM_ON_SYNC + OFFSET_MODE controls
   OPC_ACK           = 0x7E, // ACK (both directions, as response only)
   // Phase-D rename (2026-04-25): opcode values are invariant, only the
   // identifiers shifted: OPC_CONTROL -> OPC_PRESET (0x04), OPC_CONTROL_ADV
@@ -77,6 +78,44 @@ struct __attribute__((packed)) P_Preset      { uint8_t groupId; uint8_t flags; u
 struct __attribute__((packed)) P_Config      { uint8_t option; uint8_t data0; uint8_t data1; uint8_t data2; uint8_t data3; }; // 5B
 struct __attribute__((packed)) P_Sync        { uint8_t ts24_0; uint8_t ts24_1; uint8_t ts24_2; uint8_t brightness; }; // 4B // 24-bit timestamp LSB first + bri
 struct __attribute__((packed)) P_Stream      { uint8_t ctrl; uint8_t data[8];         }; // 9B
+// OPC_OFFSET (Master -> Node, RESP_NONE) — variable-length 2..7 B body.
+// First two bytes are always present:
+//   Byte 0: groupId (0..254 = filter; 255 = broadcast to all groups)
+//   Byte 1: mode    (OffsetMode enum below)
+// The remaining bytes depend on mode (see OffsetMode comments). The receiver
+// stores the parsed config in pending_change; it materialises into active
+// at the next accepted OPC_CONTROL/OPC_PRESET (immediate-apply path) or at
+// the OPC_SYNC that fires the queued effect (arm-on-sync path).
+//
+// Receivers compute their per-device offset_ms by evaluating the stored
+// formula against their own current.groupId at the moment a CONTROL arms
+// with OFFSET_MODE flag set. The per-device snapshot is then used by the
+// SYNC handler's deferred-apply path. A subsequent OPC_OFFSET cannot
+// retroactively shift an already-armed effect.
+//
+// Acceptance gate: a packet with OFFSET_MODE flag is accepted only when
+// the receiver's effective config has mode != NONE; vice versa for the
+// flag = 0 case. This is what makes a single broadcast OPC_CONTROL with
+// OFFSET_MODE=1 reach exactly the offset-configured devices.
+//
+// Variable length is signalled by req_len=0 in the rules table (same as
+// OPC_CONTROL); body bounds are enforced in the receiver based on mode.
+enum OffsetMode : uint8_t {
+  OFFSET_MODE_NONE     = 0x00,  // no further payload (clears stored config; offset = 0)
+  OFFSET_MODE_EXPLICIT = 0x01,  // +2 B: uint16 offset_ms (LE)
+  OFFSET_MODE_LINEAR   = 0x02,  // +4 B: int16 base_ms (LE), int16 step_ms (LE)
+                                //       offset = clamp(base + groupId * step, 0..65535)
+  OFFSET_MODE_VSHAPE   = 0x03,  // +5 B: int16 base, int16 step, uint8 center
+                                //       offset = clamp(base + |groupId - center| * step, 0..65535)
+  OFFSET_MODE_MODULO   = 0x04,  // +5 B: int16 base, int16 step, uint8 cycle (0 -> 1)
+                                //       offset = clamp(base + (groupId % cycle) * step, 0..65535)
+  // 0x05..0xFE reserved for future modes (LOG2, STEP_BIN, RANDOM, ...)
+};
+
+// Worst-case OPC_OFFSET body size (mode header + largest payload). Used
+// only for buffer sizing; the actual length is mode-driven.
+static const uint8_t MAX_P_OFFSET = 7;
+static_assert(MAX_P_OFFSET <= BODY_MAX, "MAX_P_OFFSET exceeds BODY_MAX");
 
 // -------------------- P_Control (variable-length, 3..21 B) --------------------
 // Master -> Node, OPC_CONTROL. Direct effect-parameter packet (pre-rename:
@@ -185,6 +224,10 @@ static constexpr PacketRule RULES[] = {
   { OPC_CONFIG,     DIR_M2N, RESP_ACK,      OPC_ACK,     SZ<P_Config>(),      SZ<P_Ack>(),           "CONFIG" },
   // OPC_SYNC: SYNC (M2N, 4B) -> no response
   { OPC_SYNC,       DIR_M2N, RESP_NONE,     0,           SZ<P_Sync>(),        0,                     "SYNC" },
+  // OPC_OFFSET: variable-length offset config (M2N, 2..7B) -> no response.
+  // req_len = 0 signals variable length; receiver decodes mode-specific
+  // payload sizing — see OffsetMode enum above.
+  { OPC_OFFSET,     DIR_M2N, RESP_NONE,     0,           0 /*variable*/,      0,                     "OFFSET" },
   // OPC_STREAM: STREAM_M2N (M2N, 9B) -> ACK (only last packet in stream)
   { OPC_STREAM,     DIR_M2N, RESP_ACK,      OPC_ACK,     SZ<P_Stream>(),      SZ<P_Ack>(),           "STREAM_M2N" },
 };

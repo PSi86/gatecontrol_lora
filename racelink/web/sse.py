@@ -91,20 +91,40 @@ class SSEBridge:
             print(msg)
 
     def broadcast(self, event_name: str, payload):
+        # A4: never hold ``_clients_lock`` across a queue ``put`` — a
+        # disconnected-but-not-yet-cleaned-up client used to stall every
+        # other broadcaster + every new SSE registration for up to
+        # ``timeout=0.01`` seconds *per dead client* (was: ``q.put(...,
+        # timeout=0.01)`` inside the lock). With many dead clients that
+        # compounds into hundreds of milliseconds of UI starvation.
+        #
+        # Fix: snapshot the client set under the lock, fan out outside
+        # the lock with ``put_nowait`` (truly non-blocking), collect
+        # dead clients, then re-acquire briefly to remove them via
+        # idempotent ``discard``.
         with self._clients_lock:
-            dead = []
-            for q in list(self._clients):
-                try:
-                    q.put((event_name, payload), timeout=0.01)
-                except Exception as ex:
-                    logger.debug("SSE queue put failed for %r, dropping client: %s", event_name, ex)
-                    dead.append(q)
+            clients_snapshot = list(self._clients)
+
+        if not clients_snapshot:
+            return
+
+        dead = []
+        for q in clients_snapshot:
+            try:
+                q.put_nowait((event_name, payload))
+            except Exception as ex:
+                logger.debug(
+                    "SSE queue put failed for %r, dropping client: %s",
+                    event_name, ex,
+                )
+                dead.append(q)
+
+        if not dead:
+            return
+
+        with self._clients_lock:
             for q in dead:
-                try:
-                    self._clients.remove(q)
-                except KeyError:
-                    # Client was already removed by another iteration.
-                    pass
+                self._clients.discard(q)
 
     def ensure_transport_hooked(self, rl_instance):
         if self._hooked_transport["ok"]:
@@ -282,12 +302,12 @@ class SSEBridge:
                         event_name, payload = item
                         yield _encode(event_name, payload)
                 finally:
+                    # ``discard`` is idempotent — broadcast()'s dead-
+                    # client cleanup may have already removed ``q`` and
+                    # the previous ``remove`` + ``except KeyError`` was
+                    # just an awkward way of expressing the same thing.
                     with self._clients_lock:
-                        try:
-                            self._clients.remove(q)
-                        except KeyError:
-                            # Client already removed by broadcast() cleanup.
-                            pass
+                        self._clients.discard(q)
 
             headers = {
                 "Cache-Control": "no-cache",

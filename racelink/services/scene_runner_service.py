@@ -25,14 +25,17 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
 from ..domain.flags import USER_FLAG_KEYS
+from .offset_dispatch_optimizer import plan_offset_setup
 from .scenes_service import (
     KIND_DELAY,
+    KIND_OFFSET_GROUP,
     KIND_RL_PRESET,
     KIND_STARTBLOCK,
     KIND_SYNC,
     KIND_WLED_CONTROL,
     KIND_WLED_PRESET,
 )
+
 
 logger = logging.getLogger(__name__)
 
@@ -196,6 +199,8 @@ class SceneRunnerService:
                 return self._run_sync(index, started)
             if kind == KIND_DELAY:
                 return self._run_delay(index, action, started)
+            if kind == KIND_OFFSET_GROUP:
+                return self._run_offset_group(index, action, started)
             return ActionResult(
                 index=index, kind=str(kind), ok=False,
                 error="unknown_kind",
@@ -272,21 +277,25 @@ class SceneRunnerService:
                 duration_ms=self._clock_ms() - started,
             )
 
-        target_kwargs = self._resolve_target(action["target"], KIND_RL_PRESET, index)
+        base_params = dict(preset.get("params") or {})
+        if "brightness" in params and params["brightness"] is not None:
+            base_params["brightness"] = int(params["brightness"])
+        persisted_flags = preset.get("flags") or {}
+        preset_detail = {"preset_key": preset.get("key"), "preset_id": preset.get("id")}
+
+        target = action["target"]
+        target_kwargs = self._resolve_target(target, KIND_RL_PRESET, index)
         if target_kwargs is None:
             return ActionResult(
                 index=index, kind=KIND_RL_PRESET, ok=False,
                 error="target_not_found", degraded=True,
                 duration_ms=self._clock_ms() - started,
-                detail={"target": dict(action["target"])},
+                detail={"target": dict(target)},
             )
 
-        merged_params = dict(preset.get("params") or {})
-        if "brightness" in params and params["brightness"] is not None:
-            merged_params["brightness"] = int(params["brightness"])
         merged_params = self._merge_flags_into_params(
-            merged_params,
-            preset.get("flags") or {},
+            base_params,
+            persisted_flags,
             action.get("flags_override") or {},
         )
 
@@ -295,7 +304,7 @@ class SceneRunnerService:
             index=index, kind=KIND_RL_PRESET, ok=ok,
             error=None if ok else "send_failed",
             duration_ms=self._clock_ms() - started,
-            detail={"preset_key": preset.get("key"), "preset_id": preset.get("id")},
+            detail=preset_detail,
         )
 
     def _lookup_rl_preset(self, rl_service, preset_ref) -> Optional[dict]:
@@ -318,17 +327,19 @@ class SceneRunnerService:
         return None
 
     def _run_wled_preset(self, index: int, action: dict, started: int) -> ActionResult:
-        target_kwargs = self._resolve_target(action["target"], KIND_WLED_PRESET, index)
+        base_params = dict(action.get("params") or {})
+        target = action["target"]
+        target_kwargs = self._resolve_target(target, KIND_WLED_PRESET, index)
         if target_kwargs is None:
             return ActionResult(
                 index=index, kind=KIND_WLED_PRESET, ok=False,
                 error="target_not_found", degraded=True,
                 duration_ms=self._clock_ms() - started,
-                detail={"target": dict(action["target"])},
+                detail={"target": dict(target)},
             )
 
         merged_params = self._merge_flags_into_params(
-            dict(action.get("params") or {}),
+            base_params,
             persisted_flags={},  # WLED-preset has no persisted flags
             override=action.get("flags_override") or {},
         )
@@ -340,17 +351,19 @@ class SceneRunnerService:
         )
 
     def _run_wled_control(self, index: int, action: dict, started: int) -> ActionResult:
-        target_kwargs = self._resolve_target(action["target"], KIND_WLED_CONTROL, index)
+        base_params = dict(action.get("params") or {})
+        target = action["target"]
+        target_kwargs = self._resolve_target(target, KIND_WLED_CONTROL, index)
         if target_kwargs is None:
             return ActionResult(
                 index=index, kind=KIND_WLED_CONTROL, ok=False,
                 error="target_not_found", degraded=True,
                 duration_ms=self._clock_ms() - started,
-                detail={"target": dict(action["target"])},
+                detail={"target": dict(target)},
             )
 
         merged_params = self._merge_flags_into_params(
-            dict(action.get("params") or {}),
+            base_params,
             persisted_flags={},
             override=action.get("flags_override") or {},
         )
@@ -360,6 +373,211 @@ class SceneRunnerService:
             error=None if ok else "send_failed",
             duration_ms=self._clock_ms() - started,
         )
+
+    # ---- offset_group container dispatch --------------------------------
+
+    def _run_offset_group(self, index: int, action: dict, started: int) -> ActionResult:
+        """Dispatch an ``offset_group`` container action.
+
+        Phase 1 — the wire-path optimizer (see ``offset_dispatch_optimizer``)
+        plans the cheapest OPC_OFFSET sequence: one broadcast formula packet
+        when participation covers all groups, or per-group EXPLICIT
+        otherwise. The runner emits each WireOp via ``ControlService``.
+
+        Phase 2 — for each child action, dispatch the effect via the matching
+        ControlService method (``send_wled_control`` /
+        ``send_wled_preset`` / ``send_rl_preset_by_id``). The OFFSET_MODE
+        flag is *forced* on regardless of the child's flags_override, so
+        the wire-level acceptance gate selects exactly the offset-configured
+        devices. The runner never auto-emits OPC_SYNC — scenes opt into sync
+        via an explicit ``sync`` top-level action after the container.
+
+        ActionResult.detail carries:
+            * ``wire_path``: the optimizer strategy chosen (e.g. ``A_broadcast_formula``).
+            * ``offset_packets``: per-OPC_OFFSET ok/fail map keyed by target group.
+            * ``children``: list of {kind, ok, [error], [stage]} per child.
+        """
+        target_groups = action.get("groups")
+        offset_spec = action.get("offset") or {"mode": "none"}
+        offset_mode = (offset_spec.get("mode") or "none").lower()
+        children = action.get("actions") or []
+
+        known_group_ids = self._known_group_ids()
+
+        # Phase 1: optimizer-planned OPC_OFFSET sequence.
+        plan = plan_offset_setup(
+            participant_groups=target_groups,
+            offset=offset_spec,
+            known_group_ids=known_group_ids,
+        )
+
+        logger.info(
+            "offset_group dispatch: groups=%s offset.mode=%s strategy=%s "
+            "offset_packets=%d children=%d",
+            target_groups, offset_mode, plan.strategy,
+            plan.packet_count, len(children),
+        )
+
+        offset_results: Dict[str, Dict[str, Any]] = {}
+        any_offset_failed = False
+        for op in plan.ops:
+            payload = dict(op.payload)
+            mode = payload.pop("mode")
+            ok = bool(
+                self.control_service.send_offset(
+                    targetGroup=op.target_group, mode=mode, **payload,
+                )
+            )
+            row: Dict[str, Any] = {"ok": ok, "mode": mode}
+            if op.target_group != 255:
+                row["target_group"] = op.target_group
+            if not ok:
+                row["stage"] = "offset"
+                row["error"] = "send_offset_failed"
+                any_offset_failed = True
+            offset_results[str(op.target_group)] = row
+
+        # Phase 2: dispatch each child action with OFFSET_MODE forced on.
+        child_results: List[Dict[str, Any]] = []
+        any_child_failed = False
+        for child_idx, child in enumerate(children):
+            child_outcome = self._dispatch_offset_group_child(child)
+            child_results.append({"index": child_idx, **child_outcome})
+            if not child_outcome["ok"]:
+                any_child_failed = True
+
+        all_ok = (
+            (not any_offset_failed)
+            and (not any_child_failed)
+            and (bool(plan.ops) or bool(children))
+        )
+        detail: Dict[str, Any] = {
+            "wire_path": plan.strategy,
+            "offset_mode": offset_mode,
+            "offset_packets": offset_results,
+            "offset_packet_count": plan.packet_count,
+            "offset_total_bytes": plan.total_bytes,
+            "children": child_results,
+        }
+        return ActionResult(
+            index=index, kind=KIND_OFFSET_GROUP, ok=all_ok,
+            error=None if all_ok else "offset_group_partial_failure",
+            duration_ms=self._clock_ms() - started,
+            detail=detail,
+        )
+
+    def _dispatch_offset_group_child(self, child: dict) -> Dict[str, Any]:
+        """Dispatch a single child action inside an offset_group container.
+
+        The OFFSET_MODE flag is forced on; ARM_ON_SYNC stays driven by the
+        child's flags_override / persisted preset flags. Target translation
+        per kind:
+
+            * ``target.kind == "scope"``  → broadcast (groupId=255)
+            * ``target.kind == "group"``  → unicast to group
+            * ``target.kind == "device"`` → unicast to device's last3-MAC
+              (degraded if device unknown)
+        """
+        kind = child.get("kind")
+        child_target = child.get("target") or {"kind": "scope"}
+        target_kwargs = self._resolve_offset_group_child_target(child_target)
+        if target_kwargs is None:
+            return {
+                "kind": kind, "ok": False, "degraded": True,
+                "error": "target_not_found",
+                "target": dict(child_target),
+            }
+
+        forced = dict(child.get("flags_override") or {})
+        forced["offset_mode"] = True
+
+        if kind == KIND_RL_PRESET:
+            params = dict(child.get("params") or {})
+            preset_ref = params.pop("presetId", None)
+            if preset_ref is None:
+                return {"kind": kind, "ok": False, "error": "missing_preset_id"}
+            rl_service = self.rl_presets_service
+            if rl_service is None:
+                return {"kind": kind, "ok": False, "error": "rl_presets_service_unavailable"}
+            preset = self._lookup_rl_preset(rl_service, preset_ref)
+            if preset is None:
+                return {"kind": kind, "ok": False,
+                        "error": f"preset_not_found: {preset_ref!r}"}
+            base_params = dict(preset.get("params") or {})
+            if "brightness" in params and params["brightness"] is not None:
+                base_params["brightness"] = int(params["brightness"])
+            merged = self._merge_flags_into_params(
+                base_params, preset.get("flags") or {}, forced,
+            )
+            ok = bool(self.control_service.send_wled_control(params=merged, **target_kwargs))
+            return {"kind": kind, "ok": ok,
+                    **({} if ok else {"error": "send_failed"})}
+
+        if kind == KIND_WLED_CONTROL:
+            merged = self._merge_flags_into_params(
+                dict(child.get("params") or {}), {}, forced,
+            )
+            ok = bool(self.control_service.send_wled_control(params=merged, **target_kwargs))
+            return {"kind": kind, "ok": ok,
+                    **({} if ok else {"error": "send_failed"})}
+
+        if kind == KIND_WLED_PRESET:
+            merged = self._merge_flags_into_params(
+                dict(child.get("params") or {}), {}, forced,
+            )
+            ok = bool(self.control_service.send_wled_preset(params=merged, **target_kwargs))
+            return {"kind": kind, "ok": ok,
+                    **({} if ok else {"error": "send_failed"})}
+
+        return {"kind": kind, "ok": False, "error": "unknown_child_kind"}
+
+    def _resolve_offset_group_child_target(self, target: dict) -> Optional[dict]:
+        """Translate an offset_group child target into ControlService kwargs.
+
+        Returns ``None`` only when a device target cannot be resolved
+        (degraded path). For ``scope`` and ``group`` we always return a
+        valid kwargs dict — the wire-level acceptance gate handles
+        per-device filtering on the firmware side.
+        """
+        tk = target.get("kind")
+        if tk == "scope":
+            return {"targetGroup": 255}
+        if tk == "group":
+            return {"targetGroup": int(target.get("value"))}
+        if tk == "device":
+            getter = getattr(self.controller, "getDeviceFromAddress", None)
+            if getter is None:
+                return None
+            device = getter(str(target.get("value")))
+            if device is None:
+                return None
+            return {"targetDevice": device}
+        return None
+
+    def _known_group_ids(self) -> List[int]:
+        """Best-effort list of currently-configured group ids.
+
+        Used by the optimizer to decide between broadcast-formula and
+        per-group strategies. Falls back to an empty list when no device
+        repository is wired (test environments) — Strategy A still works
+        because the broadcast doesn't need a device list.
+        """
+        repo = getattr(self.controller, "device_repository", None)
+        if repo is None:
+            return []
+        try:
+            devices = list(repo.list())
+        except Exception:
+            # swallow-ok: optimizer falls back to no-known-devices (Strategy A
+            # broadcast still works without a device list); a flaky repository
+            # call must not break scene playback.
+            return []
+        ids: set[int] = set()
+        for d in devices:
+            gid = getattr(d, "groupId", None)
+            if isinstance(gid, int) and 0 <= gid <= 254:
+                ids.add(gid)
+        return sorted(ids)
 
     def _run_startblock(self, index: int, action: dict, started: int) -> ActionResult:
         target_kwargs = self._resolve_target(action["target"], KIND_STARTBLOCK, index)

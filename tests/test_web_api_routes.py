@@ -141,6 +141,229 @@ class WebApiRouteTests(unittest.TestCase):
         self.assertEqual(options["presets"], [{"value": "01", "label": "Red"}])
 
 
+class _RouteValidationContext(_FakeContext):
+    """Extends ``_FakeContext`` for routes that validate body fields and
+    short-circuit before any ``rl_instance`` / repository call. The
+    rename/delete routes only need a body and the lock context; the
+    devices/control routes also need ``sse.master.set`` and
+    ``sse.broadcast``."""
+
+    def __init__(self):
+        super().__init__()
+        self.group_repo = None
+        self.rl_grouplist = self._groups
+        self.log = lambda msg: None
+        self.rl_instance = type(
+            "RL", (), {
+                "uiPresetList": [],
+                "save_to_db": lambda self, *a, **kw: None,
+                "sendGroupPreset": lambda *a, **kw: True,
+                "sendRaceLink": lambda *a, **kw: True,
+                "getDeviceFromAddress": lambda self, mac: None,
+            },
+        )()
+        # Replace the bare-bones ``sse`` from _FakeContext with a stub
+        # that records broadcasts and accepts ``master.set(**kwargs)``.
+        class _StubMaster:
+            def __init__(self):
+                self.snapshots = []
+            def snapshot(self):
+                return {}
+            def set(self, **kwargs):
+                self.snapshots.append(dict(kwargs))
+        class _StubSse:
+            def __init__(self):
+                self.master = _StubMaster()
+                self.broadcasts = []
+            def broadcast(self, topic, payload):
+                self.broadcasts.append((topic, dict(payload)))
+        self.sse = _StubSse()
+
+
+class GroupsRenameDeleteValidationTests(unittest.TestCase):
+    """B1 + B4: missing/null/garbage ``id`` in the body must produce a
+    clean 400 with a descriptive message, not a 500 from
+    ``int(None)`` blowing up inside the route."""
+
+    def setUp(self):
+        self.api_module = _import_api_module()
+        self.api_module.jsonify = lambda payload: payload
+        self._flask_request = sys.modules["flask"].request
+        self._flask_request.get_json = lambda silent=True: {}
+        self.bp = _FakeBlueprint()
+        self.ctx = _RouteValidationContext()
+        self.api_module.register_api_routes(self.bp, self.ctx)
+
+    def _set_body(self, body):
+        snapshot = dict(body) if body is not None else None
+        self._flask_request.get_json = lambda silent=True: snapshot
+
+    def _post(self, path):
+        handler = self.bp.routes[(path, ("POST",))]
+        return handler()
+
+    def _expect_bad_request(self, path, body, *, expect_in_error=""):
+        self._set_body(body)
+        result = self._post(path)
+        # ``register_api_routes`` returns ``(payload, status)`` for non-200
+        # responses thanks to our jsonify stub.
+        self.assertIsInstance(result, tuple, f"expected (payload, status) tuple, got {result!r}")
+        payload, status = result
+        self.assertEqual(status, 400, f"expected 400, got {status} ({payload})")
+        self.assertFalse(payload["ok"])
+        if expect_in_error:
+            self.assertIn(expect_in_error, payload["error"])
+
+    def test_rename_with_empty_body_returns_400_not_500(self):
+        self._expect_bad_request(
+            "/api/groups/rename", {}, expect_in_error="missing field",
+        )
+
+    def test_rename_with_null_id_returns_400_not_500(self):
+        self._expect_bad_request(
+            "/api/groups/rename", {"id": None}, expect_in_error="must not be null",
+        )
+
+    def test_rename_with_non_numeric_id_returns_400_not_500(self):
+        self._expect_bad_request(
+            "/api/groups/rename", {"id": "abc"}, expect_in_error="must be an integer",
+        )
+
+    def test_delete_with_empty_body_returns_400_not_500(self):
+        self._expect_bad_request(
+            "/api/groups/delete", {}, expect_in_error="missing field",
+        )
+
+    def test_delete_with_null_id_returns_400_not_500(self):
+        self._expect_bad_request(
+            "/api/groups/delete", {"id": None}, expect_in_error="must not be null",
+        )
+
+    def test_rename_with_valid_id_proceeds_past_validation(self):
+        """Smoke check: a well-formed id reaches the in-memory mutation
+        path. We don't assert on the rename effect itself — that's
+        covered by other tests; we just verify the validation gate
+        lets a good request through."""
+        self._set_body({"id": 0, "name": "Group 1 renamed"})
+        result = self._post("/api/groups/rename")
+        # 200 OK comes back as a plain dict, not a (payload, status) tuple.
+        self.assertNotIsInstance(result, tuple, f"unexpected error response: {result}")
+        self.assertTrue(result["ok"])
+
+
+class DevicesControlRoutesTests(unittest.TestCase):
+    """B2: ``api_devices_control`` previously called the renamed-away
+    ``sendGroupControl`` (always ``AttributeError`` → 500). Verify it
+    now calls ``sendGroupPreset`` and that ``changed`` reflects the
+    underlying boolean rather than blindly counting attempts."""
+
+    def _make_ctx(self, *, group_send_returns: bool = True,
+                  device_send_returns: bool = True):
+        ctx = _RouteValidationContext()
+        ctx.tasks = type(
+            "Tasks", (), {
+                "is_running": staticmethod(lambda: False),
+                "snapshot": staticmethod(lambda: {}),
+            },
+        )()
+        # Capture the dispatched calls so the test can assert what got
+        # sent (or didn't).
+        self.group_calls: list[tuple] = []
+        self.device_calls: list[tuple] = []
+
+        def _send_group_preset(gid, flags, preset_id, brightness):
+            self.group_calls.append((gid, flags, preset_id, brightness))
+            return group_send_returns
+
+        def _send_race_link(dev, flags, preset_id, brightness):
+            self.device_calls.append((dev.addr, flags, preset_id, brightness))
+            return device_send_returns
+
+        def _get_dev(mac):
+            return next((d for d in ctx._devices if d.addr == mac), None)
+
+        ctx.rl_instance = type(
+            "RL", (), {
+                "uiPresetList": [],
+                "save_to_db": lambda self, *a, **kw: None,
+                "sendGroupPreset": staticmethod(_send_group_preset),
+                "sendRaceLink": staticmethod(_send_race_link),
+                "getDeviceFromAddress": staticmethod(_get_dev),
+            },
+        )()
+        return ctx
+
+    def setUp(self):
+        self.api_module = _import_api_module()
+        self.api_module.jsonify = lambda payload: payload
+        self._flask_request = sys.modules["flask"].request
+        self._flask_request.get_json = lambda silent=True: {}
+        self.bp = _FakeBlueprint()
+
+    def _register(self, ctx):
+        self.api_module.register_api_routes(self.bp, ctx)
+
+    def _post(self, path, body):
+        snapshot = dict(body)
+        self._flask_request.get_json = lambda silent=True: snapshot
+        handler = self.bp.routes[(path, ("POST",))]
+        return handler()
+
+    def test_group_path_calls_sendGroupPreset_not_sendGroupControl(self):
+        """B2 stale-rename fix: the route used to call ``sendGroupControl``
+        which no longer exists, so every group-control POST returned 500.
+        Now it calls ``sendGroupPreset`` and, on success, reports
+        ``changed: 1``."""
+        ctx = self._make_ctx(group_send_returns=True)
+        self._register(ctx)
+        result = self._post("/api/devices/control", {
+            "groupId": 1, "flags": 0x01, "presetId": 5, "brightness": 200,
+        })
+        self.assertNotIsInstance(result, tuple, f"unexpected error response: {result}")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["changed"], 1)
+        self.assertEqual(self.group_calls, [(1, 0x01, 5, 200)])
+
+    def test_group_path_with_failing_send_reports_zero_changed(self):
+        """B2 return-value propagation: if the underlying send returns
+        False (transport not ready), ``changed`` must stay at 0 — not
+        the silent-success ``1`` the route used to report."""
+        ctx = self._make_ctx(group_send_returns=False)
+        self._register(ctx)
+        result = self._post("/api/devices/control", {
+            "groupId": 1, "flags": 0, "presetId": 5, "brightness": 200,
+        })
+        self.assertNotIsInstance(result, tuple, f"unexpected error response: {result}")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["changed"], 0,
+                         "transport-failure must surface as changed=0")
+
+    def test_device_path_propagates_failure_into_changed(self):
+        """Same B2 contract on the per-device path: a False return from
+        ``sendRaceLink`` does not increment ``changed``."""
+        ctx = self._make_ctx(device_send_returns=False)
+        self._register(ctx)
+        result = self._post("/api/devices/control", {
+            "macs": ["AABBCCDDEEFF"], "flags": 0, "presetId": 5, "brightness": 200,
+        })
+        self.assertNotIsInstance(result, tuple, f"unexpected error response: {result}")
+        self.assertEqual(result["changed"], 0)
+
+    def test_group_path_with_garbage_groupId_returns_400(self):
+        """Defensive 400 for a non-numeric groupId — used to crash with
+        ``ValueError: invalid literal for int()`` and return 500 via
+        the outer except."""
+        ctx = self._make_ctx()
+        self._register(ctx)
+        result = self._post("/api/devices/control", {
+            "groupId": "abc", "flags": 0, "presetId": 5, "brightness": 200,
+        })
+        self.assertIsInstance(result, tuple)
+        payload, status = result
+        self.assertEqual(status, 400)
+        self.assertIn("groupId", payload["error"])
+
+
 class _RecordingSse:
     def __init__(self):
         self.broadcasts = []
@@ -238,7 +461,8 @@ class WebApiScenesRouteTests(unittest.TestCase):
         kinds = {entry["kind"] for entry in payload["kinds"]}
         self.assertEqual(
             kinds,
-            {"rl_preset", "wled_preset", "wled_control", "startblock", "sync", "delay"},
+            {"rl_preset", "wled_preset", "wled_control", "startblock",
+             "sync", "delay", "offset_group"},
         )
         self.assertIn("flag_keys", payload)
         # All four user-intent flags must be exposed
@@ -278,6 +502,67 @@ class WebApiScenesRouteTests(unittest.TestCase):
         result = self._route("/api/scenes", "POST")()
         self.assertEqual(result[1], 400)
         self.assertEqual(self.ctx.sse.broadcasts, [])
+
+    # ---- estimate -----------------------------------------------------
+
+    def test_editor_schema_includes_offset_group_and_lora_params(self):
+        payload = self._route("/api/scenes/editor-schema", "GET")()
+        self.assertIn("offset_group", payload)
+        og = payload["offset_group"]
+        self.assertIn("modes", og)
+        self.assertIn("max_groups", og)
+        self.assertIn("child_kinds", og)
+        self.assertIn("lora", payload)
+        self.assertIn("sf", payload["lora"])
+        self.assertIn("bw_hz", payload["lora"])
+
+    def test_estimate_for_saved_scene_returns_per_action_and_total(self):
+        self._set_body({"label": "Cost", "actions": [
+            {"kind": "sync"},
+            {"kind": "delay", "duration_ms": 50},
+        ]})
+        self._route("/api/scenes", "POST")()
+        result = self._route("/api/scenes/<key>/estimate", "GET")("cost")
+        self.assertTrue(result["ok"])
+        self.assertEqual(len(result["per_action"]), 2)
+        # sync = 1 packet; delay = 0 packets but +50 ms airtime.
+        self.assertEqual(result["total"]["packets"], 1)
+        self.assertGreaterEqual(result["total"]["airtime_ms"], 50.0)
+        self.assertIn("lora", result)
+
+    def test_estimate_for_unknown_scene_returns_404(self):
+        result = self._route("/api/scenes/<key>/estimate", "GET")("ghost")
+        self.assertEqual(result, ({"ok": False, "error": "scene not found"}, 404))
+
+    def test_estimate_draft_endpoint_validates_actions(self):
+        self._set_body({"label": "Draft", "actions": [{"kind": "unknown"}]})
+        result = self._route("/api/scenes/estimate", "POST")()
+        self.assertEqual(result[1], 400)
+
+    def test_estimate_draft_endpoint_returns_cost_for_valid_draft(self):
+        self._set_body({
+            "label": "Draft",
+            "actions": [
+                {"kind": "offset_group",
+                 "groups": "all",
+                 "offset": {"mode": "linear", "base_ms": 0, "step_ms": 100},
+                 "actions": [
+                     {"kind": "wled_control",
+                      "target": {"kind": "scope"},
+                      "params": {"mode": 5}},
+                 ]},
+                {"kind": "sync"},
+            ],
+        })
+        result = self._route("/api/scenes/estimate", "POST")()
+        self.assertTrue(result["ok"])
+        # offset_group: 1 OPC_OFFSET + 1 child = 2; sync = 1. Total = 3.
+        self.assertEqual(result["total"]["packets"], 3)
+        # Per-action detail surfaces the optimizer strategy.
+        self.assertEqual(
+            result["per_action"][0]["detail"]["wire_path"],
+            "A_broadcast_formula",
+        )
 
     # ---- update / delete / duplicate ----------------------------------
 

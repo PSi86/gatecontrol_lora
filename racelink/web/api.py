@@ -14,15 +14,30 @@ from ..domain import (
 )
 from ..domain.flags import USER_FLAG_KEYS
 from ..services import OTAWorkflowService, SpecialsService
+from ..services.scene_cost_estimator import estimate_scene, lora_parameters
 from ..services.scenes_service import (
+    GROUP_ID_MAX,
+    KIND_OFFSET_GROUP,
     KIND_RL_PRESET,
     KIND_STARTBLOCK,
     KIND_WLED_CONTROL,
     KIND_WLED_PRESET,
+    MAX_GROUPS_OFFSET_ENTRIES,
+    MAX_OFFSET_GROUP_CHILDREN,
+    OFFSET_FORMULA_MODES,
+    OFFSET_GROUP_CHILD_KINDS,
+    OFFSET_MS_MAX,
+    OFFSET_MS_MIN,
+    SceneService,
     get_action_kinds_metadata,
 )
 from .dto import group_counts, serialize_device
-from .request_helpers import parse_recv3_from_addr, parse_wifi_options
+from .request_helpers import (
+    RequestParseError,
+    parse_recv3_from_addr,
+    parse_wifi_options,
+    require_int,
+)
 
 
 def _sse_refresh(ctx, scopes) -> None:
@@ -382,7 +397,13 @@ def register_api_routes(bp, ctx):
     @bp.route("/api/groups/rename", methods=["POST"])
     def api_groups_rename():
         body = request.get_json(silent=True) or {}
-        gid = int(body.get("id"))
+        # B1: was ``int(body.get("id"))`` which crashes the route with a
+        # 500 on missing or null id; require_int returns a clean 400
+        # validation error instead.
+        try:
+            gid = require_int(body, "id", label="group id")
+        except RequestParseError as ex:
+            return jsonify({"ok": False, "error": str(ex)}), 400
         name = str(body.get("name", "")).strip()
         with ctx.rl_lock:
             if gid < 0 or gid >= len(ctx.groups()):
@@ -404,7 +425,12 @@ def register_api_routes(bp, ctx):
     @bp.route("/api/groups/delete", methods=["POST"])
     def api_groups_delete():
         body = request.get_json(silent=True) or {}
-        gid = int(body.get("id"))
+        # B1: same fix as api_groups_rename — guard against
+        # missing/null id with a clean 400 instead of a 500.
+        try:
+            gid = require_int(body, "id", label="group id")
+        except RequestParseError as ex:
+            return jsonify({"ok": False, "error": str(ex)}), 400
         with ctx.rl_lock:
             if gid < 0 or gid >= len(ctx.groups()):
                 return jsonify({"ok": False, "error": "invalid group id"}), 400
@@ -636,27 +662,36 @@ def register_api_routes(bp, ctx):
         if flags is None or preset_id is None or brightness is None:
             return jsonify({"ok": False, "error": "missing flags/presetId/brightness"}), 400
 
+        # B2 cleanup: ``sendGroupControl`` was renamed to
+        # ``sendGroupPreset`` in the Phase D rework; the old name no
+        # longer exists on the controller, so the previous code path
+        # always raised ``AttributeError`` and returned a confusing 500.
+        # Removed the obsolete signature-compat ``except TypeError``
+        # fallback at the same time. ``changed`` now reflects the
+        # *actual* number of frames the transport accepted (B2): the
+        # underlying send returns False when the gateway is offline, so
+        # the route stops reporting ``changed: N`` for sends that
+        # silently dropped on the floor.
         changed = 0
         try:
             if group_id is not None:
                 try:
-                    ctx.rl_instance.sendGroupControl(int(group_id), flags, preset_id, brightness)
-                except TypeError:
-                    ctx.rl_instance.sendGroupControl(int(group_id), int(bool(flags & 0x01)), preset_id, brightness)
-                changed = 1
+                    gid_int = int(group_id)
+                except (TypeError, ValueError):
+                    return jsonify({"ok": False, "error": "groupId must be an integer"}), 400
+                if ctx.rl_instance.sendGroupPreset(gid_int, flags, preset_id, brightness):
+                    changed = 1
             elif macs:
                 for mac in macs:
                     dev = ctx.rl_instance.getDeviceFromAddress(mac)
                     if dev:
-                        try:
-                            ctx.rl_instance.sendRaceLink(dev, flags, preset_id, brightness)
-                        except TypeError:
-                            ctx.rl_instance.sendRaceLink(dev, int(bool(flags & 0x01)), preset_id, brightness)
-                        changed += 1
+                        if ctx.rl_instance.sendRaceLink(dev, flags, preset_id, brightness):
+                            changed += 1
             else:
                 return jsonify({"ok": False, "error": "missing macs or groupId"}), 400
         except Exception as ex:
-            # swallow-ok: best-effort fallback; caller proceeds with safe default
+            # swallow-ok: log and translate to 500 for any unexpected
+            # path (e.g. a device-repository raises during lookup).
             ctx.log(f"RaceLink: control failed: {ex}")
             return jsonify({"ok": False, "error": str(ex)}), 500
 
@@ -869,6 +904,26 @@ def register_api_routes(bp, ctx):
             "ok": True,
             "kinds": kinds_out,
             "flag_keys": list(USER_FLAG_KEYS),
+            # Top-level target kinds. ``offset_group`` is now an action kind
+            # (a container with its own children), not a target kind, so the
+            # legacy ``groups_offset`` target is gone.
+            "target_kinds": ["group", "device"],
+            "offset_group": {
+                "max_groups":   MAX_GROUPS_OFFSET_ENTRIES,
+                "max_children": MAX_OFFSET_GROUP_CHILDREN,
+                "group_id":     {"min": 0, "max": GROUP_ID_MAX},
+                "offset_ms":    {"min": OFFSET_MS_MIN, "max": OFFSET_MS_MAX},
+                "modes":        list(OFFSET_FORMULA_MODES),
+                "base_ms":      {"min": -32768, "max": 32767},
+                "step_ms":      {"min": -32768, "max": 32767},
+                "center":       {"min": 0,      "max": GROUP_ID_MAX},
+                "cycle":        {"min": 1,      "max": 255},
+                "supports_all_groups": True,
+                "child_kinds":  list(OFFSET_GROUP_CHILD_KINDS),
+                "child_target_kinds": ["scope", "group", "device"],
+            },
+            # Active LoRa parameters for the cost-estimator tooltip.
+            "lora": lora_parameters(),
         })
 
     @bp.route("/api/scenes/<key>", methods=["GET"])
@@ -940,6 +995,107 @@ def register_api_routes(bp, ctx):
             return jsonify({"ok": False, "error": "scene not found"}), 404
         _sse_refresh(ctx, {state_scope.SCENES})
         return jsonify({"ok": True, "scene": scene})
+
+    def _known_group_ids_from_ctx() -> list:
+        """Best-effort list of currently-known group ids for the optimizer.
+        Falls back to an empty list when no device repository is wired."""
+        try:
+            ctrl = getattr(ctx.rl_instance, "controller", None) if ctx.rl_instance else None
+            repo = getattr(ctrl, "device_repository", None) if ctrl else None
+            if repo is None:
+                return []
+            ids: set[int] = set()
+            for d in repo.list():
+                gid = getattr(d, "groupId", None)
+                if isinstance(gid, int) and 0 <= gid <= 254:
+                    ids.add(gid)
+            return sorted(ids)
+        except Exception:
+            # swallow-ok: optimizer has a no-known-devices fallback; an
+            # estimate is best-effort observability, not a hard contract.
+            return []
+
+    def _rl_preset_lookup_for_estimator():
+        """Mirror ``_lookup_rl_preset`` from the runner so the estimator
+        can resolve the same references the runner would. Returns ``None``
+        if the rl-presets service isn't wired (estimator falls back to the
+        action's own params, under-reporting but never crashing)."""
+        if rl_presets_service is None:
+            return None
+        def lookup(ref):
+            try:
+                if isinstance(ref, str) and ref.startswith("RL:"):
+                    return rl_presets_service.get(ref[3:])
+                if isinstance(ref, int):
+                    return rl_presets_service.get_by_id(ref)
+                if isinstance(ref, str):
+                    stripped = ref.strip()
+                    if stripped.isdigit():
+                        return rl_presets_service.get_by_id(int(stripped))
+                    return rl_presets_service.get(stripped)
+            except Exception:
+                # swallow-ok: estimate path never blocks the editor.
+                return None
+            return None
+        return lookup
+
+    def _scene_cost_payload(scene_dict) -> dict:
+        cost = estimate_scene(scene_dict,
+                              known_group_ids=_known_group_ids_from_ctx(),
+                              rl_preset_lookup=_rl_preset_lookup_for_estimator())
+        return {
+            "ok": True,
+            "total": {
+                "packets":    cost.total.packets,
+                "bytes":      cost.total.bytes,
+                "airtime_ms": cost.total.airtime_ms,
+            },
+            "per_action": [
+                {
+                    "packets":    a.packets,
+                    "bytes":      a.bytes,
+                    "airtime_ms": a.airtime_ms,
+                    "detail":     a.detail or {},
+                }
+                for a in cost.per_action
+            ],
+            "lora": lora_parameters(),
+        }
+
+    @bp.route("/api/scenes/<key>/estimate", methods=["GET"])
+    def api_scenes_estimate(key):
+        """Return projected wire cost (packets, bytes, airtime) for a saved
+        scene. The editor uses this to render the per-action cost badge and
+        the scene-level total."""
+        if scenes_service is None:
+            return _scenes_unavailable()
+        scene = scenes_service.get(key)
+        if scene is None:
+            return jsonify({"ok": False, "error": "scene not found"}), 404
+        return jsonify(_scene_cost_payload(scene))
+
+    @bp.route("/api/scenes/estimate", methods=["POST"])
+    def api_scenes_estimate_draft():
+        """Estimate cost for an unsaved draft. Body shape mirrors POST/PUT
+        scene: ``{label?, actions: [...]}``. Validates the actions through
+        the canonical validator (so the operator sees errors immediately
+        on bad input) and then runs the estimator on the canonical form."""
+        if scenes_service is None:
+            return _scenes_unavailable()
+        body = request.get_json(silent=True) or {}
+        try:
+            # Round-trip the actions through the validator without touching
+            # storage. ``replace_all`` is too heavy; we only need canonical
+            # actions, so we build a fake scene dict.
+            from ..services.scenes_service import _canonical_actions  # local import
+            canonical_actions = _canonical_actions(body.get("actions") or [])
+        except ValueError as ex:
+            return jsonify({"ok": False, "error": str(ex)}), 400
+        scene_dict = {
+            "label": (body.get("label") or "").strip() or "draft",
+            "actions": canonical_actions,
+        }
+        return jsonify(_scene_cost_payload(scene_dict))
 
     @bp.route("/api/scenes/<key>/run", methods=["POST"])
     def api_scenes_run(key):

@@ -22,6 +22,7 @@ class LP:
     OPC_SYNC = 0x06
     OPC_STREAM = 0x07
     OPC_CONTROL = 0x08
+    OPC_OFFSET = 0x09
     OPC_ACK = 0x7E
 
     @staticmethod
@@ -41,6 +42,7 @@ if _HAVE_AUTO:
         LP.OPC_SYNC = getattr(RLPA, "OPC_SYNC", LP.OPC_SYNC)
         LP.OPC_STREAM = getattr(RLPA, "OPC_STREAM", LP.OPC_STREAM)
         LP.OPC_CONTROL = getattr(RLPA, "OPC_CONTROL", LP.OPC_CONTROL)
+        LP.OPC_OFFSET = getattr(RLPA, "OPC_OFFSET", LP.OPC_OFFSET)
         LP.OPC_ACK = getattr(RLPA, "OPC_ACK", LP.OPC_ACK)
 
         make_type = getattr(RLPA, "make_type", LP.make_type)

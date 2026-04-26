@@ -103,21 +103,138 @@ dialog::backdrop{ background:rgba(0,0,0,.4); }
 .rl-scene-action-row{
   border:1px solid #2a2a32; border-radius:8px; padding:8px;
   background:#1a1a23; display:grid;
-  grid-template-columns: 28px minmax(140px, 200px) 1fr auto; gap:8px;
+  grid-template-columns: 28px minmax(140px, 200px) 1fr auto;
+  grid-template-areas:
+    "idx kind body ctrl"
+    "cost cost cost cost";
+  row-gap:6px; column-gap:8px;
   align-items:start;
 }
+.rl-scene-action-row > .rl-scene-action-index{ grid-area: idx; }
+.rl-scene-action-row > .rl-scene-action-kind{ grid-area: kind; }
+.rl-scene-action-row > .rl-scene-action-body{ grid-area: body; }
+.rl-scene-action-row > .rl-scene-action-controls{ grid-area: ctrl; }
+.rl-scene-action-row > .rl-scene-action-cost{ grid-area: cost; justify-self:end; }
 .rl-scene-action-row.degraded{ border-color:#5a2a2a; background:#221314; }
 .rl-scene-action-row.running{ border-color:var(--accent); }
 .rl-scene-action-row.ok{ border-color:#2d553f; }
 .rl-scene-action-row.error{ border-color:#5a2a2a; }
-.rl-scene-action-index{ color:var(--muted); font-variant-numeric:tabular-nums; padding-top:6px; }
+.rl-scene-action-index{
+  color:var(--muted); font-variant-numeric:tabular-nums; padding-top:6px;
+  display:flex; flex-direction:column; align-items:center; gap:2px;
+}
+/* Drag handle: SortableJS initiates drags only from this element so the
+   inner controls (selects, inputs, buttons) stay click-/keyboard-only. */
+.rl-scene-action-grip{
+  cursor:grab; user-select:none; line-height:1;
+  font-size:14px; color:var(--muted);
+  padding:2px 4px; border-radius:3px;
+}
+.rl-scene-action-grip:hover{ background:#2a2a32; color:#cfe0ff; }
+.rl-scene-action-grip:active{ cursor:grabbing; }
+.rl-scene-action-index-label{ font-size:12px; }
+/* SortableJS marker classes — the ghost is the placeholder shown in the
+   list while dragging; chosen is the row currently being dragged; drag
+   styles the floating element under the cursor. */
+.rl-scene-action-row-ghost{ opacity:0.35; background:#2a2a32; }
+.rl-scene-action-row-chosen{ background:#1f1f28; }
+.rl-scene-action-row-drag{ box-shadow:0 4px 12px rgba(0,0,0,0.4); }
 .rl-scene-action-kind{ display:flex; flex-direction:column; gap:6px; }
 .rl-scene-action-kind label{ font-size:12px; color:var(--muted); }
 .rl-scene-action-body{ display:flex; flex-direction:column; gap:6px; }
-.rl-scene-action-controls{ display:flex; flex-direction:column; gap:4px; align-items:stretch; }
-.rl-scene-action-controls button{ font-size:12px; padding:4px 8px; }
-.rl-scene-target{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+/* Kind column has a "Kind" label above its dropdown that pushes the
+   dropdown ~22px down. Body content for delay/sync is a single row that
+   would otherwise sit at the row's top edge — visually offset from the
+   dropdown. Pad the body down so it lines up with the dropdown. Other
+   kinds (rl_preset, wled_preset, wled_control, startblock) have a
+   multi-row body that already aligns acceptably; we don't pad them. */
+.rl-scene-action-body[data-kind="delay"],
+.rl-scene-action-body[data-kind="sync"]{ padding-top:22px; }
+.rl-scene-action-controls{ display:flex; flex-direction:column; gap:4px; align-items:stretch; min-width:80px; }
+.rl-scene-action-controls button{ font-size:12px; padding:4px 10px; white-space:nowrap; }
+.rl-scene-target{ display:flex; flex-direction:column; gap:8px; }
+.rl-scene-target-radios{ display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
 .rl-scene-target label.inline{ font-size:12px; color:var(--muted); }
+.rl-scene-target-body{ display:flex; flex-direction:column; gap:6px; }
+
+/* offset_group container action ------------------------------------- */
+.rl-offset-group-container{
+  display:flex; flex-direction:column; gap:10px;
+}
+.rl-offset-group-warning{
+  padding:6px 10px; border-radius:4px;
+  background:#3a2a18; border:1px solid #6a4a20; color:#ffd9a8;
+  font-size:12px;
+}
+.rl-offset-group-children{
+  display:flex; flex-direction:column; gap:6px;
+  padding:8px; border:1px dashed #2a2a32; border-radius:6px; background:#101019;
+}
+.rl-offset-group-children-label{ font-size:11px; }
+.rl-offset-group-children-list{ display:flex; flex-direction:column; gap:6px; }
+.rl-offset-group-children-empty{ font-size:12px; padding:6px 4px; }
+.rl-offset-group-child-row{
+  display:grid;
+  grid-template-columns: 28px minmax(140px, 200px) 1fr auto; gap:8px;
+  align-items:start;
+  padding:6px; border:1px solid #1f1f28; border-radius:4px; background:#15151c;
+}
+.rl-offset-group-child-row > .rl-scene-action-index{ grid-column: 1; }
+.rl-offset-group-child-row > .rl-scene-action-kind{ grid-column: 2; }
+.rl-offset-group-child-row > .rl-scene-action-body{ grid-column: 3; }
+.rl-offset-group-child-row > .rl-scene-action-controls{ grid-column: 4; min-width:80px; }
+.rl-offset-group-add-child{
+  display:flex; align-items:center; gap:6px; padding-top:4px;
+  border-top:1px dashed #2a2a32;
+}
+.rl-offset-group-add-child > .muted{ font-size:12px; }
+
+/* per-action cost badge ---------------------------------------------- */
+.rl-scene-action-cost{
+  font-variant-numeric:tabular-nums;
+  font-size:11px;
+  padding:2px 6px; border-radius:4px;
+  background:#15151c; border:1px solid #2a2a32;
+  white-space:nowrap;
+  margin-top:2px;
+}
+.rl-scene-cost-total{
+  font-variant-numeric:tabular-nums;
+  font-size:12px;
+  padding:2px 8px; border-radius:4px;
+  background:#15151c; border:1px solid #2a2a32;
+}
+
+/* groups_offset formula panel --------------------------------------- */
+.rl-groups-offset{
+  display:flex; flex-direction:column; gap:8px;
+  padding:8px; border:1px solid #2a2a32; border-radius:6px; background:#15151c;
+}
+.rl-groups-offset-all-row{ display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+.rl-groups-offset-all-row > .muted{ font-size:11px; }
+.rl-groups-offset-list-section{ display:flex; flex-direction:column; gap:6px; }
+.rl-groups-offset-quick{ display:flex; gap:6px; flex-wrap:wrap; }
+.rl-groups-offset-quick button{ font-size:12px; padding:3px 8px; }
+.rl-groups-offset-checks{
+  display:flex; flex-wrap:wrap; gap:6px 14px;
+  max-height:140px; overflow-y:auto;
+  padding:6px 8px; border:1px solid #1f1f28; border-radius:4px; background:#101019;
+}
+.rl-groups-offset-mode{ display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+.rl-groups-offset-mode > .muted{ font-size:12px; }
+.rl-groups-offset-params{ display:flex; flex-wrap:wrap; gap:6px 12px; align-items:center; }
+.rl-groups-offset-params span{ font-size:12px; color:var(--muted); }
+.rl-groups-offset-explicit-row{ display:flex; align-items:center; gap:6px; }
+.rl-groups-offset-explicit-row span{ font-size:12px; color:var(--muted); }
+.rl-groups-offset-preview{
+  display:flex; flex-wrap:wrap; gap:4px 8px; align-items:center;
+  font-size:12px;
+}
+.rl-groups-offset-preview-tag{
+  font-variant-numeric:tabular-nums;
+  padding:1px 6px; border-radius:3px;
+  background:#1a1a23; border:1px solid #2a2a32; color:#cfd0e0;
+}
 .rl-scene-vars{ display:flex; flex-wrap:wrap; gap:8px; }
 .rl-scene-flags{ display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
 .rl-scene-flags > span.muted{ font-size:12px; }

@@ -136,10 +136,34 @@ class RaceLink_Host:
         self.groupCfgValid = False
 
         # Transport-level pending expectation (for online/offline determination).
-        self._pending_expect = None  # dict with keys: dev, rule, opcode7, sender_last3, ts
+        # Mutated from two threads:
+        #   * the TX-listener path (``GatewayService.on_transport_tx``)
+        #     stamps a new expectation when an outbound unicast goes
+        #     out — runs on whatever thread called ``_send_m2n``;
+        #   * the RX-reader path (``pending_try_match`` /
+        #     ``pending_window_closed``) reads the expectation and
+        #     clears it on a matching reply or window-closed.
+        # ``_pending_expect_lock`` keeps the read+clear atomic so a TX
+        # thread cannot wedge a new expectation between an RX-thread
+        # snapshot and its clear (lost-update). The clear helpers below
+        # implement compare-and-clear semantics so a stale matcher
+        # cannot wipe a freshly-stamped expectation either.
+        self._pending_expect: Optional[dict] = None
+        self._pending_expect_lock = threading.Lock()
 
         self._transport_hooks_installed = False
-        self._pending_config = {}
+        # ``_pending_config`` is mutated from two threads:
+        # the web request thread (``GatewayService.send_config`` stashes the
+        # outgoing option/data0 keyed by recv3) and the RX reader thread
+        # (``handle_ack_event`` pops the entry on a successful ACK). On
+        # CPython a same-key write+pop race can lose the update silently;
+        # any future iterator over the dict could also raise
+        # ``RuntimeError: dictionary changed size during iteration``.
+        # ``_pending_config_lock`` is held only across the dict mutation
+        # itself — the long-running follow-up (``_apply_config_update``)
+        # runs outside the lock so we never block the RX thread on it.
+        self._pending_config: dict = {}
+        self._pending_config_lock = threading.Lock()
         self._task_manager = None
         self._reconnect_in_progress = False
         self._last_reconnect_ts = 0.0
@@ -826,16 +850,24 @@ class RaceLink_Host:
         return int(flags) & 0xFF, int(preset_id) & 0xFF, int(brightness) & 0xFF
 
     def _update_group_control_cache(self, group_id: int, flags: int, preset_id: int, brightness: int) -> None:
-        for device in self.device_repository.list():
-            try:
-                if (int(getattr(device, "groupId", 0)) & 0xFF) != group_id:
+        # A6: ``device_repository.list()`` returns the *live* storage.
+        # Iterating it while another thread mutates the device list (a
+        # gateway IDENTIFY can append; a delete can remove) used to risk
+        # ``RuntimeError: list changed size during iteration``. The
+        # ``state_repository.lock`` is a reentrant lock, so any caller
+        # already holding it (e.g. the SSE refresh path) re-acquires
+        # without deadlock.
+        with self.state_repository.lock:
+            for device in self.device_repository.list():
+                try:
+                    if (int(getattr(device, "groupId", 0)) & 0xFF) != group_id:
+                        continue
+                    device.flags = flags
+                    device.presetId = preset_id
+                    device.brightness = brightness
+                except Exception:
+                    # swallow-ok: best-effort fallback; caller proceeds with safe default
                     continue
-                device.flags = flags
-                device.presetId = preset_id
-                device.brightness = brightness
-            except Exception:
-                # swallow-ok: best-effort fallback; caller proceeds with safe default
-                continue
 
     def sendRaceLink(self, targetDevice, flags=None, presetId=None, brightness=None):
         """Compatibility entrypoint forwarding a fixed preset-id send to the
@@ -981,6 +1013,83 @@ class RaceLink_Host:
     def _apply_config_update(self, dev: RL_Device, option: int, data0: int) -> None:
         """Compatibility hook forwarding ACK-side config updates to ConfigService."""
         return self.config_service.apply_config_update(dev, option, data0)
+
+    def stash_pending_config(self, recv3_hex: str, option: int, data0: int) -> None:
+        """Record the option/data0 of an in-flight ``OPC_CONFIG`` keyed by
+        the receiver's last-3 MAC bytes (uppercase hex).
+
+        Called by ``GatewayService.send_config`` on the web/scene-runner
+        side just before the transport write. The matching pop happens on
+        the RX reader thread inside ``handle_ack_event`` once the gateway
+        ACKs the config. The dedicated ``_pending_config_lock`` keeps the
+        write+pop atomic without touching the broader state-repository
+        lock, so a stalled RX handler cannot delay device-list mutations
+        and vice versa.
+        """
+        with self._pending_config_lock:
+            self._pending_config[recv3_hex] = {
+                "option": int(option) & 0xFF,
+                "data0": int(data0) & 0xFF,
+            }
+
+    def take_pending_config(self, recv3_hex: str) -> Optional[dict]:
+        """Pop and return the recorded config payload for ``recv3_hex``.
+
+        Returns ``None`` when no pending entry exists (e.g. broadcast
+        ACK, duplicate ACK, or an entry that was already consumed).
+        Held under the same lock as ``stash_pending_config``.
+        """
+        with self._pending_config_lock:
+            return self._pending_config.pop(recv3_hex, None)
+
+    def set_pending_expect(self, dev, rule, opcode7: int, sender_last3: str, ts: float) -> None:
+        """Stamp a pending unicast expectation. Called from the TX
+        listener path right after a unicast request is on the wire."""
+        with self._pending_expect_lock:
+            self._pending_expect = {
+                "dev": dev,
+                "rule": rule,
+                "opcode7": int(opcode7),
+                "sender_last3": str(sender_last3 or "").upper(),
+                "ts": float(ts),
+            }
+
+    def read_pending_expect(self) -> Optional[dict]:
+        """Return the current pending-expect dict (the live reference,
+        not a copy). Callers must treat it as read-only and use
+        :meth:`clear_pending_expect_if` for compare-and-clear semantics
+        — clearing without the reference check would let a stale RX
+        matcher wipe a freshly-stamped expectation from the TX thread.
+        """
+        with self._pending_expect_lock:
+            return self._pending_expect
+
+    def clear_pending_expect_if(self, expected: Optional[dict]) -> bool:
+        """Atomic compare-and-clear: clear ``_pending_expect`` only if
+        it is still the same object reference as ``expected``. Returns
+        True on a successful clear, False if the value has changed
+        (i.e. a new TX-side stamp arrived in the meantime).
+
+        This is the safe partner of :meth:`read_pending_expect` for the
+        RX-thread "I matched the reply, drop the expectation" path —
+        prevents the lost-update where the RX thread reads ``p``, the
+        TX thread immediately stamps a new expectation, and the RX
+        thread's clear wipes it.
+        """
+        with self._pending_expect_lock:
+            if self._pending_expect is expected:
+                self._pending_expect = None
+                return True
+            return False
+
+    def clear_pending_expect(self) -> None:
+        """Unconditional clear. Used by paths that own the lifetime of
+        the expectation (e.g. shutdown / reconnect) and are intentionally
+        wiping any in-flight state. Most timeout/match callers should
+        prefer :meth:`clear_pending_expect_if`.
+        """
+        with self._pending_expect_lock:
+            self._pending_expect = None
 
     def sendSync(self, ts24, brightness, recv3=b"\xFF\xFF\xFF"):
         """Compatibility entrypoint forwarding sync packets to SyncService."""

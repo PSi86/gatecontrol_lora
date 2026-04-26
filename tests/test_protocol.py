@@ -76,6 +76,38 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(packets.build_preset_body(1, 2, 3, 4), b"\x01\x02\x03\x04")
         self.assertEqual(packets.build_config_body(5, 1, 2, 3, 4), b"\x05\x01\x02\x03\x04")
         self.assertEqual(packets.build_sync_body(0x123456, 0x44), b"\x56\x34\x12\x44")
+        # OPC_OFFSET is now variable-length tagged-union. Common header is
+        # groupId(1) + mode(1); per-mode payload follows.
+        # NONE: 2 B (header only).
+        self.assertEqual(packets.build_offset_body(7, "none"), b"\x07\x00")
+        # EXPLICIT: 4 B (uint16 LE offset_ms). String mode also accepted.
+        self.assertEqual(packets.build_offset_body(7, "explicit", offset_ms=0x1234), b"\x07\x01\x34\x12")
+        self.assertEqual(packets.build_offset_body(255, "explicit", offset_ms=0xFFFF), b"\xFF\x01\xFF\xFF")
+        # LINEAR: 6 B (int16 base, int16 step). Negative step round-trips.
+        self.assertEqual(packets.build_offset_body(255, "linear", base_ms=0, step_ms=100),
+                         b"\xFF\x02\x00\x00\x64\x00")
+        self.assertEqual(packets.build_offset_body(255, "linear", base_ms=500, step_ms=-200),
+                         b"\xFF\x02\xF4\x01\x38\xFF")
+        # VSHAPE: 7 B (int16 base, int16 step, uint8 center).
+        self.assertEqual(packets.build_offset_body(255, "vshape", base_ms=0, step_ms=50, center=8),
+                         b"\xFF\x03\x00\x00\x32\x00\x08")
+        # MODULO: 7 B (int16 base, int16 step, uint8 cycle).
+        self.assertEqual(packets.build_offset_body(255, "modulo", base_ms=0, step_ms=100, cycle=4),
+                         b"\xFF\x04\x00\x00\x64\x00\x04")
+        # Builder clamps out-of-range offset values to keep on-wire bytes valid.
+        self.assertEqual(packets.build_offset_body(0, "explicit", offset_ms=-1), b"\x00\x01\x00\x00")
+        self.assertEqual(packets.build_offset_body(0, "explicit", offset_ms=0x10000), b"\x00\x01\xFF\xFF")
+        # parse_offset_body round-trips every mode.
+        for body in [
+            packets.build_offset_body(255, "none"),
+            packets.build_offset_body(7, "explicit", offset_ms=400),
+            packets.build_offset_body(255, "linear", base_ms=0, step_ms=100),
+            packets.build_offset_body(255, "vshape", base_ms=0, step_ms=50, center=5),
+            packets.build_offset_body(255, "modulo", base_ms=10, step_ms=20, cycle=3),
+        ]:
+            decoded = packets.parse_offset_body(body)
+            self.assertIn("mode", decoded)
+            self.assertIn("group_id", decoded)
         self.assertEqual(addressing.to_hex_str("aa:bb:cc:dd:ee:ff"), "AABBCCDDEEFF")
         self.assertEqual(addressing.last3_hex("aa:bb:cc:dd:ee:ff"), "DDEEFF")
 
@@ -88,6 +120,14 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(RLPA.SZ_P_IdentifyReply, 9)
         self.assertEqual(RLPA.SZ_P_StatusReply, 8)
         self.assertEqual(RLPA.SZ_P_Ack, 3)
+        self.assertEqual(RLPA.OPC_OFFSET, 0x09)
+        # OPC_OFFSET is now variable-length; no fixed SZ_P_Offset constant.
+        # The mode enum constants are exposed instead.
+        self.assertEqual(RLPA.OFFSET_MODE_NONE,     0x00)
+        self.assertEqual(RLPA.OFFSET_MODE_EXPLICIT, 0x01)
+        self.assertEqual(RLPA.OFFSET_MODE_LINEAR,   0x02)
+        self.assertEqual(RLPA.OFFSET_MODE_VSHAPE,   0x03)
+        self.assertEqual(RLPA.OFFSET_MODE_MODULO,   0x04)
 
     def test_generated_struct_fields_match_header_contract_used_by_python(self):
         self.assertEqual(
@@ -102,6 +142,11 @@ class ProtocolTests(unittest.TestCase):
             RLPA.STRUCT_FIELDS["P_Sync"],
             [("ts24_0", "uint8_t", 1), ("ts24_1", "uint8_t", 1), ("ts24_2", "uint8_t", 1), ("brightness", "uint8_t", 1)],
         )
+        # P_Offset is no longer a fixed packed struct (variable-length wire
+        # body now). The auto-generator drops it from STRUCT_FIELDS; verify
+        # this is the case so a regression that re-adds a fixed shape would
+        # surface here.
+        self.assertNotIn("P_Offset", RLPA.STRUCT_FIELDS)
         self.assertEqual(
             RLPA.STRUCT_FIELDS["P_IdentifyReply"],
             [("fw", "uint8_t", 1), ("caps", "uint8_t", 1), ("groupId", "uint8_t", 1), ("mac6", "uint8_t", 6)],

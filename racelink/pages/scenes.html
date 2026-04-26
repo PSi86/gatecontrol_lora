@@ -79,6 +79,11 @@
     </form>
   </dialog>
 
+  <!-- SortableJS: vendored at static/vendor/Sortable.min.js for offline
+       operation. Used by scenes.js to drag-reorder action rows. The script
+       loads before scenes.js so window.Sortable is available at boot. -->
+  <script src="{{ rl_static_path }}/vendor/Sortable.min.js"></script>
+
   <!-- racelink.js owns the shared helpers (apiGet, state, SSE, banners) and
        exposes them via window.RL for scenes.js. It also still hosts the RL
        Preset modal (dlgRlPresets) wiring so the "Manage RL Presets…" button

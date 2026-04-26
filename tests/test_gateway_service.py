@@ -54,6 +54,41 @@ class FakeController:
         self._group_repository = GroupRepository([object(), object(), object(), object()])
         self.discovery_active = False
 
+    # Mirror the real controller's pending-config helpers (A3). Tests
+    # remain single-threaded so a real lock is not required, but the
+    # method signatures must match so production code under test can
+    # call them without monkey-patching.
+    def stash_pending_config(self, recv3_hex: str, option: int, data0: int) -> None:
+        self._pending_config[recv3_hex] = {
+            "option": int(option) & 0xFF,
+            "data0": int(data0) & 0xFF,
+        }
+
+    def take_pending_config(self, recv3_hex: str):
+        return self._pending_config.pop(recv3_hex, None)
+
+    # A5: same pattern for the unicast pending-expect slot.
+    def set_pending_expect(self, dev, rule, opcode7, sender_last3, ts):
+        self._pending_expect = {
+            "dev": dev,
+            "rule": rule,
+            "opcode7": int(opcode7),
+            "sender_last3": str(sender_last3 or "").upper(),
+            "ts": float(ts),
+        }
+
+    def read_pending_expect(self):
+        return self._pending_expect
+
+    def clear_pending_expect_if(self, expected) -> bool:
+        if self._pending_expect is expected:
+            self._pending_expect = None
+            return True
+        return False
+
+    def clear_pending_expect(self) -> None:
+        self._pending_expect = None
+
     def _to_hex_str(self, value):
         if isinstance(value, (bytes, bytearray)):
             return bytes(value).hex().upper()

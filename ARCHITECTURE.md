@@ -113,7 +113,7 @@ Consequence: **a handler that holds the state lock while waiting for a reply ove
 
 The rule, therefore, is:
 
-> **Never call `setNodeGroupId`, `sendConfig(..., wait_for_ack=True)`, `sendRaceLink`, `sendGroupControl`, `send_stream`, `discover_devices`, or `get_status` while holding `state_repository.lock` / `ctx.rl_lock`.**
+> **Never call `setNodeGroupId`, `sendConfig(..., wait_for_ack=True)`, `sendRaceLink`, `sendGroupPreset`, `send_stream`, `discover_devices`, or `get_status` while holding `state_repository.lock` / `ctx.rl_lock`.**
 
 In practice this means bulk loops must release and re-acquire the lock around each iteration's RF call. See `_apply_device_meta_updates` in `racelink/web/api.py` for the reference pattern (acquire → read/mutate in-memory → release → blocking RF → repeat).
 

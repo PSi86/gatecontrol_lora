@@ -60,11 +60,18 @@ class ControlService:
                 # swallow-ok: best-effort fallback; caller proceeds with safe default
                 continue
 
-    def send_device_preset(self, target_device, flags=None, preset_id=None, brightness=None):
-        """Send OPC_PRESET to a single node (receiver = last3 of targetDevice.addr)."""
+    def send_device_preset(self, target_device, flags=None, preset_id=None, brightness=None) -> bool:
+        """Send OPC_PRESET to a single node (receiver = last3 of targetDevice.addr).
+
+        Returns ``True`` if a frame was queued for the gateway, ``False``
+        if the transport is not ready. Pre-B2 fix this fell off the end
+        as ``None``, which the wrapper :meth:`send_wled_preset`
+        misinterpreted as success — operators saw 200 OK with no packet
+        on the wire.
+        """
         transport = self._require_transport("sendDevicePreset")
         if transport is None:
-            return
+            return False
 
         recv3 = mac_last3_from_hex(target_device.addr)
         group_id = int(target_device.groupId) & 0xFF
@@ -93,12 +100,18 @@ class ControlService:
             target_device.presetId,
             target_device.brightness,
         )
+        return True
 
-    def send_group_preset(self, group_id, flags, preset_id, brightness):
-        """Broadcast OPC_PRESET to a group; update local cache for matching devices."""
+    def send_group_preset(self, group_id, flags, preset_id, brightness) -> bool:
+        """Broadcast OPC_PRESET to a group; update local cache for matching devices.
+
+        Returns ``True`` if a frame was queued, ``False`` when the
+        transport is not ready. Same B2 contract as
+        :meth:`send_device_preset`.
+        """
         transport = self._require_transport("sendGroupPreset")
         if transport is None:
-            return
+            return False
 
         group_b = int(group_id) & 0xFF
         flags_b, preset_b, brightness_b = self._coerce_preset_values(flags, preset_id, brightness)
@@ -111,6 +124,7 @@ class ControlService:
             preset_id=preset_b,
             brightness=brightness_b,
         )
+        return True
 
     def send_wled_preset(self, *, targetDevice=None, targetGroup=None, params=None):
         """Apply a classical WLED preset (OPC_PRESET) to a device or group.
@@ -137,11 +151,56 @@ class ControlService:
             offset_mode=bool(params.get("offset_mode")),
         )
 
+        # B2: propagate the underlying boolean — ``send_group_preset`` /
+        # ``send_device_preset`` return False when the transport is
+        # missing. Pre-fix this wrapper unconditionally returned True,
+        # so a route or scene-runner caller saw success even though no
+        # frame went out.
         if targetGroup is not None:
-            self.send_group_preset(int(targetGroup), flags, preset_id, brightness)
+            return self.send_group_preset(int(targetGroup), flags, preset_id, brightness)
+        if targetDevice is not None:
+            return self.send_device_preset(targetDevice, flags, preset_id, brightness)
+        return False
+
+    def send_offset(self, *, targetDevice=None, targetGroup=None,
+                    mode="none", **mode_params) -> bool:
+        """Send OPC_OFFSET (variable-length, 2..7 B body).
+
+        ``mode`` selects the formula stored on the receiver and accepts
+        either the int enum value (``OFFSET_MODE_LINEAR``) or its lowercase
+        name (``"linear"``). Per-mode kwargs:
+
+            "none":     (no extra args; clears stored config)
+            "explicit": offset_ms
+            "linear":   base_ms, step_ms
+            "vshape":   base_ms, step_ms, center
+            "modulo":   base_ms, step_ms, cycle
+
+        With ``targetGroup=255`` the body's groupId is the broadcast sentinel
+        — every device picks it up. The acceptance gate on subsequent
+        OPC_CONTROL packets selects the participating subset.
+
+        Returns ``True`` if a frame was queued, ``False`` if the transport is
+        not ready or no target was provided.
+        """
+        transport = self._require_transport("sendOffset")
+        if transport is None:
+            return False
+
+        if targetGroup is not None:
+            group_b = int(targetGroup) & 0xFF
+            transport.send_offset(
+                recv3=b"\xFF\xFF\xFF", group_id=group_b,
+                mode=mode, **mode_params,
+            )
             return True
         if targetDevice is not None:
-            self.send_device_preset(targetDevice, flags, preset_id, brightness)
+            recv3 = mac_last3_from_hex(targetDevice.addr)
+            group_b = int(getattr(targetDevice, "groupId", 0)) & 0xFF
+            transport.send_offset(
+                recv3=recv3, group_id=group_b,
+                mode=mode, **mode_params,
+            )
             return True
         return False
 
