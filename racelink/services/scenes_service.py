@@ -206,26 +206,83 @@ def _coerce_bool(raw: Any, *, default: bool) -> bool:
     return default
 
 
-def _canonical_target(raw: Any) -> Dict[str, Any]:
-    """Validate a *top-level* action target: ``group`` or ``device``.
+def _migrate_legacy_target(raw: Any) -> Any:
+    """Migrate legacy target shapes to the unified canonical shape.
 
-    The legacy ``groups_offset`` target kind was removed when offset playback
-    moved into a dedicated ``offset_group`` container action. Persisted
-    scenes with the old shape are auto-migrated by ``_migrate_legacy_action``
-    before they reach this validator.
+    Two legacy forms are accepted at the boundary and quietly rewritten;
+    everything else passes through for the validator to accept or reject.
+
+    Migrations:
+      * ``{"kind": "scope"}`` → ``{"kind": "broadcast"}``
+      * ``{"kind": "group", "value": <int>}`` → ``{"kind": "groups", "value": [<int>]}``
+
+    See `docs/reference/broadcast-ruleset.md` for the design rationale —
+    "scope" was overloaded with the SSE scope concept, and the singular
+    "group" form is just a length-1 special case of the unified "groups".
     """
     if not isinstance(raw, dict):
-        raise ValueError("target must be a dict with 'kind' and 'value'")
+        return raw
     kind = raw.get("kind")
+    if kind == "scope":
+        return {"kind": "broadcast"}
     if kind == "group":
         value = raw.get("value")
         try:
             v = int(value)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"target.value for group must be int: {value!r}") from exc
-        if v < 0 or v > GROUP_ID_MAX:
-            raise ValueError(f"group id {v} out of range [0..{GROUP_ID_MAX}]")
-        return {"kind": "group", "value": v}
+        except (TypeError, ValueError):
+            # Pass through — validator will reject with a clear message.
+            return raw
+        return {"kind": "groups", "value": [v]}
+    return raw
+
+
+def _canonical_target(raw: Any) -> Dict[str, Any]:
+    """Validate an action target in the unified canonical shape.
+
+    Three shapes are accepted post-migration:
+
+      * ``{"kind": "broadcast"}`` — every device (wire: recv3=FFFFFF,
+        groupId=255).
+      * ``{"kind": "groups", "value": [<int>, ...]}`` — one or more
+        specific groups; the runner fans out one packet per group when
+        ``len(value) > 1`` (group-scoped broadcast at the wire).
+      * ``{"kind": "device", "value": "<12-char MAC>"}`` — single device
+        addressed by MAC; the wire emission keeps the device's stored
+        ``groupId`` (see the [Single-device pinned rule] in the broadcast
+        ruleset doc — groupId=255 is **not** used as a fallback).
+
+    Legacy ``"scope"`` and singular ``"group"`` shapes are migrated by
+    :func:`_migrate_legacy_target` before this validator runs.
+    """
+    raw = _migrate_legacy_target(raw)
+    if not isinstance(raw, dict):
+        raise ValueError("target must be a dict with 'kind'")
+    kind = raw.get("kind")
+    if kind == "broadcast":
+        return {"kind": "broadcast"}
+    if kind == "groups":
+        value = raw.get("value")
+        if not isinstance(value, list) or not value:
+            raise ValueError(
+                "target.value for groups must be a non-empty list of int group ids"
+            )
+        seen: set[int] = set()
+        ids: List[int] = []
+        for entry in value:
+            try:
+                v = int(entry)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"target.value[*] for groups must be int: {entry!r}"
+                ) from exc
+            if v < 0 or v > GROUP_ID_MAX:
+                raise ValueError(f"group id {v} out of range [0..{GROUP_ID_MAX}]")
+            if v in seen:
+                raise ValueError(f"target.value duplicate group id {v}")
+            seen.add(v)
+            ids.append(v)
+        ids.sort()
+        return {"kind": "groups", "value": ids}
     if kind == "device":
         value = raw.get("value")
         if not isinstance(value, str):
@@ -235,58 +292,53 @@ def _canonical_target(raw: Any) -> Dict[str, Any]:
             raise ValueError(f"invalid device address {value!r}: expected 12-char hex")
         return {"kind": "device", "value": v}
     raise ValueError(
-        f"invalid target kind {kind!r} (expected 'group' or 'device')"
+        f"invalid target kind {kind!r} "
+        f"(expected 'broadcast', 'groups', or 'device')"
     )
+
+
+def _canonical_offset_group_container_target(raw: Any) -> Dict[str, Any]:
+    """Validate an offset_group **container** target.
+
+    Same shape as :func:`_canonical_target` except ``device`` is invalid —
+    an offset_group's offset formula is per-group, so a single-device
+    target is meaningless at the container level. Children of the
+    container can still use ``device`` targets via
+    :func:`_canonical_offset_group_child_target`.
+    """
+    target = _canonical_target(raw)
+    if target["kind"] == "device":
+        raise ValueError(
+            "offset_group container target cannot be 'device' "
+            "(offset is per-group); use 'groups' or 'broadcast'"
+        )
+    return target
 
 
 def _canonical_offset_group_child_target(raw: Any, *, parent_groups: Any) -> Dict[str, Any]:
     """Validate the target for a child action *inside* an offset_group container.
 
-    Three shapes:
-      * ``{"kind": "scope"}`` — broadcast to every container participant.
-      * ``{"kind": "group", "value": <int>}`` — single group out of
-        ``parent_groups`` (or any group when ``parent_groups == "all"``).
-      * ``{"kind": "device", "value": "<MAC>"}`` — single device. Membership
-        in the parent's groups is checked at runtime (degraded result on
-        mismatch); only format is validated here.
+    Canonical shapes (same as top-level — see :func:`_canonical_target`):
 
-    Scope is the default and the cheapest wire path: one OPC_CONTROL with
-    groupId=255 reaches every offset-configured device via the wire-level
-    acceptance gate.
+      * ``{"kind": "broadcast"}`` — every container participant.
+      * ``{"kind": "groups", "value": [<int>, ...]}`` — must be a subset
+        of the parent's participating groups (skipped when
+        ``parent_groups == "all"``).
+      * ``{"kind": "device", "value": "<MAC>"}`` — single device; group
+        membership is checked at runtime (degraded result on mismatch).
+
+    Legacy ``"scope"`` / singular ``"group"`` shapes are migrated by
+    :func:`_migrate_legacy_target`.
     """
-    if not isinstance(raw, dict):
-        raise ValueError("offset_group child target must be a dict with a 'kind'")
-    kind = raw.get("kind")
-    if kind == "scope":
-        return {"kind": "scope"}
-    if kind == "group":
-        value = raw.get("value")
-        try:
-            v = int(value)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(
-                f"child target.value for group must be int: {value!r}"
-            ) from exc
-        if v < 0 or v > GROUP_ID_MAX:
-            raise ValueError(f"group id {v} out of range [0..{GROUP_ID_MAX}]")
-        if isinstance(parent_groups, list) and v not in parent_groups:
-            raise ValueError(
-                f"child target group {v} is not in the offset_group's "
-                f"participating groups {parent_groups}"
-            )
-        return {"kind": "group", "value": v}
-    if kind == "device":
-        value = raw.get("value")
-        if not isinstance(value, str):
-            raise ValueError("child target.value for device must be a 12-char MAC")
-        mac = value.strip().upper()
-        if not _MAC12_RE.match(mac):
-            raise ValueError(f"invalid device address {value!r}: expected 12-char hex")
-        return {"kind": "device", "value": mac}
-    raise ValueError(
-        f"invalid offset_group child target kind {kind!r} "
-        f"(expected 'scope', 'group', or 'device')"
-    )
+    target = _canonical_target(raw)
+    if target["kind"] == "groups" and isinstance(parent_groups, list):
+        for v in target["value"]:
+            if v not in parent_groups:
+                raise ValueError(
+                    f"child target group {v} is not in the offset_group's "
+                    f"participating groups {parent_groups}"
+                )
+    return target
 
 
 def _canonical_offset_group_child(raw: Any, *, parent_groups: Any) -> Dict[str, Any]:
@@ -329,47 +381,51 @@ def _canonical_offset_group_action(raw: Dict[str, Any]) -> Dict[str, Any]:
 
         {
           "kind": "offset_group",
-          "groups": "all" | [<int 0..254>, ...],
+          "target": {"kind": "broadcast"}
+                    | {"kind": "groups", "value": [<int>, ...]},
           "offset": { "mode": ..., ...mode-params },
           "actions": [<child_action>, ...]
         }
 
-    Children are validated via ``_canonical_offset_group_child`` which
-    restricts both the action kind (only OFFSET_GROUP_CHILD_KINDS) and the
-    target picker (scope/group/device, with group membership filtered to the
-    parent's participating groups). Nesting is forbidden — a child of kind
-    ``offset_group`` raises here via the kind-check.
-    """
-    raw_groups = raw.get("groups")
-    groups_is_all = False
-    canonical_ids: Optional[List[int]] = None
+    Legacy shape with the standalone ``groups`` field
+    (``"all"`` or ``[<int>, ...]``) is migrated to the unified ``target``
+    shape on read; see :func:`_migrate_legacy_offset_group_groups_field`.
 
-    if raw_groups == "all" or raw_groups == 255:
-        groups_is_all = True
-    elif isinstance(raw_groups, list) and raw_groups:
-        if len(raw_groups) > MAX_GROUPS_OFFSET_ENTRIES:
+    Children are validated via :func:`_canonical_offset_group_child` which
+    restricts both the action kind (only ``OFFSET_GROUP_CHILD_KINDS``) and
+    the target picker (broadcast / groups / device, with group membership
+    filtered to the parent's participating groups). Nesting is forbidden —
+    a child of kind ``offset_group`` raises here via the kind-check.
+    """
+    target_raw = raw.get("target")
+    if target_raw is None:
+        # Legacy: derive `target` from the standalone `groups` field.
+        legacy_groups = raw.get("groups")
+        if legacy_groups == "all" or legacy_groups == 255:
+            target_raw = {"kind": "broadcast"}
+        elif isinstance(legacy_groups, list) and legacy_groups:
+            target_raw = {"kind": "groups", "value": list(legacy_groups)}
+        else:
             raise ValueError(
-                f"offset_group has {len(raw_groups)} entries; "
-                f"max is {MAX_GROUPS_OFFSET_ENTRIES}"
+                'offset_group requires a "target" field; legacy "groups" '
+                f'is missing or invalid: {legacy_groups!r}'
             )
-        seen_ids: set[int] = set()
-        ids: List[int] = []
-        for entry in raw_groups:
-            gid = _validate_int("offset_group.groups[]", entry, 0, GROUP_ID_MAX)
-            if gid in seen_ids:
-                raise ValueError(f"offset_group duplicate group id {gid}")
-            seen_ids.add(gid)
-            ids.append(gid)
-        ids.sort()
-        canonical_ids = ids
-    else:
+
+    target = _canonical_offset_group_container_target(target_raw)
+    target_is_broadcast = (target["kind"] == "broadcast")
+    canonical_ids: Optional[List[int]] = (
+        None if target_is_broadcast else list(target["value"])
+    )
+
+    if not target_is_broadcast and len(canonical_ids or []) > MAX_GROUPS_OFFSET_ENTRIES:
         raise ValueError(
-            'offset_group.groups must be "all" or a non-empty list of group ids'
+            f"offset_group has {len(canonical_ids)} entries; "
+            f"max is {MAX_GROUPS_OFFSET_ENTRIES}"
         )
 
     offset = _canonical_offset_block(
         raw.get("offset"),
-        groups_is_all=groups_is_all,
+        groups_is_all=target_is_broadcast,
         group_ids=canonical_ids,
     )
 
@@ -381,19 +437,18 @@ def _canonical_offset_group_action(raw: Dict[str, Any]) -> Dict[str, Any]:
             f"offset_group has {len(raw_children)} children; "
             f"max is {MAX_OFFSET_GROUP_CHILDREN}"
         )
-    parent_groups_for_children: Any = "all" if groups_is_all else canonical_ids
+    parent_groups_for_children: Any = "all" if target_is_broadcast else canonical_ids
     canonical_children = [
         _canonical_offset_group_child(child, parent_groups=parent_groups_for_children)
         for child in raw_children
     ]
 
-    out: Dict[str, Any] = {
+    return {
         "kind": KIND_OFFSET_GROUP,
-        "groups": "all" if groups_is_all else canonical_ids,
+        "target": target,
         "offset": offset,
         "actions": canonical_children,
     }
-    return out
 
 
 OFFSET_FORMULA_MODES = ("none", "explicit", "linear", "vshape", "modulo")
@@ -571,16 +626,23 @@ def _migrate_legacy_groups_offset_action(raw: Dict[str, Any]) -> Dict[str, Any]:
             groups = legacy_groups
         offset = legacy_target.get("offset") or {"mode": "none"}
 
-    # The single child mirrors the legacy effect action.
+    # The single child mirrors the legacy effect action. Emit the unified
+    # canonical shapes directly (broadcast / groups) so the post-migration
+    # dict round-trips through `_canonical_offset_group_action` without
+    # any further legacy rewrites.
     child: Dict[str, Any] = {
         "kind": raw.get("kind"),
-        "target": {"kind": "scope"},
+        "target": {"kind": "broadcast"},
         "params": dict(raw.get("params") or {}),
         "flags_override": dict(raw.get("flags_override") or {}),
     }
+    if groups == "all":
+        container_target: Dict[str, Any] = {"kind": "broadcast"}
+    else:
+        container_target = {"kind": "groups", "value": list(groups)}
     return {
         "kind": KIND_OFFSET_GROUP,
-        "groups": groups,
+        "target": container_target,
         "offset": offset,
         "actions": [child],
     }
@@ -618,8 +680,12 @@ def _canonical_action(raw: Any) -> Dict[str, Any]:
 
     if kind == KIND_OFFSET_GROUP:
         # Stray top-level fields are not tolerated on container actions —
-        # the children carry their own targets/params.
-        for stray in ("target", "params", "flags_override", "duration_ms"):
+        # the children carry their own params/flags. ``target`` IS valid on
+        # the container in the unified shape (see
+        # :func:`_canonical_offset_group_container_target`); only the legacy
+        # ``groups`` field is also accepted as input and rewritten to
+        # ``target`` on the canonical output.
+        for stray in ("params", "flags_override", "duration_ms"):
             if stray in raw:
                 raise ValueError(f"offset_group action must not carry '{stray}'")
         return _canonical_offset_group_action(raw)
@@ -679,6 +745,86 @@ def _canonical_actions(raw: Any) -> List[Dict[str, Any]]:
     return [_canonical_action(item) for item in raw]
 
 
+def _collapse_groups_target(target: Dict[str, Any],
+                            known_set: set) -> Dict[str, Any]:
+    """If ``target.kind == "groups"`` and the value covers every currently
+    known group id, rewrite to ``{"kind": "broadcast"}``.
+
+    No-op for ``broadcast`` / ``device`` targets and for ``groups`` lists
+    that are a strict subset. The collapse makes the runtime / estimator
+    pair unambiguous (both pick optimizer Strategy A) and matches the
+    operator's intent: "I selected every group" means broadcast, including
+    groups added later. See `docs/reference/broadcast-ruleset.md`.
+    """
+    if not isinstance(target, dict) or target.get("kind") != "groups":
+        return target
+    value = target.get("value")
+    if not isinstance(value, list) or not value:
+        return target
+    if known_set and set(value).issuperset(known_set):
+        return {"kind": "broadcast"}
+    return target
+
+
+def collapse_actions_to_broadcast(
+    actions: List[Dict[str, Any]],
+    known_group_ids: List[int],
+) -> List[Dict[str, Any]]:
+    """Walk a list of canonical actions and apply the
+    "selected-equals-known-all → broadcast" collapse to every target.
+
+    Returns a new list when any action was rewritten, otherwise returns
+    ``actions`` unchanged. Touches:
+      * top-level action ``target`` (any kind that supports targets);
+      * offset_group container ``target``;
+      * offset_group child ``target``.
+    """
+    if not known_group_ids:
+        return actions
+    known_set = set(known_group_ids)
+    new_list: List[Dict[str, Any]] = []
+    any_changed = False
+    for action in actions:
+        new_action, changed = _collapse_action(action, known_set)
+        if changed:
+            any_changed = True
+        new_list.append(new_action)
+    return new_list if any_changed else actions
+
+
+def _collapse_action(action: Dict[str, Any],
+                      known_set: set) -> tuple[Dict[str, Any], bool]:
+    """Apply the broadcast collapse to one action. Returns ``(new_action,
+    changed)``. Recurses into offset_group children."""
+    changed = False
+    new_action = action
+
+    target = action.get("target")
+    if isinstance(target, dict):
+        new_target = _collapse_groups_target(target, known_set)
+        if new_target is not target:
+            new_action = dict(new_action)
+            new_action["target"] = new_target
+            changed = True
+
+    if action.get("kind") == KIND_OFFSET_GROUP:
+        children = action.get("actions") or []
+        new_children: List[Dict[str, Any]] = []
+        children_changed = False
+        for child in children:
+            nc, c_changed = _collapse_action(child, known_set)
+            if c_changed:
+                children_changed = True
+            new_children.append(nc)
+        if children_changed:
+            if new_action is action:
+                new_action = dict(action)
+            new_action["actions"] = new_children
+            changed = True
+
+    return new_action, changed
+
+
 # ---- service -------------------------------------------------------------
 
 
@@ -690,7 +836,8 @@ class SceneService:
     over unchanged.
     """
 
-    def __init__(self, *, storage_path: Optional[str] = None):
+    def __init__(self, *, storage_path: Optional[str] = None,
+                 known_group_ids_getter: Optional[Callable[[], List[int]]] = None):
         self._path = storage_path or os.path.join(
             os.path.expanduser("~"), ".racelink", "scenes.json"
         )
@@ -700,6 +847,12 @@ class SceneService:
         # ids never recycle (keeps RH bindings stable through delete+create).
         self._next_id: Optional[int] = None
         self.on_changed: Optional[Callable[[], None]] = None
+        # Optional callable returning the currently-known group ids. When
+        # set, save-time canonicalisation collapses ``target.kind="groups"``
+        # whose value covers every known group → ``"broadcast"`` so the
+        # editor and runner agree on optimizer Strategy A. Tests / standalone
+        # CRUD don't need this.
+        self._known_group_ids_getter = known_group_ids_getter
 
     # ---- paths / persistence --------------------------------------------
 
@@ -864,13 +1017,36 @@ class SceneService:
 
     # ---- public write API -----------------------------------------------
 
+    def _apply_broadcast_collapse(
+        self, actions: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Apply the save-time "selected-equals-known-all → broadcast"
+        canonicalisation. No-op when no group-id getter was injected (test
+        / standalone CRUD path) or it raises / returns empty.
+        """
+        getter = self._known_group_ids_getter
+        if getter is None:
+            return actions
+        try:
+            known = list(getter() or [])
+        except Exception:  # pragma: no cover - getter is operator-supplied
+            logger.debug(
+                "scenes: known_group_ids_getter raised; "
+                "skipping broadcast collapse",
+                exc_info=True,
+            )
+            return actions
+        return collapse_actions_to_broadcast(actions, known)
+
     def create(self, *, label: str, actions: Optional[list] = None,
                key: Optional[str] = None,
                stop_on_error: Optional[bool] = None) -> dict:
         label_clean = (label or "").strip()
         if not label_clean:
             raise ValueError("label is required")
-        canonical_actions = _canonical_actions(actions)
+        canonical_actions = self._apply_broadcast_collapse(
+            _canonical_actions(actions)
+        )
         # Default True if the caller didn't specify. None vs False is
         # meaningful: None -> use default; False -> explicit opt-out.
         stop_on_error_resolved = (
@@ -903,7 +1079,9 @@ class SceneService:
                actions: Optional[list] = None,
                stop_on_error: Optional[bool] = None) -> Optional[dict]:
         if actions is not None:
-            canonical_actions = _canonical_actions(actions)
+            canonical_actions = self._apply_broadcast_collapse(
+                _canonical_actions(actions)
+            )
         else:
             canonical_actions = None
         updated: Optional[dict] = None
@@ -1029,6 +1207,10 @@ class SceneService:
                     "id": new_id,
                     "key": key,
                     "label": (entry.get("label") or key).strip(),
+                    # NOTE: replace_all is bulk-import; we don't apply the
+                    # save-time broadcast collapse here because the caller
+                    # owns the canonical shape (e.g. an export round-trip).
+                    # _canonical_actions still migrates legacy shapes.
                     "created": entry.get("created") or _now_iso(),
                     "updated": entry.get("updated") or _now_iso(),
                     "actions": _canonical_actions(entry.get("actions")),
@@ -1073,46 +1255,62 @@ def _renumber_actions_for_deleted_group(
     return (new_actions if changed else actions), changed
 
 
+def _shift_target_groups_list(
+    target: Dict[str, Any], deleted_gid: int,
+) -> tuple[Dict[str, Any], bool]:
+    """Apply :func:`_shift_group_value` to every id in a
+    ``target.kind == "groups"`` list, deduping any collapses to 0.
+
+    Returns ``(new_target, changed)`` where ``changed`` is False when
+    nothing moved (caller can short-circuit). The returned target is a
+    fresh dict only when changed.
+    """
+    if target.get("kind") != "groups":
+        return target, False
+    raw_value = target.get("value")
+    if not isinstance(raw_value, list):
+        return target, False
+    shifted_list = [_shift_group_value(int(g), deleted_gid) for g in raw_value]
+    seen: set[int] = set()
+    deduped: List[int] = []
+    for g in shifted_list:
+        if g not in seen:
+            seen.add(g)
+            deduped.append(g)
+    if deduped == list(raw_value):
+        return target, False
+    new_target = dict(target)
+    new_target["value"] = deduped
+    return new_target, True
+
+
 def _renumber_action(
     action: Dict[str, Any],
     deleted_gid: int,
 ) -> tuple[Dict[str, Any], bool]:
     """Rewrite group references in one action. See
     :func:`_renumber_actions_for_deleted_group` for the contract.
+
+    Touches every group reference in the unified target shape:
+      * top-level ``target`` with ``kind == "groups"``;
+      * offset_group container ``target`` with ``kind == "groups"``;
+      * offset_group child ``target.kind == "groups"`` (recursed via
+        :func:`_renumber_actions_for_deleted_group`);
+      * offset_group ``offset.values[].id`` (explicit mode).
+
+    ``broadcast`` and ``device`` targets aren't tied to a specific group
+    id and pass through untouched.
     """
     kind = action.get("kind")
     changed = False
 
-    # Top-level target: kind == "group" with int value.
+    # Top-level / offset_group container target: kind == "groups" with
+    # list value. (broadcast / device targets are id-agnostic.)
     target = action.get("target")
     new_target = target
-    if isinstance(target, dict) and target.get("kind") == "group":
-        try:
-            old = int(target.get("value"))
-        except (TypeError, ValueError):
-            old = None
-        if old is not None:
-            shifted = _shift_group_value(old, deleted_gid)
-            if shifted != old:
-                new_target = dict(target)
-                new_target["value"] = shifted
-                changed = True
-
-    # offset_group container: ``groups`` may be "all" or a list of ints.
-    new_groups = action.get("groups")
-    if kind == KIND_OFFSET_GROUP and isinstance(new_groups, list):
-        shifted_list = [_shift_group_value(int(g), deleted_gid) for g in new_groups]
-        # Drop duplicates that arose from collapsing distinct ids to 0
-        # (e.g. deleted_gid + an id that just shifted to 0). Preserve
-        # order for determinism in the on-disk JSON.
-        seen: set[int] = set()
-        deduped: List[int] = []
-        for g in shifted_list:
-            if g not in seen:
-                seen.add(g)
-                deduped.append(g)
-        if deduped != list(new_groups):
-            new_groups = deduped
+    if isinstance(target, dict):
+        new_target, t_changed = _shift_target_groups_list(target, deleted_gid)
+        if t_changed:
             changed = True
 
     # offset_group child actions recurse via the same logic — children
@@ -1168,8 +1366,6 @@ def _renumber_action(
     if new_target is not action.get("target"):
         new_action["target"] = new_target
     if kind == KIND_OFFSET_GROUP:
-        if new_groups is not action.get("groups"):
-            new_action["groups"] = new_groups
         if new_children is not action.get("actions"):
             new_action["actions"] = new_children
         if new_offset is not action.get("offset"):
@@ -1204,8 +1400,7 @@ def _clone_action(action: dict) -> dict:
     if kind == KIND_SYNC:
         return out
     if kind == KIND_OFFSET_GROUP:
-        groups = action.get("groups")
-        out["groups"] = list(groups) if isinstance(groups, list) else groups
+        out["target"] = _clone_target(action["target"])
         out["offset"] = _clone_offset_block(action.get("offset") or {})
         out["actions"] = [
             _clone_action(child) for child in action.get("actions") or []
@@ -1228,7 +1423,14 @@ def _clone_offset_block(offset: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _clone_target(target: Dict[str, Any]) -> Dict[str, Any]:
-    """Defensive copy of a top-level or child target. Top-level targets are
-    flat ``{kind, value}`` dicts; child targets are ``{kind: "scope"}`` or
-    similar with no nested mutable structures."""
-    return dict(target)
+    """Defensive copy of an action target in the unified canonical shape.
+
+    Handles ``{"kind": "broadcast"}`` (no value), ``{"kind": "groups",
+    "value": [...]}`` (deep-copy the list so the caller can mutate
+    freely), and ``{"kind": "device", "value": "<MAC>"}`` (string value
+    is immutable; shallow copy is enough).
+    """
+    out: Dict[str, Any] = dict(target)
+    if isinstance(out.get("value"), list):
+        out["value"] = list(out["value"])
+    return out

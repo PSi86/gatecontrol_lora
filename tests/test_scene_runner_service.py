@@ -878,7 +878,7 @@ class OffsetGroupContainerTests(_SceneFixture):
         self.assertIsNotNone(scene)
         action = scene["actions"][0]
         self.assertEqual(action["kind"], "offset_group")
-        self.assertEqual(action["groups"], "all")
+        self.assertEqual(action["target"], {"kind": "broadcast"})
         self.assertEqual(action["offset"],
                          {"mode": "linear", "base_ms": 500, "step_ms": 200})
 
@@ -1174,6 +1174,149 @@ class StopOnErrorTests(_SceneFixture):
         # 'running' because they never started).
         skipped = [s for s in statuses if s[1] == "skipped"]
         self.assertEqual({s[0] for s in skipped}, {1, 2})
+
+
+class TopLevelTargetArmsTests(_SceneFixture):
+    """Pin the per-arm wire emission of the unified target shape on
+    *top-level* actions. See `_resolve_target` in
+    racelink/services/scene_runner_service.py and the broadcast
+    ruleset doc for the design rationale.
+    """
+
+    def test_broadcast_target_emits_targetgroup_255(self):
+        # ``target.kind == "broadcast"`` → one packet with
+        # targetGroup=255 (recv3=FFFFFF + groupId=255 — every device acts).
+        self.scenes.create(label="B", actions=[{
+            "kind": KIND_WLED_CONTROL,
+            "target": {"kind": "broadcast"},
+            "params": {"presetId": 7, "brightness": 200},
+        }])
+        ctrl = _RecordingControlService()
+        runner, _ = _make_runner(scenes=self.scenes, control_service=ctrl)
+        result = runner.run("b")
+        self.assertTrue(result.ok)
+        self.assertEqual(len(ctrl.control_calls), 1)
+        self.assertEqual(ctrl.control_calls[0]["targetGroup"], 255)
+        self.assertIsNone(ctrl.control_calls[0]["targetDevice"])
+
+    def test_groups_target_len1_emits_targetgroup_value(self):
+        # ``target.kind == "groups", value: [N]`` → one packet with
+        # targetGroup=N (group-scoped broadcast at the wire).
+        self.scenes.create(label="G", actions=[{
+            "kind": KIND_WLED_CONTROL,
+            "target": {"kind": "groups", "value": [3]},
+            "params": {"presetId": 7},
+        }])
+        ctrl = _RecordingControlService()
+        runner, _ = _make_runner(scenes=self.scenes, control_service=ctrl)
+        runner.run("g")
+        self.assertEqual(len(ctrl.control_calls), 1)
+        self.assertEqual(ctrl.control_calls[0]["targetGroup"], 3)
+
+    def test_groups_target_lenN_emits_one_packet_per_group(self):
+        # Sparse subset (the save-time canonicaliser collapses
+        # "every known group" to broadcast, so this branch only fires
+        # for an explicit subset). The runner fans out — N kwargs from
+        # ``_resolve_target`` → N send_X calls.
+        self.scenes.create(label="GN", actions=[{
+            "kind": KIND_WLED_CONTROL,
+            "target": {"kind": "groups", "value": [1, 3, 5]},
+            "params": {"presetId": 7},
+        }])
+        ctrl = _RecordingControlService()
+        runner, _ = _make_runner(scenes=self.scenes, control_service=ctrl)
+        result = runner.run("gn")
+        self.assertTrue(result.ok)
+        self.assertEqual(len(ctrl.control_calls), 3)
+        emitted = [c["targetGroup"] for c in ctrl.control_calls]
+        self.assertEqual(emitted, [1, 3, 5])
+
+    def test_groups_target_lenN_partial_failure_marks_action_failed(self):
+        # If even one packet of the fan-out fails, the action is failed
+        # (but the remaining packets still emit — this matches the
+        # transport's "fire and forget" semantics for non-ACK kinds).
+        self.scenes.create(label="GN", actions=[{
+            "kind": KIND_WLED_CONTROL,
+            "target": {"kind": "groups", "value": [1, 3]},
+            "params": {"presetId": 7},
+        }])
+        ctrl = _RecordingControlService(fail_kinds=("wled_control",))
+        runner, _ = _make_runner(scenes=self.scenes, control_service=ctrl)
+        result = runner.run("gn")
+        self.assertFalse(result.ok)
+        # Both attempts went out on the wire; the failure is the
+        # transport's reported send_failed, not a degraded resolution.
+        self.assertEqual(len(ctrl.control_calls), 2)
+
+    def test_device_target_keeps_device_groupid_not_255(self):
+        """Pin the broadcast-ruleset "Single-device pinned rule":
+        ``target.kind == "device"`` emits with the device's stored
+        groupId, NOT groupId=255. Surfaces drift between Host repo
+        and device state instead of masking it."""
+        device = _FakeDevice("AABBCCDDEEFF", group_id=4)
+        self.scenes.create(label="D", actions=[{
+            "kind": KIND_WLED_CONTROL,
+            "target": {"kind": "device", "value": "AABBCCDDEEFF"},
+            "params": {"presetId": 7},
+        }])
+        ctrl = _RecordingControlService()
+        runner, _ = _make_runner(
+            scenes=self.scenes, control_service=ctrl, devices=[device],
+        )
+        runner.run("d")
+        self.assertEqual(len(ctrl.control_calls), 1)
+        # Runner passes the device dict; control-service decides the
+        # groupId byte. The contract here is "no targetGroup kwarg
+        # should sneak in" (it would override device.groupId at the
+        # transport layer).
+        self.assertEqual(
+            ctrl.control_calls[0]["targetDevice"], "AABBCCDDEEFF",
+        )
+        self.assertIsNone(ctrl.control_calls[0]["targetGroup"])
+
+
+class OffsetGroupChildTargetArmsTests(_SceneFixture):
+    """Same coverage for offset_group child target resolution."""
+
+    def _container(self, *, target=None, children=None):
+        return {
+            "kind": "offset_group",
+            "target": target or {"kind": "broadcast"},
+            "offset": {"mode": "linear", "base_ms": 0, "step_ms": 100},
+            "actions": children or [],
+        }
+
+    def test_child_broadcast_target_emits_targetgroup_255(self):
+        self.scenes.create(label="C", actions=[self._container(
+            children=[{
+                "kind": KIND_WLED_CONTROL,
+                "target": {"kind": "broadcast"},
+                "params": {"presetId": 7},
+            }],
+        )])
+        ctrl = _RecordingControlService()
+        runner, _ = _make_runner(scenes=self.scenes, control_service=ctrl)
+        runner.run("c")
+        # 1 broadcast OPC_OFFSET (Strategy A) + 1 child packet to gid=255.
+        self.assertEqual(len(ctrl.control_calls), 1)
+        self.assertEqual(ctrl.control_calls[0]["targetGroup"], 255)
+
+    def test_child_groups_target_len1_emits_targetgroup_value(self):
+        # Parent must contain group 3 for the child to be valid.
+        self.scenes.create(label="C", actions=[self._container(
+            target={"kind": "groups", "value": [1, 3]},
+            children=[{
+                "kind": KIND_WLED_CONTROL,
+                "target": {"kind": "groups", "value": [3]},
+                "params": {"presetId": 7},
+            }],
+        )])
+        ctrl = _RecordingControlService()
+        runner, _ = _make_runner(scenes=self.scenes, control_service=ctrl)
+        runner.run("c")
+        # The child's group-3 packet is what we're asserting on; the
+        # parent's OPC_OFFSET sequence is irrelevant to this case.
+        self.assertEqual(ctrl.control_calls[-1]["targetGroup"], 3)
 
 
 if __name__ == "__main__":

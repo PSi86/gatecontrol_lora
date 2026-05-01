@@ -22,7 +22,7 @@ class StrategyAllGroupsTests(unittest.TestCase):
 
     def test_all_groups_linear_is_single_broadcast(self):
         plan = plan_offset_setup(
-            participant_groups="all",
+            target={"kind": "broadcast"},
             offset={"mode": "linear", "base_ms": 0, "step_ms": 100},
             known_group_ids=[1, 2, 3, 4, 5],
         )
@@ -34,7 +34,7 @@ class StrategyAllGroupsTests(unittest.TestCase):
 
     def test_all_groups_vshape_is_single_broadcast(self):
         plan = plan_offset_setup(
-            participant_groups="all",
+            target={"kind": "broadcast"},
             offset={"mode": "vshape", "base_ms": 0, "step_ms": 50, "center": 5},
             known_group_ids=list(range(10)),
         )
@@ -44,7 +44,7 @@ class StrategyAllGroupsTests(unittest.TestCase):
 
     def test_all_groups_modulo_is_single_broadcast(self):
         plan = plan_offset_setup(
-            participant_groups="all",
+            target={"kind": "broadcast"},
             offset={"mode": "modulo", "base_ms": 0, "step_ms": 100, "cycle": 4},
             known_group_ids=list(range(20)),
         )
@@ -53,7 +53,7 @@ class StrategyAllGroupsTests(unittest.TestCase):
 
     def test_all_groups_none_is_single_broadcast_clear(self):
         plan = plan_offset_setup(
-            participant_groups="all",
+            target={"kind": "broadcast"},
             offset={"mode": "none"},
             known_group_ids=list(range(10)),
         )
@@ -64,7 +64,7 @@ class StrategyAllGroupsTests(unittest.TestCase):
         # Strategy A works even without device discovery — the gateway
         # forwards the broadcast and any device on air picks it up.
         plan = plan_offset_setup(
-            participant_groups="all",
+            target={"kind": "broadcast"},
             offset={"mode": "linear", "base_ms": 0, "step_ms": 100},
             known_group_ids=[],
         )
@@ -77,7 +77,7 @@ class StrategySparseTests(unittest.TestCase):
 
     def test_sparse_explicit_emits_per_group_with_persisted_values(self):
         plan = plan_offset_setup(
-            participant_groups=[1, 3, 5],
+            target={"kind": "groups", "value": [1, 3, 5]},
             offset={
                 "mode": "explicit",
                 "values": [
@@ -100,7 +100,7 @@ class StrategySparseTests(unittest.TestCase):
         # B: 2 EXPLICIT pkts (4 B each = 8 B). C: 1 LINEAR (6 B) + 4 NONE (2 B
         # each = 8 B) = 5 pkts / 14 B. B wins on packets.
         plan = plan_offset_setup(
-            participant_groups=[1, 5],
+            target={"kind": "groups", "value": [1, 5]},
             offset={"mode": "linear", "base_ms": 0, "step_ms": 100},
             known_group_ids=[1, 2, 3, 4, 5, 6],
         )
@@ -114,7 +114,7 @@ class StrategySparseTests(unittest.TestCase):
         # 5 participants, only 1 non-participant → Strategy C costs 1 + 1
         # = 2 packets vs Strategy B's 5. C wins.
         plan = plan_offset_setup(
-            participant_groups=[1, 2, 3, 4, 5],
+            target={"kind": "groups", "value": [1, 2, 3, 4, 5]},
             offset={"mode": "linear", "base_ms": 0, "step_ms": 100},
             known_group_ids=[1, 2, 3, 4, 5, 6],
         )
@@ -130,7 +130,7 @@ class StrategySparseTests(unittest.TestCase):
     def test_sparse_strategy_b_wins_when_majority_does_not_participate(self):
         # 2 participants, 8 non-participants → B = 2, C = 1 + 8 = 9 → B wins.
         plan = plan_offset_setup(
-            participant_groups=[1, 2],
+            target={"kind": "groups", "value": [1, 2]},
             offset={"mode": "linear", "base_ms": 0, "step_ms": 100},
             known_group_ids=list(range(10)),
         )
@@ -141,7 +141,7 @@ class StrategySparseTests(unittest.TestCase):
         # Sparse + mode=none: deactivate exactly the listed groups.
         # B mode is overridden so each entry sends a NONE clear (not EXPLICIT 0).
         plan = plan_offset_setup(
-            participant_groups=[1, 3],
+            target={"kind": "groups", "value": [1, 3]},
             offset={"mode": "none"},
             known_group_ids=[1, 2, 3, 4, 5],
         )
@@ -155,7 +155,7 @@ class StrategySparseTests(unittest.TestCase):
         # the configured groups. (Strategy C requires device discovery to
         # know who the non-participants are.)
         plan = plan_offset_setup(
-            participant_groups=[1, 3],
+            target={"kind": "groups", "value": [1, 3]},
             offset={"mode": "linear", "base_ms": 0, "step_ms": 100},
             known_group_ids=[],
         )
@@ -170,7 +170,7 @@ class TieBreakTests(unittest.TestCase):
         # bodies (4 B each) = 12 B. Wait — that means C is *smaller*
         # bytes; let's verify the comparator picks C.
         plan = plan_offset_setup(
-            participant_groups=[1, 2, 3],
+            target={"kind": "groups", "value": [1, 2, 3]},
             offset={"mode": "linear", "base_ms": 0, "step_ms": 100},
             known_group_ids=[1, 2, 3, 4, 5],  # 2 non-participants
         )
@@ -183,7 +183,7 @@ class TieBreakTests(unittest.TestCase):
 class ResultShapeTests(unittest.TestCase):
     def test_optimizer_plan_exposes_packets_and_bytes(self):
         plan = plan_offset_setup(
-            participant_groups="all",
+            target={"kind": "broadcast"},
             offset={"mode": "linear", "base_ms": 0, "step_ms": 100},
             known_group_ids=[],
         )

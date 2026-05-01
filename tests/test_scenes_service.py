@@ -23,6 +23,7 @@ from racelink.services.scenes_service import (
     OFFSET_MS_MAX,
     SCHEMA_VERSION,
     SceneService,
+    collapse_actions_to_broadcast,
 )
 
 
@@ -241,10 +242,11 @@ class SceneServiceValidationTests(unittest.TestCase):
             ])
 
     def test_target_kind_validated(self):
+        # Unknown kind is rejected (broadcast / groups / device are valid).
         with self.assertRaises(ValueError):
             self.svc.create(label="X", actions=[{
                 "kind": KIND_RL_PRESET,
-                "target": {"kind": "broadcast", "value": None},
+                "target": {"kind": "bogus", "value": None},
                 "params": {"presetId": "x"},
             }])
 
@@ -301,6 +303,8 @@ class SceneServiceValidationTests(unittest.TestCase):
         }
 
     def test_offset_group_explicit_canonicalises_and_sorts(self):
+        # Legacy `groups` field input is migrated to the unified `target`
+        # shape; the per-group `values` list still round-trips sorted.
         scene = self.svc.create(label="Cascade", actions=[{
             "kind": KIND_OFFSET_GROUP,
             "groups": [5, 1, 3],
@@ -316,8 +320,10 @@ class SceneServiceValidationTests(unittest.TestCase):
         }])
         action = scene["actions"][0]
         self.assertEqual(action["kind"], KIND_OFFSET_GROUP)
-        # Group IDs sorted; values sorted by id for deterministic order.
-        self.assertEqual(action["groups"], [1, 3, 5])
+        # Container target is the unified shape with a sorted groups list.
+        self.assertEqual(action["target"],
+                         {"kind": "groups", "value": [1, 3, 5]})
+        self.assertNotIn("groups", action)  # legacy field is gone
         self.assertEqual(action["offset"], {
             "mode": "explicit",
             "values": [
@@ -327,9 +333,10 @@ class SceneServiceValidationTests(unittest.TestCase):
             ],
         })
         self.assertEqual(action["actions"][0]["kind"], KIND_WLED_CONTROL)
-        self.assertEqual(action["actions"][0]["target"], {"kind": "scope"})
+        self.assertEqual(action["actions"][0]["target"], {"kind": "broadcast"})
 
     def test_offset_group_linear_all_groups_canonicalises(self):
+        # Legacy `groups: "all"` input migrates to `target: broadcast`.
         scene = self.svc.create(label="Cascade", actions=[{
             "kind": KIND_OFFSET_GROUP,
             "groups": "all",
@@ -337,7 +344,8 @@ class SceneServiceValidationTests(unittest.TestCase):
             "actions": [],
         }])
         action = scene["actions"][0]
-        self.assertEqual(action["groups"], "all")
+        self.assertEqual(action["target"], {"kind": "broadcast"})
+        self.assertNotIn("groups", action)
         self.assertEqual(action["offset"],
                          {"mode": "linear", "base_ms": 0, "step_ms": 100})
         self.assertEqual(action["actions"], [])
@@ -464,6 +472,7 @@ class SceneServiceValidationTests(unittest.TestCase):
             }])
 
     def test_offset_group_child_target_scope_is_default(self):
+        # Legacy "scope" child target is migrated to the unified "broadcast".
         scene = self.svc.create(label="X", actions=[{
             "kind": KIND_OFFSET_GROUP,
             "groups": "all",
@@ -475,7 +484,7 @@ class SceneServiceValidationTests(unittest.TestCase):
             ],
         }])
         child = scene["actions"][0]["actions"][0]
-        self.assertEqual(child["target"], {"kind": "scope"})
+        self.assertEqual(child["target"], {"kind": "broadcast"})
 
     def test_offset_group_child_group_must_be_in_parent(self):
         # parent groups [1, 3] — child target group 2 is rejected.
@@ -490,7 +499,8 @@ class SceneServiceValidationTests(unittest.TestCase):
                     "params": {"presetId": 1},
                 }],
             }])
-        # ... but group 3 is fine.
+        # ... but group 3 is fine; legacy singular "group" migrates to a
+        # length-1 "groups" list.
         ok = self.svc.create(label="OK", actions=[{
             "kind": KIND_OFFSET_GROUP,
             "groups": [1, 3],
@@ -502,10 +512,10 @@ class SceneServiceValidationTests(unittest.TestCase):
             }],
         }])
         self.assertEqual(ok["actions"][0]["actions"][0]["target"],
-                         {"kind": "group", "value": 3})
+                         {"kind": "groups", "value": [3]})
 
     def test_offset_group_child_group_filter_skipped_when_all(self):
-        # parent.groups == "all" → any group id passes the membership check.
+        # parent target == broadcast → any group id passes the membership check.
         scene = self.svc.create(label="X", actions=[{
             "kind": KIND_OFFSET_GROUP,
             "groups": "all",
@@ -517,7 +527,7 @@ class SceneServiceValidationTests(unittest.TestCase):
             }],
         }])
         self.assertEqual(scene["actions"][0]["actions"][0]["target"],
-                         {"kind": "group", "value": 42})
+                         {"kind": "groups", "value": [42]})
 
     def test_offset_group_child_device_target_format(self):
         # MAC must be 12-char hex; case is normalised to upper.
@@ -573,7 +583,7 @@ class SceneServiceValidationTests(unittest.TestCase):
     def test_legacy_groups_offset_target_migrated_to_offset_group(self):
         # Pre-hierarchy shape: kind=rl_preset with target.kind=groups_offset.
         # The loader rewrites the whole action into an offset_group container
-        # with a single child whose target is "scope".
+        # with a single broadcast-target child.
         scene = self.svc.create(label="Legacy", actions=[{
             "kind": KIND_RL_PRESET,
             "target": {
@@ -585,13 +595,13 @@ class SceneServiceValidationTests(unittest.TestCase):
         }])
         action = scene["actions"][0]
         self.assertEqual(action["kind"], KIND_OFFSET_GROUP)
-        self.assertEqual(action["groups"], "all")
+        self.assertEqual(action["target"], {"kind": "broadcast"})
         self.assertEqual(action["offset"],
                          {"mode": "linear", "base_ms": 0, "step_ms": 100})
         self.assertEqual(len(action["actions"]), 1)
         child = action["actions"][0]
         self.assertEqual(child["kind"], KIND_RL_PRESET)
-        self.assertEqual(child["target"], {"kind": "scope"})
+        self.assertEqual(child["target"], {"kind": "broadcast"})
         self.assertEqual(child["params"], {"presetId": "start_red"})
 
     def test_legacy_groups_offset_pre_formula_shape_migrated(self):
@@ -611,7 +621,7 @@ class SceneServiceValidationTests(unittest.TestCase):
         }])
         action = scene["actions"][0]
         self.assertEqual(action["kind"], KIND_OFFSET_GROUP)
-        self.assertEqual(action["groups"], [1, 3])
+        self.assertEqual(action["target"], {"kind": "groups", "value": [1, 3]})
         self.assertEqual(action["offset"],
                          {"mode": "linear", "base_ms": 0, "step_ms": 100})
         self.assertEqual(action["actions"][0]["kind"], KIND_WLED_CONTROL)
@@ -737,20 +747,25 @@ class RenumberGroupReferencesTests(unittest.TestCase):
         )
         changed = self.svc.renumber_group_references(deleted_gid=2)
         self.assertEqual(changed, 1)  # group 5 shifted to 4
-        self.assertEqual(self.svc.list()[0]["actions"][0]["target"]["value"], 4)
+        # Legacy singular `group` migrated to `groups` list at canonicalisation;
+        # the renumber rewrites every entry.
+        self.assertEqual(self.svc.list()[0]["actions"][0]["target"],
+                         {"kind": "groups", "value": [4]})
 
     def test_top_level_target_collapses_when_id_matches(self):
         self.svc.create(label="A", actions=[_rl_preset_action(group_id=3)])
         changed = self.svc.renumber_group_references(deleted_gid=3)
         self.assertEqual(changed, 1)
-        self.assertEqual(self.svc.list()[0]["actions"][0]["target"]["value"], 0)
+        self.assertEqual(self.svc.list()[0]["actions"][0]["target"],
+                         {"kind": "groups", "value": [0]})
 
     def test_lower_indexed_target_stays_unchanged(self):
         self.svc.create(label="A", actions=[_rl_preset_action(group_id=1)])
         changed = self.svc.renumber_group_references(deleted_gid=5)
         # Lower id is unchanged → no rewrite needed → changed count is 0.
         self.assertEqual(changed, 0)
-        self.assertEqual(self.svc.list()[0]["actions"][0]["target"]["value"], 1)
+        self.assertEqual(self.svc.list()[0]["actions"][0]["target"],
+                         {"kind": "groups", "value": [1]})
 
     def test_offset_group_groups_list_shifts(self):
         self.svc.create(
@@ -765,9 +780,11 @@ class RenumberGroupReferencesTests(unittest.TestCase):
         changed = self.svc.renumber_group_references(deleted_gid=3)
         self.assertEqual(changed, 1)
         scene = self.svc.list()[0]
-        # 1 stays, 3 collapses to 0, 5 shifts to 4. Stored order is
-        # canonical (sorted) — the validator sorts the groups list.
-        self.assertEqual(scene["actions"][0]["groups"], [0, 1, 4])
+        # 1 stays, 3 collapses to 0, 5 shifts to 4. The container target's
+        # groups list is canonicalised (sorted) by the validator after the
+        # renumber pass.
+        self.assertEqual(scene["actions"][0]["target"],
+                         {"kind": "groups", "value": [0, 1, 4]})
 
     def test_offset_group_groups_list_dedupes_after_collapse(self):
         """If ``deleted_gid == 1`` and the list is ``[0, 1, 2]``, the
@@ -784,12 +801,13 @@ class RenumberGroupReferencesTests(unittest.TestCase):
         )
         changed = self.svc.renumber_group_references(deleted_gid=1)
         self.assertEqual(changed, 1)
-        self.assertEqual(self.svc.list()[0]["actions"][0]["groups"], [0, 1])
+        self.assertEqual(self.svc.list()[0]["actions"][0]["target"],
+                         {"kind": "groups", "value": [0, 1]})
 
     def test_offset_group_all_passes_through(self):
-        """``groups: 'all'`` is dynamic — it doesn't tie to specific
-        ids and should pass unchanged. The action's children may
-        still need rewriting though."""
+        """``target.kind == 'broadcast'`` (legacy ``groups: 'all'``) is
+        dynamic — it doesn't tie to specific ids and should pass
+        unchanged. The action's children may still need rewriting though."""
         self.svc.create(
             label="A",
             actions=[{
@@ -801,7 +819,8 @@ class RenumberGroupReferencesTests(unittest.TestCase):
         )
         changed = self.svc.renumber_group_references(deleted_gid=2)
         self.assertEqual(changed, 0)
-        self.assertEqual(self.svc.list()[0]["actions"][0]["groups"], "all")
+        self.assertEqual(self.svc.list()[0]["actions"][0]["target"],
+                         {"kind": "broadcast"})
 
     def test_offset_group_child_target_shifts(self):
         self.svc.create(
@@ -822,10 +841,12 @@ class RenumberGroupReferencesTests(unittest.TestCase):
         changed = self.svc.renumber_group_references(deleted_gid=3)
         self.assertEqual(changed, 1)
         scene = self.svc.list()[0]
-        # Both the parent groups list and the child target are
-        # rewritten; the parent list is canonicalised to sorted.
-        self.assertEqual(scene["actions"][0]["groups"], [0, 4])
-        self.assertEqual(scene["actions"][0]["actions"][0]["target"]["value"], 4)
+        # Both the parent groups list and the child target are rewritten;
+        # the parent list is canonicalised to sorted.
+        self.assertEqual(scene["actions"][0]["target"],
+                         {"kind": "groups", "value": [0, 4]})
+        self.assertEqual(scene["actions"][0]["actions"][0]["target"],
+                         {"kind": "groups", "value": [4]})
 
     def test_explicit_offset_values_shift_and_dedupe(self):
         self.svc.create(
@@ -860,8 +881,10 @@ class RenumberGroupReferencesTests(unittest.TestCase):
         changed = self.svc.renumber_group_references(deleted_gid=3)
         self.assertEqual(changed, 1)
         scenes = {s["label"]: s for s in self.svc.list()}
-        self.assertEqual(scenes["A"]["actions"][0]["target"]["value"], 4)
-        self.assertEqual(scenes["B"]["actions"][0]["target"]["value"], 1)
+        self.assertEqual(scenes["A"]["actions"][0]["target"],
+                         {"kind": "groups", "value": [4]})
+        self.assertEqual(scenes["B"]["actions"][0]["target"],
+                         {"kind": "groups", "value": [1]})
 
     def test_persistence_round_trips_renumbered_state(self):
         """A delete + reload cycle must show the renumbered values
@@ -870,7 +893,299 @@ class RenumberGroupReferencesTests(unittest.TestCase):
         self.svc.renumber_group_references(deleted_gid=3)
         # Fresh service loads from disk.
         svc2 = SceneService(storage_path=self.path)
-        self.assertEqual(svc2.list()[0]["actions"][0]["target"]["value"], 4)
+        self.assertEqual(svc2.list()[0]["actions"][0]["target"],
+                         {"kind": "groups", "value": [4]})
+
+
+class BroadcastUnificationMigrationTests(unittest.TestCase):
+    """Pin the on-load migrations from the pre-unification shapes
+    (``scope`` / singular ``group`` / standalone ``groups`` field) into
+    the unified ``target`` shape (``broadcast`` / ``groups`` / ``device``).
+
+    See `docs/reference/broadcast-ruleset.md` for the design rationale.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.svc = SceneService(
+            storage_path=os.path.join(self._tmp.name, "scenes.json"),
+        )
+
+    def test_top_level_legacy_group_singular_migrates_to_groups_list(self):
+        scene = self.svc.create(label="A", actions=[{
+            "kind": KIND_RL_PRESET,
+            "target": {"kind": "group", "value": 7},
+            "params": {"presetId": "x"},
+        }])
+        # Singular `group` becomes a length-1 `groups` list canonically.
+        self.assertEqual(scene["actions"][0]["target"],
+                         {"kind": "groups", "value": [7]})
+
+    def test_top_level_new_groups_shape_round_trips(self):
+        scene = self.svc.create(label="A", actions=[{
+            "kind": KIND_WLED_CONTROL,
+            "target": {"kind": "groups", "value": [3, 1, 5]},
+            "params": {"presetId": 7},
+        }])
+        # Sorted + deduped list.
+        self.assertEqual(scene["actions"][0]["target"],
+                         {"kind": "groups", "value": [1, 3, 5]})
+
+    def test_top_level_broadcast_target_round_trips(self):
+        scene = self.svc.create(label="A", actions=[{
+            "kind": KIND_WLED_PRESET,
+            "target": {"kind": "broadcast"},
+            "params": {"presetId": 7, "brightness": 200},
+        }])
+        self.assertEqual(scene["actions"][0]["target"], {"kind": "broadcast"})
+
+    def test_top_level_device_target_round_trips(self):
+        scene = self.svc.create(label="A", actions=[{
+            "kind": KIND_RL_PRESET,
+            "target": {"kind": "device", "value": "aabbccddeeff"},
+            "params": {"presetId": "x"},
+        }])
+        self.assertEqual(scene["actions"][0]["target"],
+                         {"kind": "device", "value": "AABBCCDDEEFF"})
+
+    def test_groups_target_rejects_empty_list(self):
+        with self.assertRaises(ValueError):
+            self.svc.create(label="X", actions=[{
+                "kind": KIND_WLED_CONTROL,
+                "target": {"kind": "groups", "value": []},
+                "params": {"presetId": 1},
+            }])
+
+    def test_groups_target_rejects_id_255(self):
+        # 255 is the broadcast sentinel; lists must not include it.
+        with self.assertRaises(ValueError):
+            self.svc.create(label="X", actions=[{
+                "kind": KIND_WLED_CONTROL,
+                "target": {"kind": "groups", "value": [1, 255]},
+                "params": {"presetId": 1},
+            }])
+
+    def test_groups_target_rejects_duplicate_ids(self):
+        with self.assertRaises(ValueError):
+            self.svc.create(label="X", actions=[{
+                "kind": KIND_WLED_CONTROL,
+                "target": {"kind": "groups", "value": [1, 1, 3]},
+                "params": {"presetId": 1},
+            }])
+
+    def test_offset_group_legacy_groups_all_migrates_to_target_broadcast(self):
+        scene = self.svc.create(label="A", actions=[{
+            "kind": KIND_OFFSET_GROUP,
+            "groups": "all",
+            "offset": {"mode": "linear", "base_ms": 0, "step_ms": 100},
+            "actions": [],
+        }])
+        action = scene["actions"][0]
+        self.assertEqual(action["target"], {"kind": "broadcast"})
+        self.assertNotIn("groups", action)
+
+    def test_offset_group_legacy_groups_list_migrates_to_target_groups(self):
+        scene = self.svc.create(label="A", actions=[{
+            "kind": KIND_OFFSET_GROUP,
+            "groups": [3, 1, 5],
+            "offset": {"mode": "linear", "base_ms": 0, "step_ms": 100},
+            "actions": [],
+        }])
+        action = scene["actions"][0]
+        self.assertEqual(action["target"],
+                         {"kind": "groups", "value": [1, 3, 5]})
+        self.assertNotIn("groups", action)
+
+    def test_offset_group_new_target_shape_round_trips(self):
+        scene = self.svc.create(label="A", actions=[{
+            "kind": KIND_OFFSET_GROUP,
+            "target": {"kind": "groups", "value": [1, 3]},
+            "offset": {"mode": "linear", "base_ms": 0, "step_ms": 100},
+            "actions": [],
+        }])
+        self.assertEqual(scene["actions"][0]["target"],
+                         {"kind": "groups", "value": [1, 3]})
+
+    def test_offset_group_container_rejects_device_target(self):
+        # A single-device target makes no sense at the container level —
+        # the offset formula is per-group. Reject early.
+        with self.assertRaises(ValueError):
+            self.svc.create(label="X", actions=[{
+                "kind": KIND_OFFSET_GROUP,
+                "target": {"kind": "device", "value": "AABBCCDDEEFF"},
+                "offset": {"mode": "linear", "base_ms": 0, "step_ms": 100},
+                "actions": [],
+            }])
+
+    def test_offset_group_child_legacy_scope_migrates_to_broadcast(self):
+        scene = self.svc.create(label="A", actions=[{
+            "kind": KIND_OFFSET_GROUP,
+            "groups": "all",
+            "offset": {"mode": "linear", "base_ms": 0, "step_ms": 100},
+            "actions": [{
+                "kind": KIND_WLED_CONTROL,
+                "target": {"kind": "scope"},
+                "params": {"presetId": 1},
+            }],
+        }])
+        self.assertEqual(scene["actions"][0]["actions"][0]["target"],
+                         {"kind": "broadcast"})
+
+    def test_offset_group_child_legacy_group_migrates_to_groups_list(self):
+        scene = self.svc.create(label="A", actions=[{
+            "kind": KIND_OFFSET_GROUP,
+            "groups": [1, 3],
+            "offset": {"mode": "linear", "base_ms": 0, "step_ms": 100},
+            "actions": [{
+                "kind": KIND_WLED_CONTROL,
+                "target": {"kind": "group", "value": 3},
+                "params": {"presetId": 1},
+            }],
+        }])
+        self.assertEqual(scene["actions"][0]["actions"][0]["target"],
+                         {"kind": "groups", "value": [3]})
+
+    def test_offset_group_child_groups_subset_membership_enforced(self):
+        # parent target groups [1, 3] — child target groups [2] is rejected
+        # because 2 is not a participating group.
+        with self.assertRaises(ValueError):
+            self.svc.create(label="X", actions=[{
+                "kind": KIND_OFFSET_GROUP,
+                "target": {"kind": "groups", "value": [1, 3]},
+                "offset": {"mode": "linear", "base_ms": 0, "step_ms": 100},
+                "actions": [{
+                    "kind": KIND_WLED_CONTROL,
+                    "target": {"kind": "groups", "value": [2]},
+                    "params": {"presetId": 1},
+                }],
+            }])
+
+    def test_offset_group_child_broadcast_under_groups_parent_is_allowed(self):
+        # ``broadcast`` at the child level means "all participants of the
+        # parent" — always allowed regardless of the parent's set.
+        scene = self.svc.create(label="OK", actions=[{
+            "kind": KIND_OFFSET_GROUP,
+            "target": {"kind": "groups", "value": [1, 3]},
+            "offset": {"mode": "linear", "base_ms": 0, "step_ms": 100},
+            "actions": [{
+                "kind": KIND_WLED_CONTROL,
+                "target": {"kind": "broadcast"},
+                "params": {"presetId": 1},
+            }],
+        }])
+        self.assertEqual(scene["actions"][0]["actions"][0]["target"],
+                         {"kind": "broadcast"})
+
+
+class BroadcastSelectAllCollapseTests(unittest.TestCase):
+    """Pin the save-time canonicalisation: when the operator manually
+    selects every currently-known group, the persisted shape collapses
+    to ``{kind: "broadcast"}`` so the runtime / estimator pair sees one
+    canonical input and the optimizer fires Strategy A.
+
+    See `collapse_actions_to_broadcast` in scenes_service.py and the
+    "select-all → broadcast" hint in scenes.js.
+    """
+
+    def test_collapse_helper_groups_target_with_known_all_becomes_broadcast(self):
+        actions = [{
+            "kind": KIND_WLED_CONTROL,
+            "target": {"kind": "groups", "value": [1, 2, 3]},
+            "params": {},
+        }]
+        out = collapse_actions_to_broadcast(actions, [1, 2, 3])
+        self.assertEqual(out[0]["target"], {"kind": "broadcast"})
+
+    def test_collapse_helper_groups_target_subset_unchanged(self):
+        actions = [{
+            "kind": KIND_WLED_CONTROL,
+            "target": {"kind": "groups", "value": [1, 2]},
+            "params": {},
+        }]
+        out = collapse_actions_to_broadcast(actions, [1, 2, 3])
+        self.assertEqual(out[0]["target"], {"kind": "groups", "value": [1, 2]})
+
+    def test_collapse_helper_no_known_groups_is_noop(self):
+        # Defensive: when the host has zero discovered groups the helper
+        # returns the input unchanged (collapsing to broadcast against an
+        # empty universe would be misleading).
+        actions = [{
+            "kind": KIND_WLED_CONTROL,
+            "target": {"kind": "groups", "value": [1, 2]},
+            "params": {},
+        }]
+        out = collapse_actions_to_broadcast(actions, [])
+        self.assertIs(out, actions)
+
+    def test_collapse_helper_recurses_into_offset_group_children(self):
+        actions = [{
+            "kind": KIND_OFFSET_GROUP,
+            "target": {"kind": "groups", "value": [1, 2, 3]},
+            "offset": {"mode": "linear", "base_ms": 0, "step_ms": 100},
+            "actions": [{
+                "kind": KIND_WLED_CONTROL,
+                "target": {"kind": "groups", "value": [1, 2, 3]},
+                "params": {},
+            }],
+        }]
+        out = collapse_actions_to_broadcast(actions, [1, 2, 3])
+        # Both container target and child target collapse.
+        self.assertEqual(out[0]["target"], {"kind": "broadcast"})
+        self.assertEqual(out[0]["actions"][0]["target"],
+                         {"kind": "broadcast"})
+
+    def test_collapse_helper_broadcast_target_is_passthrough(self):
+        actions = [{
+            "kind": KIND_WLED_CONTROL,
+            "target": {"kind": "broadcast"},
+            "params": {},
+        }]
+        out = collapse_actions_to_broadcast(actions, [1, 2, 3])
+        self.assertIs(out, actions)
+
+    def test_collapse_helper_device_target_is_passthrough(self):
+        actions = [{
+            "kind": KIND_WLED_CONTROL,
+            "target": {"kind": "device", "value": "AABBCCDDEEFF"},
+            "params": {},
+        }]
+        out = collapse_actions_to_broadcast(actions, [1, 2, 3])
+        self.assertIs(out, actions)
+
+    def test_create_with_known_groups_getter_collapses_at_save(self):
+        # End-to-end: SceneService injected with a getter that returns
+        # the current group universe applies the collapse on .create().
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        svc = SceneService(
+            storage_path=os.path.join(tmp.name, "scenes.json"),
+            known_group_ids_getter=lambda: [1, 2, 3],
+        )
+        scene = svc.create(label="A", actions=[{
+            "kind": KIND_WLED_CONTROL,
+            "target": {"kind": "groups", "value": [1, 2, 3]},
+            "params": {"presetId": 7},
+        }])
+        # Save-time collapse fires; persisted shape is broadcast.
+        self.assertEqual(scene["actions"][0]["target"], {"kind": "broadcast"})
+
+    def test_create_without_getter_does_not_collapse(self):
+        # No getter wired (test environment / standalone CRUD): the
+        # explicit list survives. The runtime/estimator path will then
+        # follow Strategy B/C; the editor is responsible for hinting that
+        # the explicit-all selection will collapse on save when run with
+        # the Web UI which DOES inject a getter.
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        svc = SceneService(storage_path=os.path.join(tmp.name, "scenes.json"))
+        scene = svc.create(label="A", actions=[{
+            "kind": KIND_WLED_CONTROL,
+            "target": {"kind": "groups", "value": [1, 2, 3]},
+            "params": {"presetId": 7},
+        }])
+        self.assertEqual(scene["actions"][0]["target"],
+                         {"kind": "groups", "value": [1, 2, 3]})
 
 
 if __name__ == "__main__":

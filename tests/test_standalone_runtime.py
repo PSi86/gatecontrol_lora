@@ -181,23 +181,16 @@ class StandaloneRuntimeTests(unittest.TestCase):
 
 
 class StandaloneDocsTests(unittest.TestCase):
-    def test_readme_mentions_packaged_standalone_entrypoint(self):
-        source = (ROOT / "README.md").read_text(encoding="utf-8")
-
-        self.assertIn("racelink-standalone", source)
-        self.assertIn("127.0.0.1:5077", source)
-        self.assertIn("docs/standalone.md", source)
-
-    def test_standalone_guide_contains_windows_and_linux_instructions(self):
-        source = (ROOT / "docs" / "standalone.md").read_text(encoding="utf-8")
-
-        self.assertIn("Windows installation and usage", source)
-        self.assertIn("Linux installation and usage", source)
-        self.assertIn("racelink-standalone", source)
-        self.assertIn("~/.racelink/standalone_config.json", source)
-        self.assertIn("http://127.0.0.1:5077/racelink", source)
-        self.assertIn("RaceLink Gateway", source)
-        self.assertIn("nmcli", source)
+    # The two former tests in this class asserted against
+    # ``docs/standalone.md`` and a "Consuming racelink-host from other
+    # repositories" README section. Both targets were deliberately
+    # moved to ``RaceLink_Docs/docs/RaceLink_Host/standalone-install.md``
+    # during the 2026-04-30 documentation consolidation; the in-repo
+    # docs directory was removed. The cross-repo doc layout is now
+    # enforced by ``mkdocs build --strict`` in the docs repo. The
+    # entrypoint contract (the bit that this Python package owns) is
+    # still pinned by ``test_packaging_exposes_standalone_entrypoint``
+    # below — that's the load-bearing assertion.
 
     def test_packaging_exposes_standalone_entrypoint(self):
         source = (ROOT / "pyproject.toml").read_text(encoding="utf-8")

@@ -69,6 +69,15 @@ body{ margin:0; font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif
   animation: rl-row-flash 1.0s ease-out;
 }
 
+/* Same flash on the sidebar group list — fires when any device in
+   the group sends data (STATUS_REPLY / IDENTIFY_REPLY arrived over
+   SSE → loadDevices → renderGroups detects the per-group
+   ``last_seen_ts`` advance). Mirrors the table-row flash so the
+   sidebar feels live alongside the device table. */
+.rl-groups li.rl-row-flash {
+  animation: rl-row-flash 1.0s ease-out;
+}
+
 /* Per-group delete affordance in the sidebar. Hidden by default;
    shown on row hover so the sidebar stays visually quiet at rest. */
 .rl-group-delete-btn{
@@ -211,6 +220,73 @@ dialog::backdrop{ background:rgba(0,0,0,.4); }
 .rl-scene-target-radios{ display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
 .rl-scene-target label.inline{ font-size:12px; color:var(--muted); }
 .rl-scene-target-body{ display:flex; flex-direction:column; gap:6px; }
+
+/* Groups target — compact summary chip in the action body. The
+   actual checkbox list lives in a dialog (openGroupsSelectionDialog)
+   so the action row stays scannable even on fleets with many groups. */
+.rl-scene-target-groups{ display:flex; flex-direction:column; gap:4px; }
+.rl-scene-target-groups-summary-head{
+  display:flex; align-items:center; gap:8px;
+}
+.rl-scene-target-groups-summary-counts{
+  font-size:13px;
+}
+.rl-scene-target-groups-summary-edit{
+  font-size:12px; padding:4px 10px;
+}
+.rl-scene-target-groups-summary-list{
+  font-size:11px; line-height:1.4;
+  /* Soft-cap height so a long selection doesn't blow the row up;
+     "+ K more" trailing hint covers the truncation in the JS. */
+  max-height:32px; overflow:hidden; text-overflow:ellipsis;
+}
+.rl-scene-target-allgroups-hint{
+  font-size:11px;
+}
+
+/* Groups selection dialog ----------------------------------------- */
+.rl-groups-dialog{
+  width:min(560px, 96vw);
+}
+.rl-groups-dialog form{
+  display:flex; flex-direction:column; gap:10px;
+}
+.rl-groups-dialog h3{ margin:0; }
+.rl-groups-dialog-search input[type=search]{
+  width:100%; padding:6px 10px; font-size:13px;
+  background:#0c0c12; color:var(--text);
+  border:1px solid #2a2a32; border-radius:6px;
+}
+.rl-groups-dialog-actions{
+  display:flex; flex-wrap:wrap; gap:6px;
+}
+.rl-groups-dialog-actions .btn{ font-size:12px; padding:4px 10px; }
+.rl-groups-dialog-list{
+  display:flex; flex-direction:column; gap:2px;
+  max-height:min(420px, 60vh); overflow-y:auto;
+  padding:6px 4px; border:1px solid #2a2a32; border-radius:6px;
+  background:#0c0c12;
+}
+.rl-groups-dialog-row{
+  /* Override .rl-toggle-wrap's inline-flex for full-width rows so
+     the search results read like a list, not a chip cloud. */
+  display:flex; width:100%; padding:2px 6px; border-radius:4px;
+}
+.rl-groups-dialog-row:hover{ background:#1a1a22; }
+.rl-groups-dialog-footer{
+  display:flex; flex-direction:column; gap:2px;
+  font-size:12px;
+}
+.rl-groups-dialog-footer-counts{ font-weight:500; }
+.rl-groups-dialog-footer-hint{ font-size:11px; }
+.rl-groups-dialog-buttons{
+  display:flex; justify-content:flex-end; gap:8px;
+  margin:0; padding:0;
+}
+.rl-groups-dialog-buttons button{ padding:6px 16px; font-size:13px; }
+.rl-groups-dialog-buttons button.primary{
+  background:#3a5fc8; color:#fff; border-color:#3a5fc8;
+}
 
 /* offset_group container action ------------------------------------- */
 .rl-offset-group-container{

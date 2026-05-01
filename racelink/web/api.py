@@ -482,14 +482,74 @@ def register_api_routes(bp, ctx):
             new_group_name=body.get("newGroupName", None),
         )
 
+        # ``discoveryGroup`` is the *filter* used in the OPC_DEVICES wire
+        # body — independent of ``targetGroupId`` which is the
+        # add-discovered-devices-to group. See the broadcast ruleset for
+        # why discovery defaults to groupId=0 (newly-booted devices) and
+        # why "all groups" is a sweep, not a single packet:
+        # ../../docs/reference/broadcast-ruleset.md#designed-in-special-cases
+        # ../../docs/roadmap.md#group-agnostic-re-identification
+        raw_dgroup = body.get("discoveryGroup", None)
+        sweep_all = (str(raw_dgroup).lower() == "all") if raw_dgroup is not None else False
+        if sweep_all:
+            try:
+                known_groups = ctx.rl_instance.group_repository.list()
+                sweep_ids = sorted({
+                    int(getattr(g, "groupId", getattr(g, "id", -1)))
+                    for g in known_groups
+                    if 0 <= int(getattr(g, "groupId", getattr(g, "id", -1))) <= 254
+                })
+            except Exception:
+                # swallow-ok: missing/empty repo → degrade to default
+                # filter (0); the operator sees "0 found" in that case.
+                sweep_ids = []
+            discovery_filter = None  # signal: use the sweep path
+        else:
+            try:
+                discovery_filter = (
+                    int(raw_dgroup) if raw_dgroup not in (None, "") else 0
+                )
+            except (TypeError, ValueError):
+                discovery_filter = 0
+            if not 0 <= discovery_filter <= 254:
+                discovery_filter = 0
+            sweep_ids = []
+
         def do_discover():
             add_to_group = -1
             if target_gid not in (None, 0, "0"):
                 add_to_group = int(target_gid)
-            found = int(ctx.rl_instance.getDevices(groupFilter=0, addToGroup=add_to_group) or 0)
-            return {"found": found, "createdGroupId": created_gid, "targetGroupId": target_gid}
+            if sweep_all and sweep_ids:
+                found = int(
+                    ctx.rl_instance.getDevicesInGroups(
+                        groupIds=sweep_ids, addToGroup=add_to_group,
+                    ) or 0
+                )
+            else:
+                # Default + per-group path: single OPC_DEVICES with the
+                # selected filter. ``discoveryGroup`` missing or invalid
+                # falls back to 0 (Unconfigured) — the historical default.
+                found = int(
+                    ctx.rl_instance.getDevices(
+                        groupFilter=(discovery_filter if discovery_filter is not None else 0),
+                        addToGroup=add_to_group,
+                    ) or 0
+                )
+            return {
+                "found": found,
+                "createdGroupId": created_gid,
+                "targetGroupId": target_gid,
+                "discoveryGroup": "all" if sweep_all else discovery_filter,
+            }
 
-        task = ctx.tasks.start("discover", do_discover, meta={"createdGroupId": created_gid, "targetGroupId": target_gid})
+        task = ctx.tasks.start(
+            "discover", do_discover,
+            meta={
+                "createdGroupId": created_gid,
+                "targetGroupId": target_gid,
+                "discoveryGroup": "all" if sweep_all else discovery_filter,
+            },
+        )
         if not task:
             return ctx.tasks.busy_response()
         return jsonify({"ok": True, "task": task})
@@ -1312,10 +1372,15 @@ def register_api_routes(bp, ctx):
             "ok": True,
             "kinds": kinds_out,
             "flag_keys": list(USER_FLAG_KEYS),
-            # Top-level target kinds. ``offset_group`` is now an action kind
-            # (a container with its own children), not a target kind, so the
-            # legacy ``groups_offset`` target is gone.
-            "target_kinds": ["group", "device"],
+            # Unified target shape across every action — see
+            # ``scenes_service._canonical_target`` and the broadcast-
+            # ruleset doc. Legacy values (``scope``, singular ``group``,
+            # standalone ``groups`` field on offset_group) are migrated
+            # on read; they should never appear on a freshly-saved
+            # scene. Container scope omits ``device`` because the
+            # offset formula is per-group.
+            "target_kinds":             ["broadcast", "groups", "device"],
+            "container_target_kinds":   ["broadcast", "groups"],
             "offset_group": {
                 "max_groups":   MAX_GROUPS_OFFSET_ENTRIES,
                 "max_children": MAX_OFFSET_GROUP_CHILDREN,
@@ -1326,9 +1391,11 @@ def register_api_routes(bp, ctx):
                 "step_ms":      {"min": -32768, "max": 32767},
                 "center":       {"min": 0,      "max": GROUP_ID_MAX},
                 "cycle":        {"min": 1,      "max": 255},
-                "supports_all_groups": True,
+                # ``broadcast`` (the unified Strategy-A trigger)
+                # replaces the pre-2026-05 ``groups: "all"`` checkbox.
+                "supports_broadcast_target": True,
                 "child_kinds":  list(OFFSET_GROUP_CHILD_KINDS),
-                "child_target_kinds": ["scope", "group", "device"],
+                "child_target_kinds":      ["broadcast", "groups", "device"],
             },
             # Active LoRa parameters for the cost-estimator tooltip.
             "lora": lora_parameters(),
@@ -1408,10 +1475,20 @@ def register_api_routes(bp, ctx):
 
     def _known_group_ids_from_ctx() -> list:
         """Best-effort list of currently-known group ids for the optimizer.
-        Falls back to an empty list when no device repository is wired."""
+        Falls back to an empty list when no device repository is wired.
+
+        ``ctx.rl_instance`` IS the controller — every other access in
+        this module reads ``ctx.rl_instance.device_repository`` directly
+        (e.g. line 199). Earlier code added a stray ``.controller``
+        indirection here that silently returned ``None``; the resulting
+        empty ``known_group_ids`` closed the optimizer's Strategy-C
+        gate, making the estimator under-report by reaching for
+        Strategy B (per-group EXPLICIT) where the runtime would do
+        Strategy C (broadcast formula + sparse NONE overrides). Pinned
+        by ``test_known_group_ids_from_ctx_reads_repo_directly``.
+        """
         try:
-            ctrl = getattr(ctx.rl_instance, "controller", None) if ctx.rl_instance else None
-            repo = getattr(ctrl, "device_repository", None) if ctrl else None
+            repo = getattr(ctx.rl_instance, "device_repository", None) if ctx.rl_instance else None
             if repo is None:
                 return []
             ids: set[int] = set()
@@ -1462,10 +1539,23 @@ def register_api_routes(bp, ctx):
             return None
         return lookup
 
+    def _device_lookup_for_estimator():
+        """Mirror the runner's ``controller.getDeviceFromAddress`` so
+        device-target body sizing in the cost estimator picks up the
+        device's stored ``groupId`` (matches the runner's "single-
+        device pinned rule" from the broadcast ruleset). Returns
+        ``None`` when the controller isn't wired — the planner then
+        treats device targets as degraded, matching the runner."""
+        rl = ctx.rl_instance
+        if rl is None:
+            return None
+        return getattr(rl, "getDeviceFromAddress", None)
+
     def _scene_cost_payload(scene_dict) -> dict:
         cost = estimate_scene(scene_dict,
                               known_group_ids=_known_group_ids_from_ctx(),
-                              rl_preset_lookup=_rl_preset_lookup_for_estimator())
+                              rl_preset_lookup=_rl_preset_lookup_for_estimator(),
+                              device_lookup=_device_lookup_for_estimator())
         return {
             "ok": True,
             "total": {

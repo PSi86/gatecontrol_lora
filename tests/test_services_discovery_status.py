@@ -121,6 +121,59 @@ class DiscoveryAndStatusTests(unittest.TestCase):
         self.assertEqual(dev.groupId, 4)
         self.assertEqual(controller.group_assignments, [("AABBCCDDEEFF", 4)])
 
+    def test_discovery_service_in_groups_sweeps_each_id(self):
+        """``discover_devices_in_groups`` fans out one OPC_DEVICES per
+        group id and merges responders. Used by the WebUI's "Discover
+        in: All groups" sweep — see broadcast-ruleset.md and the
+        roadmap entry for the future single-packet replacement.
+        """
+        dev_a = RL_Device("AABBCCDDEEFF", 1, "A", groupId=2)
+        dev_b = RL_Device("001122334455", 1, "B", groupId=3)
+        controller = FakeController([dev_a, dev_b])
+        # FakeGateway returns the same canned events for every send;
+        # both group-2 and group-3 sweeps will record the same
+        # IDENTIFY_REPLY twice. The assertion is on the SEND fan-out
+        # count, not on responder uniqueness post-sweep.
+        gateway = FakeGateway(
+            [
+                {
+                    "opc": LP.OPC_DEVICES,
+                    "reply": "IDENTIFY_REPLY",
+                    "mac6": bytes.fromhex("AABBCCDDEEFF"),
+                    "sender3": bytes.fromhex("DDEEFF"),
+                }
+            ]
+        )
+        service = DiscoveryService(controller, gateway)
+
+        result = service.discover_devices_in_groups(group_ids=[2, 3])
+
+        # Two sends, one per group filter.
+        send_calls = [s for s in controller.transport.sent if s[0] == "devices"]
+        self.assertEqual(len(send_calls), 2)
+        emitted_filters = sorted(call[1].get("group_id") for call in send_calls)
+        self.assertEqual(emitted_filters, [2, 3])
+        # Responders merge into a set (no duplicates even though the
+        # canned reply fired twice).
+        self.assertEqual(result["responders"], {"AABBCCDDEEFF"})
+
+    def test_discovery_service_in_groups_skips_invalid_ids(self):
+        # Out-of-range / non-int ids are skipped silently rather than
+        # crashing the sweep — the API may pass through malformed input
+        # and the worker shouldn't blow up the task.
+        controller = FakeController([])
+        gateway = FakeGateway([])
+        service = DiscoveryService(controller, gateway)
+
+        result = service.discover_devices_in_groups(
+            group_ids=[1, 255, -1, "bogus", 5],
+        )
+
+        send_calls = [s for s in controller.transport.sent if s[0] == "devices"]
+        emitted = sorted(call[1].get("group_id") for call in send_calls)
+        self.assertEqual(emitted, [1, 5])
+        self.assertEqual(result["found"], 0)
+
     def test_status_service_marks_non_responders_offline_on_window_close(self):
         responding = RL_Device("AABBCCDDEEFF", 1, "Node A", groupId=2)
         silent = RL_Device("001122334455", 1, "Node B", groupId=2)

@@ -800,6 +800,29 @@ class RaceLink_Host:
         self._notify(msg)
         return found
 
+    def getDevicesInGroups(
+        self,
+        groupIds,
+        addToGroup: int = -1,
+    ) -> int:
+        """Sweep discovery over a list of group ids.
+
+        Used by the WebUI's "Discover in: All groups" selector — see
+        :meth:`DiscoveryService.discover_devices_in_groups`. Returns the
+        aggregated reply count.
+        """
+        result = self.discovery_service.discover_devices_in_groups(
+            group_ids=groupIds,
+            add_to_group=addToGroup,
+        )
+        found = int(result.get("found", 0) or 0)
+        if 0 < addToGroup < 255:
+            msg = "Device Discovery sweep finished with {} replies; added to GroupId: {}".format(found, addToGroup)
+        else:
+            msg = "Device Discovery sweep finished with {} replies.".format(found)
+        self._notify(msg)
+        return found
+
     def getStatus(
         self,
         groupFilter: int = 255,
@@ -1049,7 +1072,13 @@ class RaceLink_Host:
         wait_for_ack: bool = False,
         timeout_s: Optional[float] = None,
     ):
-        """Compatibility entrypoint forwarding config writes to ConfigService."""
+        """Compatibility entrypoint forwarding config writes to ConfigService.
+
+        OPC_CONFIG must be unicast — see
+        :meth:`ConfigService.send_config` for the design rule. Callers
+        must pass a concrete ``recv3``; the broadcast default exists
+        only as a defensive sentinel that the firmware drops.
+        """
         return self.config_service.send_config(
             option,
             data0=data0,
