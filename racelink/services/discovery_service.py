@@ -8,9 +8,20 @@ preserving operator-set name/groupId for already-known macs).
 
 Public API:
 
-* ``discover_devices(target_group_id, new_group_name=None,
-  task_meta_callback=None) -> dict`` — fires the broadcast,
-  drains the reply window, returns ``{"found": N, ...}``.
+* :meth:`DiscoveryService.discover_devices` — fire one OPC_DEVICES
+  on a single ``group_filter`` value, drain the reply window,
+  return ``{"found": N, ...}``. The default ``group_filter=255``
+  is the historical wire fallback; the operator-facing default is
+  ``group_filter=0`` (Unconfigured) and is set by the API caller —
+  see ``docs/reference/broadcast-ruleset.md`` for the design rule.
+* :meth:`DiscoveryService.discover_devices_in_groups` — fan-out
+  helper that loops :meth:`discover_devices` once per group id and
+  merges responders. Used by the Web UI's "Discover in: All
+  groups" option to reach a fleet whose devices have been
+  re-flashed / moved between gateways and may sit in any of the
+  known groups. The future
+  [group-agnostic re-identification](../../docs/roadmap.md)
+  feature would replace the loop with a single packet.
 
 Threading: typically driven by the task manager from a worker
 thread (the operator clicks "Discover" → web route → task →
@@ -22,6 +33,7 @@ listener on the transport for the duration of the window.
 from __future__ import annotations
 
 import logging
+from typing import Any, Iterable, List, Optional
 
 from ..transport import LP, mac_last3_from_hex
 from . import rf_timing
@@ -105,3 +117,48 @@ class DiscoveryService:
                 self.controller.setNodeGroupId(dev)
 
         return {"found": found, "responders": responders, "assigned_group": assigned_group}
+
+    def discover_devices_in_groups(
+        self,
+        *,
+        group_ids: Iterable[int],
+        add_to_group: int = -1,
+    ) -> dict:
+        """Sweep discovery across multiple group filters.
+
+        Calls :meth:`discover_devices` once per id in ``group_ids``,
+        merges the responder sets, and returns the aggregated result.
+        Sequential (one OPC_DEVICES + RX window per id) — matches the
+        operator-initiated cadence of the discovery dialog. The future
+        [group-agnostic re-identification](../../docs/roadmap.md)
+        feature replaces this with a single packet.
+
+        Returns the same shape as :meth:`discover_devices`: ``{"found":
+        <total replies across all groups>, "responders": <merged
+        set>, "assigned_group": <add_to_group if applied else None>}``.
+        """
+        merged_responders: set = set()
+        total_found = 0
+        last_assigned: Optional[int] = None
+        for gid in group_ids:
+            try:
+                gid_int = int(gid)
+            except (TypeError, ValueError):
+                continue
+            if not 0 <= gid_int <= 254:
+                continue
+            result = self.discover_devices(
+                group_filter=gid_int,
+                add_to_group=add_to_group,
+            )
+            total_found += int(result.get("found", 0) or 0)
+            responders = result.get("responders") or set()
+            merged_responders.update(responders)
+            assigned = result.get("assigned_group")
+            if assigned is not None:
+                last_assigned = assigned
+        return {
+            "found": total_found,
+            "responders": merged_responders,
+            "assigned_group": last_assigned,
+        }

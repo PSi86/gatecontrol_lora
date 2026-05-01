@@ -124,9 +124,15 @@
   <dialog id="dlgDiscover">
     <form method="dialog">
       <h3>Discover Devices</h3>
-      <p>Only devices with groupId=0 will respond. Choose a target group or create a new one.</p>
+      <p>Default: only devices with groupId=0 (Unconfigured) reply.
+        Use "Discover in" to re-poll a configured group, or "All
+        groups" to sweep every known group sequentially.</p>
       <div class="row">
-        <label>Target Group:</label>
+        <label>Discover in:</label>
+        <select id="discoverInGroup"></select>
+      </div>
+      <div class="row">
+        <label>Add discovered devices to:</label>
         <select id="discoverGroup"></select>
       </div>
       <div class="row">

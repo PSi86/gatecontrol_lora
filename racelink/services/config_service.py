@@ -9,6 +9,10 @@ SSE refresh so the WebUI picks up the change.
 
 Public API:
 
+* ``send_config(...)`` — emit one OPC_CONFIG packet via the
+  gateway service. **Always unicast.** See
+  :meth:`ConfigService.send_config` for the OPC_CONFIG broadcast
+  design rule.
 * ``apply_config_update(dev, option, data0)`` — invoked from
   :meth:`GatewayService.handle_ack_event` via the controller's
   ``_apply_config_update`` shim; pre-A3 this read the pending-
@@ -43,6 +47,29 @@ class ConfigService:
         wait_for_ack: bool = False,
         timeout_s: Optional[float] = None,
     ):
+        """Emit one OPC_CONFIG packet via the gateway service.
+
+        **OPC_CONFIG cannot be broadcast — by design.** Different
+        device classes (WLED, Startblock, future capabilities) can
+        reinterpret the same config-register address according to
+        their capability, so a global broadcast would collide. The
+        WLED firmware enforces this at the receiver: any OPC_CONFIG
+        with ``recv3 == FFFFFF`` is rejected before the option
+        handler runs (see ``RaceLink_WLED/src/racelink_wled.cpp``
+        and the [Broadcast Ruleset]
+        (../../../RaceLink_Docs/docs/reference/broadcast-ruleset.md)
+        — the OPC_CONFIG row + "Designed-in special cases" section).
+        The Web API ``/api/config`` route enforces the same rule at
+        the boundary: a broadcast ``recv3`` returns 400 with
+        "broadcast not allowed for config".
+
+        The ``recv3`` parameter therefore must be passed by every
+        caller as a concrete 3-byte device address. The default
+        ``b"\\xFF\\xFF\\xFF"`` exists only as a defensive sentinel —
+        if it ever reaches the wire, the firmware drops the packet
+        (and the operator sees the action as a silent no-op). It is
+        not a "broadcast me by default" feature.
+        """
         if timeout_s is None:
             timeout_s = rf_timing.UNICAST_ATTEMPT_TIMEOUT_S
         return self.gateway_service.send_config(

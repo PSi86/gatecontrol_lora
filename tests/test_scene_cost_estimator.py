@@ -28,6 +28,8 @@ from racelink.services.scene_cost_estimator import (
 from racelink.services.scenes_service import (
     KIND_DELAY,
     KIND_OFFSET_GROUP,
+    KIND_RL_PRESET,
+    KIND_STARTBLOCK,
     KIND_SYNC,
     KIND_WLED_CONTROL,
     KIND_WLED_PRESET,
@@ -121,11 +123,11 @@ class WallClockOverheadTests(unittest.TestCase):
         # = 3 packets. Every packet contributes one overhead increment.
         cost = estimate_action({
             "kind": KIND_OFFSET_GROUP,
-            "groups": [1, 2],
+            "target": {"kind": "groups", "value": [1, 2]},
             "offset": {"mode": "explicit", "offset_ms": 100},
             "actions": [
                 {"kind": KIND_WLED_PRESET,
-                 "target": {"kind": "group", "value": 1},
+                 "target": {"kind": "groups", "value": [1]},
                  "params": {"presetId": 7, "brightness": 128}},
             ],
         })
@@ -168,11 +170,16 @@ class WallClockOverheadTests(unittest.TestCase):
 
 
 class ActionCostTests(unittest.TestCase):
-    def test_sync_action_is_one_packet_with_4b_body(self):
+    def test_sync_action_is_one_packet_with_5b_body(self):
+        # The runner always sets ``trigger_armed=True`` for a scene's
+        # deliberate sync action — that emits the 5 B form
+        # (``ts24[3] + brightness + flags``). Pre-2026-05-02 the estimator
+        # under-counted by sizing with ``flags=0`` (4 B); the planner now
+        # sizes with ``flags=SYNC_FLAG_TRIGGER_ARMED`` so the cost badge
+        # matches the wire.
         cost = estimate_action({"kind": KIND_SYNC})
         self.assertEqual(cost.packets, 1)
-        # 4 B body + 7 B header + 2 B USB = 13 B total wire bytes.
-        self.assertEqual(cost.bytes, 4 + RADIO_HEADER_BYTES + USB_FRAMING_BYTES)
+        self.assertEqual(cost.bytes, 5 + RADIO_HEADER_BYTES + USB_FRAMING_BYTES)
         self.assertGreater(cost.airtime_ms, 0.0)
 
     def test_delay_action_is_zero_packets_but_contributes_airtime(self):
@@ -185,7 +192,7 @@ class ActionCostTests(unittest.TestCase):
     def test_wled_preset_is_one_packet_with_4b_body(self):
         cost = estimate_action({
             "kind": KIND_WLED_PRESET,
-            "target": {"kind": "group", "value": 1},
+            "target": {"kind": "groups", "value": [1]},
             "params": {"presetId": 7, "brightness": 128},
         })
         self.assertEqual(cost.packets, 1)
@@ -195,12 +202,12 @@ class ActionCostTests(unittest.TestCase):
     def test_wled_control_packet_size_grows_with_params(self):
         no_params = estimate_action({
             "kind": KIND_WLED_CONTROL,
-            "target": {"kind": "group", "value": 1},
+            "target": {"kind": "groups", "value": [1]},
             "params": {},
         })
         with_params = estimate_action({
             "kind": KIND_WLED_CONTROL,
-            "target": {"kind": "group", "value": 1},
+            "target": {"kind": "groups", "value": [1]},
             "params": {"mode": 5, "brightness": 200, "color1": [255, 0, 0]},
         })
         self.assertEqual(no_params.packets, 1)
@@ -227,7 +234,7 @@ class ActionCostTests(unittest.TestCase):
         lookup = lambda ref: preset if ref in (42, "fast_red", "RL:fast_red") else None
         action = {
             "kind": KIND_RL_PRESET,
-            "target": {"kind": "group", "value": 1},
+            "target": {"kind": "groups", "value": [1]},
             "params": {"presetId": 42},
         }
         # Without lookup: only 3 B body (groupId+flags+fieldMask).
@@ -240,7 +247,7 @@ class ActionCostTests(unittest.TestCase):
         # — that's the operator-facing intuition the estimator must honour.
         wled = estimate_action({
             "kind": KIND_WLED_PRESET,
-            "target": {"kind": "group", "value": 1},
+            "target": {"kind": "groups", "value": [1]},
             "params": {"presetId": 7, "brightness": 128},
         })
         self.assertGreater(full.bytes, wled.bytes)
@@ -254,12 +261,12 @@ class ActionCostTests(unittest.TestCase):
         lookup = lambda ref: preset
         action_default = {
             "kind": KIND_RL_PRESET,
-            "target": {"kind": "group", "value": 1},
+            "target": {"kind": "groups", "value": [1]},
             "params": {"presetId": 1},
         }
         action_override = {
             "kind": KIND_RL_PRESET,
-            "target": {"kind": "group", "value": 1},
+            "target": {"kind": "groups", "value": [1]},
             "params": {"presetId": 1, "brightness": 220},
         }
         # Both materialise the same body shape (one brightness byte); the
@@ -274,12 +281,12 @@ class OffsetGroupCostTests(unittest.TestCase):
     def test_all_groups_linear_is_one_offset_plus_children(self):
         action = {
             "kind": KIND_OFFSET_GROUP,
-            "groups": "all",
+            "target": {"kind": "broadcast"},
             "offset": {"mode": "linear", "base_ms": 0, "step_ms": 100},
             "actions": [
-                {"kind": KIND_WLED_CONTROL, "target": {"kind": "scope"},
+                {"kind": KIND_WLED_CONTROL, "target": {"kind": "broadcast"},
                  "params": {"mode": 5}},
-                {"kind": KIND_WLED_PRESET, "target": {"kind": "scope"},
+                {"kind": KIND_WLED_PRESET, "target": {"kind": "broadcast"},
                  "params": {"presetId": 7, "brightness": 128}},
             ],
         }
@@ -293,7 +300,7 @@ class OffsetGroupCostTests(unittest.TestCase):
     def test_sparse_explicit_emits_per_group_offset_packets(self):
         action = {
             "kind": KIND_OFFSET_GROUP,
-            "groups": [1, 3, 5],
+            "target": {"kind": "groups", "value": [1, 3, 5]},
             "offset": {
                 "mode": "explicit",
                 "values": [
@@ -303,7 +310,7 @@ class OffsetGroupCostTests(unittest.TestCase):
                 ],
             },
             "actions": [
-                {"kind": KIND_WLED_CONTROL, "target": {"kind": "scope"},
+                {"kind": KIND_WLED_CONTROL, "target": {"kind": "broadcast"},
                  "params": {"mode": 5}},
             ],
         }
@@ -315,7 +322,7 @@ class OffsetGroupCostTests(unittest.TestCase):
     def test_offset_group_no_children_is_just_offset_setup(self):
         action = {
             "kind": KIND_OFFSET_GROUP,
-            "groups": "all",
+            "target": {"kind": "broadcast"},
             "offset": {"mode": "none"},
             "actions": [],
         }
@@ -324,12 +331,127 @@ class OffsetGroupCostTests(unittest.TestCase):
         self.assertEqual(cost.detail["child_count"], 0)
 
 
+class TopLevelGroupsFanoutCostTests(unittest.TestCase):
+    """Pin the per-group fan-out multiplier in the cost estimator.
+
+    The runner fans out one wire packet per id in a
+    ``target.kind == "groups"`` list (see ``_send_with_fanout`` in
+    scene_runner_service.py); the estimator must reflect that so the
+    cost badge in the scene editor matches measured wall-clock for
+    sparse-subset targets.
+    """
+
+    def test_top_level_broadcast_is_one_packet(self):
+        cost = estimate_action({
+            "kind": KIND_WLED_CONTROL,
+            "target": {"kind": "broadcast"},
+            "params": {},
+        })
+        self.assertEqual(cost.packets, 1)
+
+    def test_top_level_groups_len1_is_one_packet(self):
+        cost = estimate_action({
+            "kind": KIND_WLED_CONTROL,
+            "target": {"kind": "groups", "value": [3]},
+            "params": {},
+        })
+        self.assertEqual(cost.packets, 1)
+
+    def test_top_level_groups_lenN_emits_one_packet_per_group(self):
+        # Three-group sparse subset → three packets. This is the case
+        # that originally drove the unification (the editor used to
+        # show 11 packets for an effectively-broadcast offset_group;
+        # the save-time collapse + this fan-out together fix the
+        # estimate to match the wire).
+        cost = estimate_action({
+            "kind": KIND_WLED_CONTROL,
+            "target": {"kind": "groups", "value": [1, 3, 5]},
+            "params": {},
+        })
+        self.assertEqual(cost.packets, 3)
+        # Bytes scale linearly too (no header sharing across packets).
+        per_packet = cost.bytes // 3
+        self.assertEqual(cost.bytes, per_packet * 3)
+
+    def test_top_level_device_target_is_one_packet(self):
+        # Device targets need a ``device_lookup`` callable to mirror
+        # the runner's ``controller.getDeviceFromAddress`` — without
+        # one the planner degrades (matches the runner's behaviour
+        # when the controller has no device repo wired). The API
+        # path always passes a lookup, so this only matters for
+        # ad-hoc estimator unit tests.
+        class _D:
+            addr = "AABBCCDDEEFF"
+            groupId = 4
+        cost = estimate_action(
+            {
+                "kind": KIND_WLED_PRESET,
+                "target": {"kind": "device", "value": "AABBCCDDEEFF"},
+                "params": {"presetId": 7, "brightness": 128},
+            },
+            device_lookup=lambda addr: _D() if addr.upper() == "AABBCCDDEEFF" else None,
+        )
+        self.assertEqual(cost.packets, 1)
+
+    def test_top_level_groups_lenN_applies_to_every_per_group_kind(self):
+        for kind in (KIND_WLED_PRESET, KIND_WLED_CONTROL, KIND_RL_PRESET, KIND_STARTBLOCK):
+            with self.subTest(kind=kind):
+                cost = estimate_action({
+                    "kind": kind,
+                    "target": {"kind": "groups", "value": [1, 2, 3, 4]},
+                    "params": {"presetId": 7},
+                })
+                self.assertEqual(cost.packets, 4,
+                    f"{kind} with 4-group target must emit 4 packets")
+
+
+class OffsetGroupSelectAllCollapseCostTests(unittest.TestCase):
+    """Pin the cost-estimator side of the
+    [1..N]-equals-all → broadcast canonicalisation.
+
+    Save-time canonicalisation runs on the SceneService; it isn't the
+    estimator's job. But once the canonicalised input arrives at the
+    estimator, it must pick Strategy A — *not* Strategy B with N
+    packets — for any offset_group with ``target.kind == "broadcast"``.
+    Otherwise the user's original divergence reappears.
+    """
+
+    def test_canonical_broadcast_offset_group_picks_strategy_a(self):
+        cost = estimate_action({
+            "kind": KIND_OFFSET_GROUP,
+            "target": {"kind": "broadcast"},
+            "offset": {"mode": "linear", "base_ms": 0, "step_ms": 100},
+            "actions": [
+                {"kind": KIND_WLED_CONTROL,
+                 "target": {"kind": "broadcast"},
+                 "params": {"mode": 5}},
+            ],
+        })
+        self.assertEqual(cost.detail["wire_path"], "A_broadcast_formula")
+        # 1 OPC_OFFSET (broadcast) + 1 child (broadcast) = 2 packets.
+        self.assertEqual(cost.packets, 2)
+
+    def test_uncollapsed_full_groups_list_picks_strategy_b(self):
+        # Without the SceneService's save-time collapse (e.g. raw API
+        # input that bypasses canonicalisation), an explicit list goes
+        # to Strategy B / C. This pins the contract: the estimator
+        # mirrors the runtime — both pick Strategy A only when the
+        # input is canonical broadcast.
+        cost = estimate_action({
+            "kind": KIND_OFFSET_GROUP,
+            "target": {"kind": "groups", "value": [1, 2, 3]},
+            "offset": {"mode": "linear", "base_ms": 0, "step_ms": 100},
+            "actions": [],
+        }, known_group_ids=[1, 2, 3])
+        self.assertNotEqual(cost.detail["wire_path"], "A_broadcast_formula")
+
+
 class SceneCostTests(unittest.TestCase):
     def test_scene_aggregates_per_action_and_total(self):
         scene = {
             "actions": [
                 {"kind": KIND_WLED_PRESET,
-                 "target": {"kind": "group", "value": 1},
+                 "target": {"kind": "groups", "value": [1]},
                  "params": {"presetId": 7, "brightness": 128}},
                 {"kind": KIND_DELAY, "duration_ms": 100},
                 {"kind": KIND_SYNC},
@@ -351,11 +473,11 @@ class SceneCostTests(unittest.TestCase):
         scene = {
             "actions": [
                 {"kind": KIND_OFFSET_GROUP,
-                 "groups": "all",
+                 "target": {"kind": "broadcast"},
                  "offset": {"mode": "linear", "base_ms": 0, "step_ms": 100},
                  "actions": [
                      {"kind": KIND_WLED_CONTROL,
-                      "target": {"kind": "scope"},
+                      "target": {"kind": "broadcast"},
                       "params": {"mode": 5}},
                  ]},
                 {"kind": KIND_SYNC},

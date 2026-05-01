@@ -36,22 +36,12 @@ import math
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Mapping, Optional
 
-from ..protocol.packets import (
-    build_control_body,
-    build_offset_body,
-    build_preset_body,
-    build_sync_body,
+from .dispatch_planner import (
+    DeviceLookup,
+    RlPresetLookup,
+    plan_action_dispatch,
 )
-from .offset_dispatch_optimizer import plan_offset_setup
-from .scenes_service import (
-    KIND_DELAY,
-    KIND_OFFSET_GROUP,
-    KIND_RL_PRESET,
-    KIND_STARTBLOCK,
-    KIND_SYNC,
-    KIND_WLED_CONTROL,
-    KIND_WLED_PRESET,
-)
+from .scenes_service import KIND_DELAY
 
 # ---------------------------------------------------------------------------
 # RaceLink LoRa parameters — single source of truth for airtime estimation.
@@ -187,73 +177,84 @@ class SceneCost:
 # Public entry points
 # ---------------------------------------------------------------------------
 
-RlPresetLookup = Callable[[Any], Optional[Mapping[str, Any]]]
-
 
 def estimate_action(action: Mapping[str, Any], *,
                     known_group_ids: Optional[List[int]] = None,
-                    rl_preset_lookup: Optional[RlPresetLookup] = None) -> ActionCost:
+                    rl_preset_lookup: Optional[RlPresetLookup] = None,
+                    device_lookup: Optional[DeviceLookup] = None) -> ActionCost:
     """Estimate wire cost of a single canonical scene action.
 
-    ``known_group_ids`` is forwarded to the optimizer for ``offset_group``
-    container actions; pass an empty list (default) to mirror the test
-    environment where no devices are wired up — the optimizer still picks
-    a sane strategy (broadcast formula remains available).
+    Routes through :func:`plan_action_dispatch` (the same pure planner
+    the runner consumes) and sums ``body_bytes`` per planned op. This
+    is the structural-sync point: if the runner emits N packets for an
+    action, this function predicts exactly N — anything else is a
+    parity bug, caught by ``tests/test_dispatch_parity.py``.
 
-    ``rl_preset_lookup`` resolves an RL-preset reference (slug, ``RL:slug``,
-    or int id) to its stored preset dict. When provided, ``rl_preset``
-    actions size their OPC_CONTROL body using the preset's full params;
-    without it we fall back to the action's own ``params`` (typically just
-    a brightness override), which under-reports the wire size. The runner's
-    ``_lookup_rl_preset`` is the contract this signature mirrors.
+    ``known_group_ids`` is forwarded to the optimizer for
+    ``offset_group`` containers; without it Strategy C is ineligible
+    and the estimator falls back to Strategy B (matches the runner's
+    behaviour on a host with no device repository — so the prediction
+    still tracks the wire even in degraded environments).
+
+    ``rl_preset_lookup`` resolves preset references the same way the
+    runner does, so RL-preset actions size their OPC_CONTROL body
+    using the merged preset params (not just the action's brightness
+    override).
+
+    ``device_lookup`` resolves a device target's MAC to a device
+    object — the same callable the runner uses
+    (``controller.getDeviceFromAddress``). When ``None``, device
+    targets degrade (matching the runner's behaviour) so the cost
+    badge surfaces unresolvable targets as 0 packets.
     """
-    kind = action.get("kind")
     cost = ActionCost()
-    if kind == KIND_SYNC:
-        # 1× OPC_SYNC (P_Sync = 4 B body)
-        cost.add_packet(len(build_sync_body(0, 0)))
-        return cost
-    if kind == KIND_DELAY:
-        # No packets; both time fields are the literal sleep duration.
-        # The scene total reflects "real time the operator will wait" —
-        # the scheduler is host-side, not radio, but it still adds to
-        # total scene duration. wall_clock_ms tracks the same value
-        # because there's no per-packet overhead to add for a delay.
+    if action.get("kind") == KIND_DELAY:
+        # No wire packets — both time fields are the literal sleep
+        # duration. The scene total reflects "real time the operator
+        # will wait" since delay adds to total scene duration even
+        # though the scheduler is host-side, not radio.
         duration = float(action.get("duration_ms") or 0)
         cost.airtime_ms = duration
         cost.wall_clock_ms = duration
         return cost
-    if kind == KIND_STARTBLOCK:
-        # Startblock is handled by the controller via a custom path; treat
-        # it as a single OPC_CONTROL-sized packet for ballpark estimation.
-        cost.add_packet(_estimate_control_body_len(action.get("params") or {}))
-        return cost
-    if kind == KIND_WLED_PRESET:
-        cost.add_packet(len(build_preset_body(0, 0, 0, 0)))
-        return cost
-    if kind == KIND_WLED_CONTROL:
-        cost.add_packet(_estimate_control_body_len(action.get("params") or {}))
-        return cost
-    if kind == KIND_RL_PRESET:
-        params = _materialize_rl_preset_params(action, rl_preset_lookup)
-        cost.add_packet(_estimate_control_body_len(params))
-        return cost
-    if kind == KIND_OFFSET_GROUP:
-        return _estimate_offset_group_cost(action, known_group_ids or [], rl_preset_lookup)
-    # Unknown kind — return zero-cost so the editor doesn't blow up on a
-    # forward-compat scene.
+
+    plan = plan_action_dispatch(
+        action,
+        known_group_ids=known_group_ids or [],
+        rl_preset_lookup=rl_preset_lookup,
+        device_lookup=device_lookup,
+    )
+    for op in plan.ops:
+        cost.add_packet(op.body_bytes)
+
+    # Forward planner detail (wire_path, preset_key, etc.) onto the
+    # cost dataclass so the WebUI's per-action info row sees the same
+    # values the runner's ActionResult.detail would carry. Strip
+    # planner-internal keys (e.g. nested child_plans) that the
+    # ActionCost shouldn't carry into the API payload.
+    detail = dict(plan.detail or {})
+    detail.pop("child_plans", None)
+    if action.get("kind") == "offset_group":
+        # Preserve the legacy detail keys the WebUI cost badge already
+        # reads (``wire_path``, ``offset_packets`` count, ``child_count``).
+        detail.setdefault(
+            "offset_packets", detail.get("offset_packets", 0),
+        )
+    cost.detail = detail
     return cost
 
 
 def estimate_scene(scene: Mapping[str, Any], *,
                    known_group_ids: Optional[List[int]] = None,
-                   rl_preset_lookup: Optional[RlPresetLookup] = None) -> SceneCost:
+                   rl_preset_lookup: Optional[RlPresetLookup] = None,
+                   device_lookup: Optional[DeviceLookup] = None) -> SceneCost:
     """Estimate wire cost of a whole scene. ``per_action`` is in scene order."""
     out = SceneCost()
     for action in scene.get("actions") or []:
         cost = estimate_action(action,
                                known_group_ids=known_group_ids,
-                               rl_preset_lookup=rl_preset_lookup)
+                               rl_preset_lookup=rl_preset_lookup,
+                               device_lookup=device_lookup)
         out.per_action.append(cost)
         out.total.packets += cost.packets
         out.total.bytes += cost.bytes
@@ -265,94 +266,13 @@ def estimate_scene(scene: Mapping[str, Any], *,
 # ---------------------------------------------------------------------------
 # Internals
 # ---------------------------------------------------------------------------
-
-def _estimate_offset_group_cost(action: Mapping[str, Any],
-                                 known_group_ids: List[int],
-                                 rl_preset_lookup: Optional[RlPresetLookup] = None) -> ActionCost:
-    """Use the optimizer to plan the OPC_OFFSET phase, then add one packet
-    per child (broadcast / unicast). Mirrors ``_run_offset_group``."""
-    cost = ActionCost()
-
-    # Phase 1: OPC_OFFSET sequence (optimizer-planned).
-    plan = plan_offset_setup(
-        participant_groups=action.get("groups"),
-        offset=action.get("offset") or {"mode": "none"},
-        known_group_ids=known_group_ids,
-    )
-    for op in plan.ops:
-        cost.add_packet(op.body_bytes)
-
-    # Phase 2: one packet per child. Use kind to pick the right body builder.
-    children = action.get("actions") or []
-    for child in children:
-        child_kind = child.get("kind")
-        if child_kind == KIND_WLED_PRESET:
-            cost.add_packet(len(build_preset_body(0, 0, 0, 0)))
-        elif child_kind == KIND_WLED_CONTROL:
-            cost.add_packet(_estimate_control_body_len(child.get("params") or {}))
-        elif child_kind == KIND_RL_PRESET:
-            params = _materialize_rl_preset_params(child, rl_preset_lookup)
-            cost.add_packet(_estimate_control_body_len(params))
-        # Unknown child kinds add 0 — validator already rejects them, this
-        # is a forward-compat safety net.
-
-    cost.detail = {
-        "wire_path": plan.strategy,
-        "offset_mode": (action.get("offset") or {}).get("mode") or "none",
-        "offset_packets": plan.packet_count,
-        "child_count": len(children),
-    }
-    return cost
-
-
-def _materialize_rl_preset_params(action: Mapping[str, Any],
-                                   lookup: Optional[RlPresetLookup]) -> Dict[str, Any]:
-    """Resolve an ``rl_preset`` action's params to what the runner would
-    actually emit on the wire.
-
-    The runner pops ``presetId`` from the action's params, looks up the
-    stored preset, and merges the action's brightness override on top of
-    ``preset.params``. Without ``lookup`` we cannot resolve the preset, so
-    fall back to whatever ``action.params`` carries (usually empty + a
-    brightness override) — that under-reports but never crashes.
-    """
-    base_params = dict(action.get("params") or {})
-    preset_ref = base_params.pop("presetId", None)
-    if lookup is None or preset_ref is None:
-        return base_params
-    try:
-        preset = lookup(preset_ref)
-    except Exception:
-        # swallow-ok: estimator must never throw — observability path.
-        preset = None
-    if not preset:
-        return base_params
-    merged: Dict[str, Any] = dict(preset.get("params") or {})
-    if "brightness" in base_params and base_params["brightness"] is not None:
-        merged["brightness"] = base_params["brightness"]
-    return merged
-
-
-def _estimate_control_body_len(params: Mapping[str, Any]) -> int:
-    """Approximate body length of an OPC_CONTROL with the given params dict.
-
-    Uses the canonical builder so the prediction matches what the runner
-    would actually emit. Unknown params default to 0 (smallest body),
-    which is a conservative under-estimate for ad-hoc inputs but matches
-    the runner's ``ControlService.send_wled_control`` behaviour where
-    only explicitly-provided fields are serialised.
-    """
-    kwargs: Dict[str, Any] = {}
-    if "brightness" in params and params["brightness"] is not None:
-        kwargs["brightness"] = int(params["brightness"]) & 0xFF
-    for key in ("mode", "speed", "intensity", "custom1", "custom2", "custom3", "palette"):
-        if key in params and params[key] is not None:
-            kwargs[key] = int(params[key]) & 0xFF
-    for key in ("check1", "check2", "check3"):
-        if key in params and params[key] is not None:
-            kwargs[key] = bool(params[key])
-    for key in ("color1", "color2", "color3"):
-        if key in params and params[key] is not None:
-            kwargs[key] = tuple(int(c) & 0xFF for c in params[key])
-    body = build_control_body(group_id=0, flags=0, **kwargs)
-    return len(body)
+#
+# Every per-kind sizing helper used to live here as a parallel
+# implementation of what the runner does at dispatch time. Post-2026-05-02
+# the dispatch planner (``racelink/services/dispatch_planner.py``) is the
+# single source of truth — it produces ``WireOp`` records with
+# ``body_bytes`` already sized via the canonical builders, and both the
+# runner and this estimator consume the same plan. The previous
+# helpers (``_target_packet_multiplier``,
+# ``_estimate_offset_group_cost``, ``_materialize_rl_preset_params``,
+# ``_estimate_control_body_len``) are gone.

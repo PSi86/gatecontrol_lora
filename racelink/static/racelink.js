@@ -722,6 +722,11 @@ async function openSpecialsDialog(mac){
   async function loadDevices(){
     const d = await apiGet("/racelink/api/devices");
     state.devices = (d.devices||[]);
+    // The sidebar's group rows show online/total counts and flash
+    // when their devices reply, so they need a re-render whenever
+    // the device list refreshes — driven by SSE on STATUS_REPLY /
+    // IDENTIFY_REPLY events. ``renderGroups`` reads state.devices.
+    renderGroups();
     renderTable();
   }
 
@@ -738,6 +743,35 @@ async function openSpecialsDialog(mac){
   function renderGroups(){
     const ul = $("#rlGroups");
     ul.innerHTML = "";
+
+    // Snapshot the freshest ``last_seen_ts`` per group from the device
+    // list. Used below to (a) flash the group row when any of its
+    // devices receives new data — mirroring the device-table flash —
+    // and (b) compare against the previous snapshot to detect "fresh
+    // since the last render". Same first-render behaviour as the
+    // device table: an empty prev snapshot means nothing flashes on
+    // initial load (otherwise every row would).
+    const prevByGroup = state._lastSeenSnapshotByGroup || {};
+    const nextByGroup = {};
+
+    // Per-group device aggregation in a single pass over state.devices
+    // (cheaper than re-filtering once per group when the fleet has
+    // many devices).
+    const byGroup = new Map();   // id → { total, online, maxSeen }
+    (state.devices || []).forEach(d => {
+      const gid = (typeof d.groupId === "number") ? d.groupId : -1;
+      if(gid < 0) return;
+      let entry = byGroup.get(gid);
+      if(!entry){
+        entry = { total: 0, online: 0, maxSeen: 0 };
+        byGroup.set(gid, entry);
+      }
+      entry.total += 1;
+      if(d.online === true) entry.online += 1;
+      const seen = Number(d.last_seen_ts || 0);
+      if(seen > entry.maxSeen) entry.maxSeen = seen;
+    });
+
     state.groups.forEach(gr => {
       const li = document.createElement("li");
       li.className = (gr.id===state.selGroupId) ? "active" : "";
@@ -746,9 +780,19 @@ async function openSpecialsDialog(mac){
       // dance on the group name.
       const nameSpan = document.createElement("span");
       nameSpan.textContent = gr.name || `Group ${gr.id}`;
+      // ``M / N`` — online of total. Falls back to the server-side
+      // ``device_count`` when the device list hasn't loaded yet (the
+      // groups list often renders before /api/devices completes on
+      // page load).
+      const agg = byGroup.get(gr.id) || { total: gr.device_count || 0, online: 0, maxSeen: 0 };
       const countSpan = document.createElement("span");
       countSpan.className = "count";
-      countSpan.textContent = String(gr.device_count || 0);
+      countSpan.textContent = `${agg.online} / ${agg.total}`;
+      countSpan.title =
+        `${agg.online} of ${agg.total} device${agg.total === 1 ? "" : "s"} ` +
+        `in this group ${agg.online === 1 ? "is" : "are"} currently online ` +
+        `(replied to the last status query or sent an unsolicited ` +
+        `IDENTIFY_REPLY recently).`;
       li.appendChild(nameSpan);
       li.appendChild(countSpan);
       // Per-group delete button. Hidden by default, revealed on
@@ -775,8 +819,23 @@ async function openSpecialsDialog(mac){
         renderGroups();
         renderTable();
       });
+
+      // Flash on incoming device data. ``maxSeen`` is the freshest
+      // ``last_seen_ts`` across the group's devices; an advance over
+      // the previous snapshot means at least one device replied
+      // since the last render. The auto-strip mirrors the device
+      // table's pattern so a row that doesn't refresh next time
+      // doesn't keep a stale class.
+      nextByGroup[gr.id] = agg.maxSeen;
+      const prevSeen = prevByGroup[gr.id];
+      if(prevSeen !== undefined && agg.maxSeen > prevSeen){
+        li.classList.add("rl-row-flash");
+        setTimeout(() => { li.classList.remove("rl-row-flash"); }, 1100);
+      }
       ul.appendChild(li);
     });
+
+    state._lastSeenSnapshotByGroup = nextByGroup;
   }
 
   async function handleGroupDelete(group){
@@ -833,6 +892,38 @@ async function openSpecialsDialog(mac){
       sel2.appendChild(o2);
     });
     if(state.selGroupId!==null){ sel.value = state.selGroupId; sel2.value = state.selGroupId; }
+
+    // The "Discover in" selector lets the operator pick which groupId
+    // the OPC_DEVICES filter targets. Default is 0 (Unconfigured =
+    // newly-booted devices, the historical discovery flow). A specific
+    // group id re-polls a known group; "all" sweeps every known group
+    // sequentially. See docs/reference/broadcast-ruleset.md
+    // §"Designed-in special cases" and the Discovery group selector
+    // section of webui-guide.md.
+    const inSel = $("#discoverInGroup");
+    if(inSel){
+      const previousValue = inSel.value;
+      inSel.innerHTML = "";
+      const optDefault = document.createElement("option");
+      optDefault.value = "0";
+      optDefault.textContent = "Unconfigured (group 0) — default";
+      inSel.appendChild(optDefault);
+      selectableGroups.forEach(gr => {
+        const o = document.createElement("option");
+        o.value = String(gr.id);
+        o.textContent = `Group ${gr.id}: ${gr.name}`;
+        inSel.appendChild(o);
+      });
+      const optAll = document.createElement("option");
+      optAll.value = "all";
+      optAll.textContent = "All groups (sweep — N packets)";
+      inSel.appendChild(optAll);
+      // Preserve the operator's last choice across re-renders (groups
+      // refresh re-renders this dropdown via the GROUPS scope event).
+      if(previousValue && [...inSel.options].some(o => o.value === previousValue)){
+        inSel.value = previousValue;
+      }
+    }
   }
 
   function renderTable(){
@@ -2260,9 +2351,16 @@ $("#btnNodeCfgSend").addEventListener("click", async ()=>{
     e.preventDefault();
     const targetGroupId = Number($("#discoverGroup").value);
     const newGroupName = ($("#discoverNewGroup").value || "").trim() || null;
+    // ``discoveryGroup`` is the OPC_DEVICES filter (Stage-2 groupMatch
+    // on the device side). Pass through as-is — the API accepts an
+    // int 0..254 or the literal string "all" (sweep). Default 0.
+    const rawIn = ($("#discoverInGroup")?.value ?? "0").trim();
+    const discoveryGroup = (rawIn === "all") ? "all" : (Number(rawIn) || 0);
 
     $("#discoverResult").textContent = "Running…";
-    const r = await apiPost("/racelink/api/discover", {targetGroupId, newGroupName});
+    const r = await apiPost("/racelink/api/discover", {
+      targetGroupId, newGroupName, discoveryGroup,
+    });
 
     // If the API uses "busy" both for "already busy" and "task started",
     // treat an incoming discover task as success and rely on SSE/task polling for progress.

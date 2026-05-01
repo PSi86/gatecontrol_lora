@@ -50,12 +50,24 @@ FORMULA_MODES = ("linear", "vshape", "modulo", "none")
 @dataclass(frozen=True)
 class WireOp:
     """One planned wire send. Side-effect-free; the runner converts these
-    to actual transport calls."""
+    to actual transport calls.
 
-    opcode: str          # "OPC_OFFSET"
-    target_group: int    # 0..254 unicast filter; 255 = broadcast all groups
-    payload: Dict[str, Any]   # kwargs for ControlService.send_offset (mode + params)
-    body_bytes: int      # length of the OPC_OFFSET body on the wire (post-build)
+    Used by both the cost estimator and the runner. The estimator sums
+    ``body_bytes`` across the plan; the runner looks up ``sender`` in
+    its own service-method adapter, then dispatches via
+    ``getattr(adapter, op.sender)(**op.payload)``. This shared shape is
+    the structural sync point between the two — see
+    ``racelink/services/dispatch_planner.py`` for the entry point that
+    produces these ops for every action kind, and the parity tests in
+    ``tests/test_dispatch_parity.py`` for the contract.
+    """
+
+    opcode: str                                   # "OPC_OFFSET"|"OPC_CONTROL"|"OPC_PRESET"|"OPC_SYNC"
+    target_group: int                             # 0..254 unicast filter; 255 = broadcast all groups
+    payload: Dict[str, Any]                       # kwargs ready to spread into the sender
+    body_bytes: int                               # length of the body on the wire (post-build)
+    sender: Optional[str] = None                  # symbolic dispatch key — runner maps to a service method
+    detail: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -81,7 +93,7 @@ class OptimizerPlan:
 
 def plan_offset_setup(
     *,
-    participant_groups,
+    target: Mapping[str, Any],
     offset: Mapping[str, Any],
     known_group_ids,
 ) -> OptimizerPlan:
@@ -89,12 +101,16 @@ def plan_offset_setup(
 
     Parameters
     ----------
-    participant_groups
-        Either the literal string ``"all"`` (every device is a participant)
-        or a sorted list of int group ids (0..254).
+    target
+        The unified container target dict (see
+        ``scenes_service._canonical_offset_group_container_target``). Either
+        ``{"kind": "broadcast"}`` or
+        ``{"kind": "groups", "value": [<int>, ...]}``. Strategy A is
+        eligible only for the broadcast shape; concrete-list shapes go
+        through Strategy B / C.
     offset
-        The persisted ``target.offset`` block. Mode + mode-specific params
-        as validated by ``scenes_service``.
+        The persisted ``offset`` block. Mode + mode-specific params as
+        validated by ``scenes_service``.
     known_group_ids
         The group ids the host currently knows about (from
         ``device_repository`` or similar). Used by Strategy C to count
@@ -107,17 +123,28 @@ def plan_offset_setup(
         is nothing meaningful to send (e.g. clearing all on an empty
         device universe).
     """
-    is_all = (participant_groups == "all")
+    target_kind = target.get("kind")
+    is_all = (target_kind == "broadcast")
+    if is_all:
+        participant_groups: List[int] = []  # not used in the all-broadcast path
+    elif target_kind == "groups":
+        raw_value = target.get("value") or []
+        participant_groups = list(raw_value)
+    else:
+        raise ValueError(
+            f"plan_offset_setup: unsupported target kind {target_kind!r} "
+            "(expected 'broadcast' or 'groups')"
+        )
     mode = (offset.get("mode") or "none").lower()
 
-    # Strategy A — broadcast formula. Only meaningful when "all" + formula.
+    # Strategy A — broadcast formula. Only meaningful when broadcast + formula.
     a: Optional[OptimizerPlan] = None
     if is_all and mode in FORMULA_MODES:
         op = _make_offset_op(target_group=255, mode=mode, params=offset)
         a = OptimizerPlan(strategy="A_broadcast_formula", ops=[op])
 
     # Strategy B — per-group EXPLICIT. Always available when groups is a
-    # concrete list (or, for the "all" case, when the host knows the
+    # concrete list (or, for the broadcast case, when the host knows the
     # device universe).
     b: Optional[OptimizerPlan] = None
     concrete_groups = (
@@ -211,6 +238,7 @@ def _make_offset_op(*, target_group: int, mode: str, params: Mapping[str, Any]) 
         target_group=target_group,
         payload={"mode": mode, **kw},
         body_bytes=len(body),
+        sender="send_offset",
     )
 
 

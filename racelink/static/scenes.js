@@ -55,7 +55,8 @@
     state.scenes.schema = {
       kinds: Array.isArray(r.kinds) ? r.kinds : [],
       flagKeys: Array.isArray(r.flag_keys) ? r.flag_keys : [],
-      targetKinds: Array.isArray(r.target_kinds) ? r.target_kinds : ["group", "device"],
+      targetKinds: Array.isArray(r.target_kinds)
+        ? r.target_kinds : ["broadcast", "groups", "device"],
       offsetGroup: r.offset_group || null,
       lora: r.lora || null,
     };
@@ -172,6 +173,23 @@
     return Number(map[cap] || 0);
   }
 
+  // Sum the device count across an arbitrary set of group ids. Used by
+  // the compact "Groups" target summary (operator's request: show
+  // "N groups · M devices" inline in the action body so they don't
+  // need to open the picker dialog to see the scope). When ``cap`` is
+  // set, only devices that satisfy the action's capability count.
+  function totalDevicesInGroups(groupIds, cap){
+    if(!Array.isArray(groupIds) || !groupIds.length) return 0;
+    const ids = new Set(groupIds);
+    let total = 0;
+    (state.devices || []).forEach(d => {
+      if(!ids.has(d.groupId)) return;
+      if(cap && !deviceHasCap(d, cap)) return;
+      total += 1;
+    });
+    return total;
+  }
+
   // Mirrors racelink/domain/offset_formula.py — both sides must produce
   // byte-identical results. Used for the live preview AND for sparse
   // selections (the runner runs the same logic Python-side).
@@ -196,13 +214,80 @@
     return 0;
   }
 
-  function ensureOffsetGroupShape(action){
-    // Container actions carry ``groups`` and ``offset`` directly (no
-    // nested ``target``). Seed sensible defaults if a draft is missing
-    // them so the panel can render without crashing.
-    if(action.groups === undefined){
-      action.groups = "all";
+  // ---- Unified target shape (broadcast / groups / device) ----------
+  //
+  // See `docs/reference/broadcast-ruleset.md` and
+  // `racelink/services/scenes_service.py::_canonical_target` for the
+  // canonical definition. The JS side reads/writes this shape directly;
+  // legacy on-disk shapes are migrated by the backend at load and save,
+  // but in-memory drafts may still carry pre-migration shapes after a
+  // partial WebUI render race — the helpers below absorb that.
+  //
+  // Shapes:
+  //   { kind: "broadcast" }
+  //   { kind: "groups",    value: [<int>, ...] }
+  //   { kind: "device",    value: "<12-char MAC>" }
+
+  function migrateLegacyTarget(target){
+    // Translate the two superseded shapes to the unified one. Returns a
+    // *new* object when a rewrite happened; passes the input through
+    // otherwise. Caller assigns the result back to its container.
+    if(!target || typeof target !== "object") return target;
+    if(target.kind === "scope") return { kind: "broadcast" };
+    if(target.kind === "group"){
+      const v = Number(target.value);
+      if(Number.isFinite(v)) return { kind: "groups", value: [v] };
     }
+    return target;
+  }
+
+  function ensureContainerTarget(action){
+    // Offset_group containers used to carry ``action.groups`` ("all" or
+    // a list of ints). The unified shape uses ``action.target`` like
+    // every other action. Migrate legacy state in place so every
+    // downstream reader sees a single canonical field.
+    if(action.target && typeof action.target === "object"){
+      action.target = migrateLegacyTarget(action.target);
+      delete action.groups;  // shouldn't coexist; defensive.
+      return action.target;
+    }
+    if(action.groups === "all" || action.groups === 255){
+      action.target = { kind: "broadcast" };
+    }else if(Array.isArray(action.groups)){
+      const ids = action.groups
+        .map(g => (typeof g === "number") ? g : (g && g.id))
+        .filter(n => Number.isFinite(n) && n >= 0 && n <= 254)
+        .sort((a, b) => a - b);
+      action.target = ids.length
+        ? { kind: "groups", value: ids }
+        : { kind: "broadcast" };
+    }else{
+      action.target = { kind: "broadcast" };
+    }
+    delete action.groups;
+    return action.target;
+  }
+
+  function targetIsBroadcast(target){
+    return !!target && target.kind === "broadcast";
+  }
+
+  function targetGroupIds(target, fallbackAllIds){
+    // Resolve the unified target to the concrete group-id list it
+    // implies. ``broadcast`` returns the fallback (every known group);
+    // ``groups`` returns the explicit list; ``device`` returns [].
+    if(!target) return [];
+    if(target.kind === "broadcast") return fallbackAllIds.slice();
+    if(target.kind === "groups" && Array.isArray(target.value)){
+      return target.value.slice();
+    }
+    return [];
+  }
+
+  function ensureOffsetGroupShape(action){
+    // Seed sensible defaults if a draft is missing ``target`` /
+    // ``offset`` / ``actions`` so the panel can render without crashing.
+    ensureContainerTarget(action);
     if(!action.offset || typeof action.offset !== "object"){
       action.offset = { ...OFFSET_FORMULA_DEFAULTS };
     }
@@ -213,14 +298,20 @@
   }
 
   function getSelectedIdsFromHolder(holder){
-    const groups = holder.groups;
-    if(groups === "all" || groups === 255){
+    // ``holder`` is an offset_group container action. Returns
+    // ``{ all: bool, ids: [int,...] }`` derived from the unified
+    // ``holder.target`` shape (broadcast → every known group; groups →
+    // explicit subset).
+    const target = ensureContainerTarget(holder);
+    if(targetIsBroadcast(target)){
       return { all: true, ids: knownGroupIds() };
     }
-    if(Array.isArray(groups)){
-      const ids = groups.map(g => (typeof g === "number") ? g : (g && g.id))
-        .filter(n => Number.isFinite(n) && n >= 0 && n <= 254);
-      return { all: false, ids: ids.slice().sort((a, b) => a - b) };
+    if(target.kind === "groups" && Array.isArray(target.value)){
+      const ids = target.value
+        .filter(n => Number.isFinite(n) && n >= 0 && n <= 254)
+        .slice()
+        .sort((a, b) => a - b);
+      return { all: false, ids };
     }
     return { all: false, ids: [] };
   }
@@ -461,16 +552,20 @@
       return action;
     }
     if(kind === "offset_group"){
-      // Default to "all groups + Linear, base=0, step=100" — the most common
-      // operator intent and the cheapest wire path (one broadcast packet).
-      // Children list starts empty; the user adds wled_control / wled_preset
-      // children via the in-container Add row.
-      action.groups = "all";
+      // Default to "broadcast (all groups) + Linear, base=0, step=100" —
+      // the most common operator intent and the cheapest wire path (one
+      // broadcast OPC_OFFSET packet, see the Strategy A discussion in
+      // docs/reference/broadcast-ruleset.md). Children list starts empty.
+      action.target = { kind: "broadcast" };
       action.offset = { mode: "linear", base_ms: 0, step_ms: 100 };
       action.actions = [];
       return action;
     }
-    action.target = { kind: "group", value: 1 };
+    // Top-level effect actions default to a single-group target — the
+    // most common starting point. The unified shape keeps the value as
+    // a length-1 list; the operator can switch to broadcast or device
+    // via the picker.
+    action.target = { kind: "groups", value: [1] };
     action.params = {};
     if(meta && meta.supports_flags_override){
       action.flags_override = {};
@@ -479,7 +574,10 @@
   }
 
   function defaultOffsetGroupChild(kind){
-    const action = { kind, target: { kind: "scope" }, params: {} };
+    // Children default to broadcast — the cheapest wire path and the
+    // intent most often expressed by an offset_group container ("apply
+    // this effect to every offset-configured device").
+    const action = { kind, target: { kind: "broadcast" }, params: {} };
     const meta = findKindMeta(kind);
     if(meta && meta.supports_flags_override){
       action.flags_override = {};
@@ -1046,24 +1144,63 @@
     }
   }
 
-  function buildTargetPicker(action, idx, draft){
+  // ---- Unified target picker ----------------------------------------
+  //
+  // One implementation drives every target selection in the scene
+  // editor: top-level effect actions, offset_group containers, and
+  // offset_group children. Three radios — Broadcast / Groups / Device —
+  // with the value picker (multi-select / single device) appearing
+  // below when the active radio needs one.
+  //
+  // ``opts`` keys:
+  //   scope        "top" | "container" | "child" — picks the radio
+  //                set (container hides Device) and the wire-shape
+  //                guidance shown in the inline hint.
+  //   namePrefix   Unique-per-page DOM name prefix for the radio set.
+  //   actionKind   The action's kind, passed through to
+  //                ``requiredCapForKind`` for capability filtering.
+  //   parentTarget (child scope only) the parent offset_group's
+  //                target — restricts which group ids the child may
+  //                pick when parent is a sparse `groups` list.
+  //   onChange     Optional. Called after every target mutation.
+  //                Defaults to ``renderSceneEditor`` so dependent UI
+  //                (cost badge, child target dropdowns, …) re-renders.
+  function buildUnifiedTargetPicker(action, opts){
+    const scope = opts.scope || "top";
+    const namePrefix = opts.namePrefix || `target-${scope}-${Date.now()}`;
+    const actionKind = opts.actionKind || action.kind;
+    const onChange = opts.onChange || (() => renderSceneEditor());
+    const parentTarget = opts.parentTarget || null;
+
+    // Migrate any legacy in-memory shape on first render so the rest of
+    // the picker only deals with the canonical unified target.
+    if(scope === "container"){
+      ensureContainerTarget(action);
+    }else{
+      action.target = migrateLegacyTarget(action.target) || { kind: "broadcast" };
+    }
+
     const wrap = document.createElement("div");
     wrap.className = "rl-scene-target";
 
-    if(!action.target) action.target = { kind: "group", value: 1 };
-
-    // Top-level targets: group or device. (Multi-group offset playback now
-    // lives in the dedicated ``offset_group`` container action with its
-    // own children list — pick that from the action-kind dropdown.)
-    const radios = {};
+    // ---- Radio row ---------------------------------------------------
     const radioRow = document.createElement("div");
     radioRow.className = "rl-scene-target-radios";
-    [["group", "Group"], ["device", "Device"]].forEach(([kind, lbl]) => {
+
+    // Container-scope picker hides "Device" (offset is per-group, so a
+    // single device target is invalid at the container level — see
+    // scenes_service._canonical_offset_group_container_target).
+    const radioKinds = (scope === "container")
+      ? [["broadcast", "Broadcast"], ["groups", "Groups"]]
+      : [["broadcast", "Broadcast"], ["groups", "Groups"], ["device", "Device"]];
+
+    const radios = {};
+    radioKinds.forEach(([kind, lbl]) => {
       const r = document.createElement("input");
       r.type = "radio";
-      r.name = `target-kind-${idx}`;
+      r.name = namePrefix;
       r.value = kind;
-      r.checked = action.target.kind === kind;
+      r.checked = (action.target.kind === kind);
       radios[kind] = r;
       const wl = document.createElement("label");
       wl.className = "inline";
@@ -1073,148 +1210,495 @@
     });
     wrap.appendChild(radioRow);
 
+    // ---- Body holder (per-kind value picker) -------------------------
     const bodyHolder = document.createElement("div");
     bodyHolder.className = "rl-scene-target-body";
-    bodyHolder.appendChild(buildSingleTargetSelect(action, idx, draft));
     wrap.appendChild(bodyHolder);
 
     function switchTo(newKind){
-      const previous = action.target;
-      if(newKind === "group"){
-        const def = (previous.kind === "group" && Number.isFinite(Number(previous.value)))
-          ? Number(previous.value) : (knownGroupIds()[0] ?? 1);
-        action.target = { kind: "group", value: def };
+      const previous = action.target || {};
+      if(newKind === "broadcast"){
+        action.target = { kind: "broadcast" };
+      }else if(newKind === "groups"){
+        const allowed = allowedGroupIdsForChild();
+        const seedFromPrev = (previous.kind === "groups" && Array.isArray(previous.value))
+          ? previous.value.filter(id => allowed === null || allowed.includes(id))
+          : [];
+        const seed = seedFromPrev.length
+          ? seedFromPrev
+          : ((allowed && allowed.length) ? [allowed[0]]
+             : ((knownGroupIds()[0] !== undefined) ? [knownGroupIds()[0]] : [1]));
+        action.target = { kind: "groups", value: seed.slice().sort((a, b) => a - b) };
       }else if(newKind === "device"){
         const def = (previous.kind === "device" && typeof previous.value === "string")
           ? previous.value : ((state.devices || [])[0]?.addr || "AABBCCDDEEFF");
         action.target = { kind: "device", value: String(def).toUpperCase() };
       }
-      renderSceneEditor();
+      onChange();
+    }
+
+    function allowedGroupIdsForChild(){
+      // For offset_group children, the "Groups" multi-select is
+      // restricted to the parent's participating groups. Null means
+      // "no parent restriction" (top-level / container scopes, or
+      // parent.target == broadcast).
+      if(scope !== "child" || !parentTarget) return null;
+      if(targetIsBroadcast(parentTarget)) return null;
+      if(parentTarget.kind === "groups" && Array.isArray(parentTarget.value)){
+        return parentTarget.value.slice();
+      }
+      return null;
     }
 
     Object.entries(radios).forEach(([kind, r]) => {
       r.addEventListener("change", () => { if(r.checked) switchTo(kind); });
     });
 
+    // ---- Body content per radio kind --------------------------------
+    function renderBody(){
+      bodyHolder.innerHTML = "";
+      const tk = action.target.kind;
+      if(tk === "broadcast"){
+        // No value picker; explain the wire effect inline so operators
+        // (especially new ones) know what they just selected.
+        const hint = document.createElement("span");
+        hint.className = "muted";
+        hint.textContent = scope === "child"
+          ? "→ every offset-configured device (groupId=255)."
+          : "→ every device (recv3=FFFFFF, groupId=255).";
+        bodyHolder.appendChild(hint);
+        return;
+      }
+      if(tk === "groups"){
+        bodyHolder.appendChild(buildGroupsMultiSelect(action, {
+          actionKind,
+          allowed: allowedGroupIdsForChild(),
+          onChange,
+        }));
+        return;
+      }
+      if(tk === "device"){
+        bodyHolder.appendChild(buildDeviceSingleSelect(action, {
+          actionKind,
+          allowedGroupIds: allowedGroupIdsForChild(),
+          onChange,
+        }));
+        return;
+      }
+    }
+    renderBody();
+
     return wrap;
   }
 
-  function buildSingleTargetSelect(action, idx, draft){
+  // ---- Groups target: compact summary chip + Edit dialog ------------
+  //
+  // Operators routinely have 10–50 groups in a fleet; the previous
+  // inline checkbox list grew unbounded and crowded the action body.
+  // The new design pushes the picker into a modal: the action shows
+  // a compact summary (counts + small-text list of selected names);
+  // clicking *Edit groups…* opens a dialog with a search field, a
+  // filtered result list, and three batch operations that act on the
+  // currently-visible *hits* (Select all hits / None / Invert).
+  function buildGroupsMultiSelect(action, opts){
+    const actionKind = opts.actionKind || action.kind;
+    const allowed = opts.allowed;  // null → all known groups
+    const onChange = opts.onChange || (() => renderSceneEditor());
+
     const wrap = document.createElement("div");
-    const target = action.target;
-    const isGroup = target.kind === "group";
-    const valueSelect = document.createElement("select");
+    wrap.className = "rl-scene-target-groups";
 
-    // C5: which capability does this action's wire packet need? Used
-    // below to filter groups (skip groups with 0 capable devices) and
-    // devices (skip devices without the cap).
-    const cap = requiredCapForKind(action.kind);
-
-    function fillValueOptions(){
-      valueSelect.innerHTML = "";
-      if(isGroup){
-        // selectableGroups filters out the synthetic "Unconfigured"
-        // bucket (id=0) — never a productive scene target. C5
-        // additionally drops groups whose ``caps_in_group`` count for
-        // the required capability is zero.
-        selectableGroups().forEach(g => {
-          const id = (typeof g.id === "number") ? g.id : g.groupId;
-          const capCount = groupCapCount(g, cap);
-          if(cap && (capCount || 0) === 0) return;  // C5 filter
-          const opt = document.createElement("option");
-          opt.value = String(id);
-          // Label: ``Group 1 (3 WLED)`` when a cap filter is active,
-          // ``Group 1 (1)`` (the existing format) otherwise.
-          const annot = cap ? ` — ${capCount} ${cap}` : "";
-          opt.textContent = `${g.name || ("Group " + id)} (${id})${annot}`;
-          if(Number(target.value) === id) opt.selected = true;
-          valueSelect.appendChild(opt);
-        });
-        if(!valueSelect.options.length){
-          const opt = document.createElement("option");
-          opt.value = "1";
-          opt.textContent = cap
-            ? `(no groups with ${cap} devices — assign a ${cap} node first)`
-            : "(no groups — using id=1)";
-          valueSelect.appendChild(opt);
-        }
-      }else{
-        (state.devices || []).forEach(d => {
-          if(!d.addr) return;
-          const addr = String(d.addr).toUpperCase();
-          if(addr.length !== 12) return;
-          if(cap && !deviceHasCap(d, cap)) return;  // C5 filter
-          const opt = document.createElement("option");
-          opt.value = addr;
-          opt.textContent = `${d.name || addr} (${addr})`;
-          if(String(target.value).toUpperCase() === addr) opt.selected = true;
-          valueSelect.appendChild(opt);
-        });
-        if(!valueSelect.options.length){
-          const opt = document.createElement("option");
-          opt.value = "AABBCCDDEEFF";
-          opt.textContent = cap
-            ? `(no ${cap} devices known — discover or assign one first)`
-            : "(no devices yet — placeholder)";
-          valueSelect.appendChild(opt);
-        }
-      }
-    }
-
-    valueSelect.addEventListener("change", () => {
-      if(isGroup){
-        draft.actions[idx].target = { kind: "group", value: Number(valueSelect.value) || 1 };
-      }else{
-        draft.actions[idx].target = { kind: "device", value: String(valueSelect.value || "").toUpperCase() };
-      }
+    const cap = requiredCapForKind(actionKind);
+    const knownIds = knownGroupIds();
+    // When a parent restricts the choice (offset_group child), the
+    // available pool is the parent's groups; otherwise it's the full
+    // known fleet. The picker further filters by capability so the
+    // operator can't select groups with zero capable devices.
+    const poolIds = (allowed === null) ? knownIds : allowed;
+    const idsForPicker = poolIds.filter(id => {
+      if(!cap) return true;
+      const meta = (state.groups || []).find(g => ((typeof g.id === "number") ? g.id : g.groupId) === id);
+      return (groupCapCount(meta, cap) || 0) > 0;
     });
 
-    fillValueOptions();
-
-    // C5: if a cap filter dropped the previously-selected option (e.g.
-    // the operator switched from ``wled_preset`` to ``startblock``
-    // and the existing target group has no STARTBLOCK devices), the
-    // browser will pick option[0] visually but ``action.target.value``
-    // stays at the stale id. Sync them so saves and cost estimates
-    // see the same target the operator does.
-    if(valueSelect.selectedIndex < 0 && valueSelect.options.length){
-      valueSelect.selectedIndex = 0;
-      valueSelect.dispatchEvent(new Event("change"));
+    // Empty-state: no groups available (e.g. the operator hasn't
+    // discovered or assigned any yet, or the parent's scope filtered
+    // every group out for this action's cap).
+    if(!idsForPicker.length){
+      const empty = document.createElement("span");
+      empty.className = "muted";
+      empty.textContent = cap
+        ? `(no groups with ${cap} devices — assign one first)`
+        : "(no groups available)";
+      wrap.appendChild(empty);
+      return wrap;
     }
 
-    wrap.appendChild(valueSelect);
+    // ``selected`` is the persisted state on disk. The dialog edits a
+    // *copy*; only on Apply do we write back to ``action.target``.
+    function readSelected(){
+      const raw = Array.isArray(action.target.value) ? action.target.value : [];
+      return new Set(raw.filter(id => idsForPicker.includes(id)));
+    }
+
+    function renderSummary(){
+      wrap.innerHTML = "";
+      const selected = readSelected();
+      const selectedIds = Array.from(selected).sort((a, b) => a - b);
+
+      // Counts row: "N groups · M devices" + Edit button.
+      const head = document.createElement("div");
+      head.className = "rl-scene-target-groups-summary-head";
+      const counts = document.createElement("span");
+      counts.className = "rl-scene-target-groups-summary-counts";
+      const deviceCount = totalDevicesInGroups(selectedIds, cap);
+      const groupWord = (selectedIds.length === 1) ? "group" : "groups";
+      const deviceWord = (deviceCount === 1) ? "device" : "devices";
+      const capLabel = cap ? ` ${cap}` : "";
+      counts.textContent = `${selectedIds.length} ${groupWord} · ${deviceCount}${capLabel} ${deviceWord}`;
+      head.appendChild(counts);
+      const editBtn = document.createElement("button");
+      editBtn.type = "button";
+      editBtn.className = "btn rl-scene-target-groups-summary-edit";
+      editBtn.textContent = "Edit groups…";
+      editBtn.addEventListener("click", () => {
+        openGroupsSelectionDialog({
+          ids: idsForPicker,
+          cap,
+          initialSelected: readSelected(),
+          knownIds,
+          totalKnownCount: knownIds.length,
+          allowed: allowed,
+        }).then(result => {
+          if(!result) return;  // operator cancelled — leave state alone
+          action.target = {
+            kind: "groups",
+            value: Array.from(result).sort((a, b) => a - b),
+          };
+          onChange();
+        });
+      });
+      head.appendChild(editBtn);
+      wrap.appendChild(head);
+
+      // Selected-names row: small-text comma-separated list, capped
+      // at 8 entries with a trailing "+ K more" hint to keep the row
+      // scannable. Empty selection shows a muted "(none selected)".
+      const list = document.createElement("div");
+      list.className = "rl-scene-target-groups-summary-list muted";
+      if(!selectedIds.length){
+        list.textContent = "(none selected — click Edit to choose)";
+      }else{
+        const labels = selectedIds.map(id => {
+          const meta = (state.groups || []).find(g => ((typeof g.id === "number") ? g.id : g.groupId) === id);
+          return `${meta?.name || ("Group " + id)} (${id})`;
+        });
+        const head = labels.slice(0, 8).join(", ");
+        const tail = labels.length > 8 ? ` + ${labels.length - 8} more` : "";
+        list.textContent = head + tail;
+      }
+      wrap.appendChild(list);
+
+      // ---- "Select all → broadcast" hint ----
+      // Mirrors scenes_service.collapse_actions_to_broadcast: when the
+      // operator picks every currently-known group, the backend
+      // rewrites the persisted target to {kind: "broadcast"} on save.
+      // Surface the rewrite intent here so the cost badge's eventual
+      // change isn't a surprise.
+      if(allowed === null && selected.size === knownIds.length && knownIds.length){
+        const hint = document.createElement("span");
+        hint.className = "muted rl-scene-target-allgroups-hint";
+        hint.textContent = "(All groups selected → will save as Broadcast.)";
+        wrap.appendChild(hint);
+      }
+    }
+
+    renderSummary();
     return wrap;
+  }
+
+  // ---- Groups selection dialog --------------------------------------
+  //
+  // Opens a modal with a search field, a filtered checkbox list, and
+  // three batch buttons that act on the currently-visible *hits* (per
+  // the operator's request — batch operations on the filtered
+  // sub-list are far more useful than batch operations on the whole
+  // pool when the fleet has many groups).
+  //
+  // Returns a Promise that resolves to:
+  //   * a ``Set<number>`` of group ids when the operator clicks Apply
+  //   * ``null`` when the operator cancels (or closes the dialog)
+  //
+  // The caller is responsible for writing the result back to
+  // ``action.target`` and triggering the editor re-render.
+  function openGroupsSelectionDialog(opts){
+    const {ids, cap, initialSelected, knownIds, totalKnownCount, allowed} = opts;
+    const groupMeta = id => (state.groups || []).find(
+      g => ((typeof g.id === "number") ? g.id : g.groupId) === id,
+    );
+
+    const dlg = document.createElement("dialog");
+    dlg.className = "rl-groups-dialog";
+
+    const form = document.createElement("form");
+    form.method = "dialog";
+    dlg.appendChild(form);
+
+    const title = document.createElement("h3");
+    title.textContent = "Select groups";
+    form.appendChild(title);
+
+    // Search row.
+    const searchRow = document.createElement("div");
+    searchRow.className = "rl-groups-dialog-search";
+    const search = document.createElement("input");
+    search.type = "search";
+    search.placeholder = "Filter by name or id…";
+    search.autocomplete = "off";
+    searchRow.appendChild(search);
+    form.appendChild(searchRow);
+
+    // Batch buttons — operate on currently-visible (filtered) hits.
+    const batchRow = document.createElement("div");
+    batchRow.className = "rl-groups-dialog-actions";
+    function makeBatchBtn(label, fn){
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "btn";
+      b.textContent = label;
+      b.addEventListener("click", fn);
+      return b;
+    }
+    const btnSelectHits = makeBatchBtn("Select all hits", () => {
+      visibleIds().forEach(id => selected.add(id));
+      renderList();
+      renderFooter();
+    });
+    const btnDeselectHits = makeBatchBtn("Deselect all hits", () => {
+      visibleIds().forEach(id => selected.delete(id));
+      renderList();
+      renderFooter();
+    });
+    const btnInvertHits = makeBatchBtn("Invert hits", () => {
+      visibleIds().forEach(id => {
+        if(selected.has(id)) selected.delete(id);
+        else selected.add(id);
+      });
+      renderList();
+      renderFooter();
+    });
+    batchRow.appendChild(btnSelectHits);
+    batchRow.appendChild(btnDeselectHits);
+    batchRow.appendChild(btnInvertHits);
+    form.appendChild(batchRow);
+
+    // Result list — scrollable container so the dialog stays a
+    // sensible size on large fleets.
+    const list = document.createElement("div");
+    list.className = "rl-groups-dialog-list";
+    form.appendChild(list);
+
+    // Footer: counts + hint + Cancel / Apply.
+    const footer = document.createElement("div");
+    footer.className = "rl-groups-dialog-footer";
+    const footerCounts = document.createElement("span");
+    footerCounts.className = "rl-groups-dialog-footer-counts";
+    const footerHint = document.createElement("span");
+    footerHint.className = "muted rl-groups-dialog-footer-hint";
+    footer.appendChild(footerCounts);
+    footer.appendChild(footerHint);
+    form.appendChild(footer);
+
+    const buttons = document.createElement("menu");
+    buttons.className = "rl-groups-dialog-buttons";
+    const cancelBtn = document.createElement("button");
+    cancelBtn.type = "button";
+    cancelBtn.textContent = "Cancel";
+    const applyBtn = document.createElement("button");
+    applyBtn.type = "button";
+    applyBtn.textContent = "Apply";
+    applyBtn.className = "primary";
+    buttons.appendChild(cancelBtn);
+    buttons.appendChild(applyBtn);
+    form.appendChild(buttons);
+
+    document.body.appendChild(dlg);
+
+    // Working copy of the selection — apply on confirm, drop on cancel.
+    const selected = new Set(initialSelected);
+
+    // Pre-built rows for each group id, indexed by id, so re-renders
+    // on search input don't rebuild DOM nodes (just toggle hidden).
+    const rowById = new Map();
+    ids.forEach(id => {
+      const meta = groupMeta(id);
+      const row = document.createElement("label");
+      row.className = "rl-toggle-wrap rl-groups-dialog-row";
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.addEventListener("change", () => {
+        if(cb.checked) selected.add(id); else selected.delete(id);
+        renderFooter();
+      });
+      const txt = document.createElement("span");
+      const annot = cap
+        ? ` — ${groupCapCount(meta, cap) || 0} ${cap}`
+        : "";
+      txt.textContent = `${meta?.name || ("Group " + id)} (${id})${annot}`;
+      row.appendChild(cb);
+      row.appendChild(txt);
+      list.appendChild(row);
+      rowById.set(id, {row, cb, name: String(meta?.name || ""), id});
+    });
+
+    function visibleIds(){
+      const out = [];
+      for(const [id, entry] of rowById){
+        if(entry.row.style.display !== "none") out.push(id);
+      }
+      return out;
+    }
+
+    function renderList(){
+      const q = search.value.trim().toLowerCase();
+      for(const [id, entry] of rowById){
+        let visible = true;
+        if(q){
+          const hay = `${entry.name.toLowerCase()} ${entry.id}`;
+          visible = hay.includes(q);
+        }
+        entry.row.style.display = visible ? "" : "none";
+        entry.cb.checked = selected.has(id);
+      }
+    }
+
+    function renderFooter(){
+      const selArr = Array.from(selected).sort((a, b) => a - b);
+      const groupWord = (selArr.length === 1) ? "group" : "groups";
+      const deviceCount = totalDevicesInGroups(selArr, cap);
+      const deviceWord = (deviceCount === 1) ? "device" : "devices";
+      const capLabel = cap ? ` ${cap}` : "";
+      footerCounts.textContent =
+        `Selected: ${selArr.length} ${groupWord} · ${deviceCount}${capLabel} ${deviceWord}`;
+      // Same broadcast-collapse hint as the inline summary, only
+      // shown when the operator is editing the top-level groups
+      // pool (no parent restricts the choice) and has ticked every
+      // known group.
+      const willCollapse = (
+        allowed === null &&
+        totalKnownCount > 0 &&
+        selected.size === totalKnownCount
+      );
+      footerHint.textContent = willCollapse
+        ? "(All groups selected → will save as Broadcast.)"
+        : "";
+    }
+
+    return new Promise(resolve => {
+      function close(value){
+        try { dlg.close(); } catch(_){}
+        // Defer removal so any in-flight close handlers see the
+        // dialog before it's gone.
+        setTimeout(() => { try { dlg.remove(); } catch(_){} }, 0);
+        resolve(value);
+      }
+      cancelBtn.addEventListener("click", () => close(null));
+      applyBtn.addEventListener("click", () => close(new Set(selected)));
+      dlg.addEventListener("cancel", e => { e.preventDefault(); close(null); });
+      search.addEventListener("input", () => renderList());
+      // Submit-on-Enter (default form behaviour) → Apply.
+      form.addEventListener("submit", e => {
+        e.preventDefault();
+        close(new Set(selected));
+      });
+
+      renderList();
+      renderFooter();
+      dlg.showModal();
+      // Focus the search field so power users can start typing
+      // immediately.
+      setTimeout(() => { try { search.focus(); } catch(_){} }, 0);
+    });
+  }
+
+  // ---- "Device" single-select with cap + parent-scope filters -------
+  function buildDeviceSingleSelect(action, opts){
+    const actionKind = opts.actionKind || action.kind;
+    const allowedGroupIds = opts.allowedGroupIds;  // null → no restriction
+    const onChange = opts.onChange || (() => renderSceneEditor());
+
+    const wrap = document.createElement("div");
+    const cap = requiredCapForKind(actionKind);
+
+    const sel = document.createElement("select");
+    (state.devices || []).forEach(d => {
+      if(!d.addr) return;
+      const addr = String(d.addr).toUpperCase();
+      if(addr.length !== 12) return;
+      // Parent-scope filter (offset_group children only).
+      if(allowedGroupIds !== null && !allowedGroupIds.includes(d.groupId)) return;
+      // C5 capability filter.
+      if(cap && !deviceHasCap(d, cap)) return;
+      const opt = document.createElement("option");
+      opt.value = addr;
+      opt.textContent = `${d.name || addr} (${addr})`;
+      if(action.target.kind === "device" &&
+         String(action.target.value).toUpperCase() === addr){
+        opt.selected = true;
+      }
+      sel.appendChild(opt);
+    });
+    if(!sel.options.length){
+      const opt = document.createElement("option");
+      opt.value = "AABBCCDDEEFF";
+      opt.textContent = (cap || allowedGroupIds !== null)
+        ? "(no matching devices — discover or assign one first)"
+        : "(no devices yet — placeholder)";
+      sel.appendChild(opt);
+    }
+    sel.addEventListener("change", () => {
+      action.target = { kind: "device", value: String(sel.value || "").toUpperCase() };
+      onChange();
+    });
+    // C5 sync: if the existing target was filtered out, snap to option[0].
+    if(sel.selectedIndex < 0 && sel.options.length){
+      sel.selectedIndex = 0;
+      sel.dispatchEvent(new Event("change"));
+    }
+    wrap.appendChild(sel);
+    return wrap;
+  }
+
+  function buildTargetPicker(action, idx, draft){
+    return buildUnifiedTargetPicker(action, {
+      scope: "top",
+      namePrefix: `target-kind-${idx}`,
+      actionKind: action.kind,
+    });
   }
 
   function buildOffsetGroupConfigPanel(action, idx, draft){
-    // Renders the groups + offset configuration for an offset_group
-    // container action. Reads/writes ``action.groups`` and
-    // ``action.offset`` directly — no nested target indirection.
+    // Renders the target + offset configuration for an offset_group
+    // container action. The target picker (Broadcast / Groups —
+    // device is invalid at the container level) is the unified shared
+    // component used by every other action; this function adds the
+    // formula-mode selector, the per-mode parameter inputs, and the
+    // live preview on top.
     ensureOffsetGroupShape(action);
     const wrap = document.createElement("div");
     wrap.className = "rl-groups-offset";
 
     const knownIds = knownGroupIds();
     const offset = action.offset;
-    let selection = getSelectedIdsFromHolder(action);
-    // ``selected`` is the editing scratchpad for non-"all" mode. We seed
-    // it from the persisted state but let the user toggle freely; the
-    // toggle becomes the persisted ``groups`` list when saved.
-    const selected = new Set(selection.ids);
 
     function repaintAll(){
-      // Recompute target.groups AND target.offset from the current UI
-      // state, then re-render the live preview. Every input handler funnels
-      // through here so the persisted shape is always in sync.
-      if(allGroupsToggle && allGroupsToggle.checked){
-        action.groups = "all";
-      }else{
-        action.groups = Array.from(selected).sort((a, b) => a - b);
-      }
-      // For Explicit mode, sync the values list to the current selection.
+      // Re-derive offset.values from the current target when in
+      // Explicit mode, so toggling group selection in the picker keeps
+      // the per-group offset_ms entries in sync with the participants.
       if(action.offset.mode === "explicit"){
         const prev = explicitValuesMapFromHolder(action);
-        const ids = action.groups === "all" ? knownIds : action.groups;
+        const sel = getSelectedIdsFromHolder(action);
+        const ids = sel.all ? knownIds : sel.ids;
         action.offset = {
           mode: "explicit",
           values: ids.map(id => ({
@@ -1226,122 +1710,29 @@
       renderPreview();
     }
 
-    // ---- "all groups" toggle ----
-    const allRow = document.createElement("div");
-    allRow.className = "rl-groups-offset-all-row";
-    const allLbl = document.createElement("label");
-    allLbl.className = "rl-toggle-wrap";
-    const allGroupsToggle = document.createElement("input");
-    allGroupsToggle.type = "checkbox";
-    allGroupsToggle.checked = (action.groups === "all");
-    allLbl.appendChild(allGroupsToggle);
-    const allTxt = document.createElement("span");
-    allTxt.textContent = "All groups";
-    allLbl.appendChild(allTxt);
-    allRow.appendChild(allLbl);
-    const allHint = document.createElement("span");
-    allHint.className = "muted";
-    allHint.textContent = "(broadcast formula in one packet — only available with Linear/From-center/Repeating/Clear)";
-    allRow.appendChild(allHint);
-    wrap.appendChild(allRow);
-
-    // Selecting "all" is incompatible with mode=explicit (no per-group
-    // values to evaluate against). Snap mode to linear in that case.
-    allGroupsToggle.addEventListener("change", () => {
-      if(allGroupsToggle.checked && offset.mode === "explicit"){
-        action.offset = { mode: "linear", base_ms: 0, step_ms: 100 };
-      }
-      // Toggling re-seeds selected from the current "all" / list state so
-      // unchecking "all" gives a sensible starting selection.
-      if(!allGroupsToggle.checked){
-        selected.clear();
-        knownIds.forEach(id => selected.add(id));
-      }
-      rebuildCheckboxes();
-      syncListEnabledState();
-      repaintAll();
-      // Mode might have changed → re-render the panel to refresh inputs.
-      // Cheap; the editor pattern already does full repaints on shape
-      // changes elsewhere.
-      renderSceneEditor();
-    });
-
-    // ---- group multi-select (hidden when "all" is on) ----
-    const listSection = document.createElement("div");
-    listSection.className = "rl-groups-offset-list-section";
-
-    const quick = document.createElement("div");
-    quick.className = "rl-groups-offset-quick";
-    function makeBtn(label, fn){
-      const b = document.createElement("button");
-      b.type = "button";
-      b.className = "btn";
-      b.textContent = label;
-      // Full re-render after the selection changes so child target pickers
-      // see the updated ``parent.groups`` list. Quick buttons are click-and-
-      // done so losing focus is fine.
-      b.addEventListener("click", () => {
-        fn();
+    // ---- Unified target picker (Broadcast / Groups; no Device) -----
+    // Selecting Broadcast while in Explicit mode is invalid (no per-
+    // group values to evaluate). Snap mode to Linear before the
+    // editor re-renders so the operator sees a consistent panel.
+    const targetWrap = document.createElement("div");
+    targetWrap.className = "rl-groups-offset-target";
+    const targetLbl = document.createElement("span");
+    targetLbl.className = "muted rl-groups-offset-target-label";
+    targetLbl.textContent = "Apply offset to:";
+    targetWrap.appendChild(targetLbl);
+    targetWrap.appendChild(buildUnifiedTargetPicker(action, {
+      scope: "container",
+      namePrefix: `og-target-${idx}`,
+      actionKind: "offset_group",
+      onChange: () => {
+        if(targetIsBroadcast(action.target) && action.offset.mode === "explicit"){
+          action.offset = { mode: "linear", base_ms: 0, step_ms: 100 };
+        }
         repaintAll();
         renderSceneEditor();
-      });
-      return b;
-    }
-    quick.appendChild(makeBtn("All", () => { knownIds.forEach(id => selected.add(id)); }));
-    quick.appendChild(makeBtn("None", () => { selected.clear(); }));
-    quick.appendChild(makeBtn("Invert", () => {
-      knownIds.forEach(id => { if(selected.has(id)) selected.delete(id); else selected.add(id); });
+      },
     }));
-    quick.appendChild(makeBtn("Range…", () => {
-      const lo = parseInt(prompt("From group id:", String(knownIds[0] ?? 0)) || "", 10);
-      if(!Number.isFinite(lo)) return;
-      const hi = parseInt(prompt("To group id (inclusive):", String(knownIds[knownIds.length-1] ?? lo)) || "", 10);
-      if(!Number.isFinite(hi)) return;
-      knownIds.forEach(id => { if(id >= Math.min(lo, hi) && id <= Math.max(lo, hi)) selected.add(id); });
-    }));
-    listSection.appendChild(quick);
-
-    const groupsBox = document.createElement("div");
-    groupsBox.className = "rl-groups-offset-checks";
-    function rebuildCheckboxes(){
-      groupsBox.innerHTML = "";
-      if(!knownIds.length){
-        const empty = document.createElement("span");
-        empty.className = "muted";
-        empty.textContent = "(no groups available)";
-        groupsBox.appendChild(empty);
-        return;
-      }
-      knownIds.forEach(id => {
-        const lbl = document.createElement("label");
-        lbl.className = "rl-toggle-wrap";
-        const cb = document.createElement("input");
-        cb.type = "checkbox";
-        cb.checked = selected.has(id);
-        cb.addEventListener("change", () => {
-          if(cb.checked) selected.add(id); else selected.delete(id);
-          repaintAll();
-          // Re-render the whole editor so child target pickers reflect the
-          // new parent.groups list. Without this their dropdown stays stale
-          // until the user toggles the picker mode.
-          renderSceneEditor();
-        });
-        const txt = document.createElement("span");
-        const meta = (state.groups || []).find(g => ((typeof g.id === "number") ? g.id : g.groupId) === id);
-        txt.textContent = `${meta?.name || ("Group " + id)} (${id})`;
-        lbl.appendChild(cb);
-        lbl.appendChild(txt);
-        groupsBox.appendChild(lbl);
-      });
-    }
-    listSection.appendChild(groupsBox);
-    rebuildCheckboxes();
-    wrap.appendChild(listSection);
-
-    function syncListEnabledState(){
-      listSection.style.display = allGroupsToggle.checked ? "none" : "";
-    }
-    syncListEnabledState();
+    wrap.appendChild(targetWrap);
 
     // ---- formula mode selector ----
     const modeRow = document.createElement("div");
@@ -1351,8 +1742,9 @@
     modeLbl.textContent = "Offset mode:";
     modeRow.appendChild(modeLbl);
     OFFSET_FORMULA_MODES.forEach(m => {
-      // Explicit not allowed when "all groups" is on (no list to evaluate).
-      if(m === "explicit" && allGroupsToggle.checked) return;
+      // Explicit needs a concrete groups list to evaluate against — it
+      // is invalid when the container target is broadcast.
+      if(m === "explicit" && targetIsBroadcast(action.target)) return;
       const r = document.createElement("input");
       r.type = "radio";
       r.name = `go-mode-${idx}`;
@@ -1364,7 +1756,8 @@
         // moving between formula modes; only mode-specific extras reset.
         const prev = action.offset || {};
         if(m === "explicit"){
-          const ids = allGroupsToggle.checked ? knownIds : Array.from(selected).sort((a,b)=>a-b);
+          const sel = getSelectedIdsFromHolder(action);
+          const ids = sel.all ? knownIds : sel.ids;
           const prevValues = explicitValuesMapFromHolder(action);
           action.offset = {
             mode: "explicit",
@@ -1467,7 +1860,8 @@
       }
     }else if(off.mode === "explicit"){
       // One input per participating group.
-      const ids = (action.groups === "all") ? knownIds : (action.groups || []);
+      const explicitSel = getSelectedIdsFromHolder(action);
+      const ids = explicitSel.all ? knownIds : explicitSel.ids;
       if(!ids.length){
         const m = document.createElement("span");
         m.className = "muted"; m.textContent = "(no groups selected)";
@@ -1517,7 +1911,8 @@
       head.className = "muted";
       head.textContent = "Preview:";
       previewWrap.appendChild(head);
-      const ids = (action.groups === "all") ? knownIds : (action.groups || []);
+      const previewSel = getSelectedIdsFromHolder(action);
+      const ids = previewSel.all ? knownIds : previewSel.ids;
       if(!ids.length){
         const m = document.createElement("span");
         m.className = "muted"; m.textContent = "(empty)";
@@ -1557,13 +1952,13 @@
     const wrap = document.createElement("div");
     wrap.className = "rl-offset-group-container";
 
-    // Inline warning when groups: "all" AND prior offset_group actions
-    // exist in the same scene — operators need to know that broadcast
-    // formulas overwrite previously-configured groups.
+    // Inline warning when target == broadcast AND prior offset_group
+    // actions exist in the same scene — operators need to know that
+    // broadcast formulas overwrite previously-configured groups.
     const priorOffsetGroups = (draft.actions || [])
       .slice(0, idx)
       .filter(a => a && a.kind === "offset_group");
-    if(action.groups === "all" && priorOffsetGroups.length > 0){
+    if(targetIsBroadcast(action.target) && priorOffsetGroups.length > 0){
       const warn = document.createElement("div");
       warn.className = "rl-offset-group-warning";
       warn.textContent =
@@ -1712,153 +2107,24 @@
   }
 
   function buildChildTargetPicker(child, parent, parentIdx, childIdx){
-    // Three options: scope (broadcast to all participants),
-    // group (one of the parent's groups), device (any device whose
-    // groupId is in the parent's scope). Filtered choices reflect the
-    // parent's ``groups`` field.
+    // Thin wrapper around the unified picker. Children of an
+    // offset_group container offer the same Broadcast / Groups /
+    // Device choice as top-level actions; the multi-select and device
+    // dropdown are filtered to the parent's participating groups.
     //
-    // The radio-button group name is derived from ``parentIdx-childIdx``
-    // (deterministic, stable across renders, unique within the page).
-    // Earlier code stored a random ``__cid`` on the child action object
-    // for this purpose; that property leaked into ``stripUiBeforeSave``'s
-    // output and caused the dirty-tracker to flag every render as
-    // "unsaved changes" even on freshly-loaded scenes.
-    const wrap = document.createElement("div");
-    wrap.className = "rl-scene-target";
-    if(!child.target) child.target = { kind: "scope" };
-
-    const radioRow = document.createElement("div");
-    radioRow.className = "rl-scene-target-radios";
-
-    const radioName = `child-target-${parentIdx}-${childIdx}`;
-
-    const radios = {};
-    [["scope", "Scope (broadcast)"], ["group", "Group"], ["device", "Device"]].forEach(([kind, lbl]) => {
-      const r = document.createElement("input");
-      r.type = "radio";
-      r.name = radioName;
-      r.value = kind;
-      r.checked = child.target.kind === kind;
-      radios[kind] = r;
-      const wl = document.createElement("label");
-      wl.className = "inline";
-      wl.appendChild(r);
-      wl.appendChild(document.createTextNode(" " + lbl));
-      radioRow.appendChild(wl);
-    });
-    wrap.appendChild(radioRow);
-
-    const bodyHolder = document.createElement("div");
-    bodyHolder.className = "rl-scene-target-body";
-    wrap.appendChild(bodyHolder);
-
-    function renderBody(){
-      bodyHolder.innerHTML = "";
-      const tk = child.target.kind;
-      if(tk === "scope") return;  // no value picker
-      // C5: child kind drives the cap filter. All current
-      // OFFSET_GROUP_CHILD_KINDS (rl_preset / wled_preset /
-      // wled_control) require WLED, but ``requiredCapForKind`` is
-      // the source of truth so future kinds inherit the behaviour.
-      const cap = requiredCapForKind(child.kind);
-      const sel = document.createElement("select");
-      if(tk === "group"){
-        const allowedIds = (parent.groups === "all")
-          ? knownGroupIds()
-          : (parent.groups || []);
-        allowedIds.forEach(id => {
-          const meta = (state.groups || []).find(g => ((typeof g.id === "number") ? g.id : g.groupId) === id);
-          const capCount = groupCapCount(meta, cap);
-          if(cap && (capCount || 0) === 0) return;  // C5 filter
-          const opt = document.createElement("option");
-          opt.value = String(id);
-          const annot = cap ? ` — ${capCount} ${cap}` : "";
-          opt.textContent = `${meta?.name || ("Group " + id)} (${id})${annot}`;
-          if(Number(child.target.value) === id) opt.selected = true;
-          sel.appendChild(opt);
-        });
-        if(!sel.options.length){
-          const opt = document.createElement("option");
-          opt.value = "1";
-          opt.textContent = cap
-            ? `(no groups in parent scope have ${cap} devices)`
-            : "(no groups in parent scope)";
-          sel.appendChild(opt);
-        }
-        sel.addEventListener("change", () => {
-          child.target = { kind: "group", value: Number(sel.value) || 0 };
-          scheduleCostEstimate();
-        });
-      }else{   // device
-        const allowedIds = (parent.groups === "all") ? null : (parent.groups || []);
-        (state.devices || []).forEach(d => {
-          if(!d.addr) return;
-          const addr = String(d.addr).toUpperCase();
-          if(addr.length !== 12) return;
-          // Filter to devices whose groupId is in the parent's scope.
-          if(allowedIds !== null && !allowedIds.includes(d.groupId)) return;
-          // C5: also filter by capability.
-          if(cap && !deviceHasCap(d, cap)) return;
-          const opt = document.createElement("option");
-          opt.value = addr;
-          opt.textContent = `${d.name || addr} (${addr})`;
-          if(child.target.kind === "device" && String(child.target.value).toUpperCase() === addr){
-            opt.selected = true;
-          }
-          sel.appendChild(opt);
-        });
-        if(!sel.options.length){
-          const opt = document.createElement("option");
-          opt.value = "AABBCCDDEEFF";
-          opt.textContent = cap
-            ? `(no ${cap} devices in parent scope)`
-            : "(no devices in parent scope)";
-          sel.appendChild(opt);
-        }
-        sel.addEventListener("change", () => {
-          child.target = { kind: "device", value: String(sel.value || "").toUpperCase() };
-          scheduleCostEstimate();
-        });
-      }
-      // C5 auto-sync (same rationale as buildSingleTargetSelect): if
-      // the existing target was filtered out, pick option[0] and
-      // update ``child.target`` so the cost estimate / save sees the
-      // visible selection.
-      if(sel.selectedIndex < 0 && sel.options.length){
-        sel.selectedIndex = 0;
-        sel.dispatchEvent(new Event("change"));
-      }
-      bodyHolder.appendChild(sel);
-    }
-
-    Object.entries(radios).forEach(([kind, r]) => {
-      r.addEventListener("change", () => {
-        if(!r.checked) return;
-        if(kind === "scope"){
-          child.target = { kind: "scope" };
-        }else if(kind === "group"){
-          const seedId = (parent.groups === "all")
-            ? (knownGroupIds()[0] ?? 0)
-            : ((parent.groups || [])[0] ?? 0);
-          child.target = { kind: "group", value: seedId };
-        }else{
-          // Pick the first device whose groupId is in the parent scope.
-          const allowedIds = (parent.groups === "all") ? null : (parent.groups || []);
-          const dev = (state.devices || []).find(d =>
-            d && d.addr && (allowedIds === null || allowedIds.includes(d.groupId))
-          );
-          child.target = {
-            kind: "device",
-            value: (dev?.addr || "AABBCCDDEEFF").toUpperCase(),
-          };
-        }
-        renderBody();
+    // The DOM radio name is derived from ``parentIdx-childIdx``
+    // (deterministic, stable across renders) so the dirty-tracker
+    // doesn't flag every render as "unsaved changes".
+    return buildUnifiedTargetPicker(child, {
+      scope: "child",
+      namePrefix: `child-target-${parentIdx}-${childIdx}`,
+      actionKind: child.kind,
+      parentTarget: ensureContainerTarget(parent),
+      onChange: () => {
         scheduleCostEstimate();
-      });
+        renderSceneEditor();
+      },
     });
-
-    renderBody();
-    return wrap;
   }
 
   function buildVarsRow(action, idx, draft, kindMeta){

@@ -582,6 +582,26 @@ class WebApiScenesRouteTests(unittest.TestCase):
         self.assertIn("sf", payload["lora"])
         self.assertIn("bw_hz", payload["lora"])
 
+    def test_editor_schema_advertises_unified_target_kinds(self):
+        # Pin the schema vocabulary at the unified shape — see
+        # scenes_service._canonical_target and the broadcast-ruleset doc.
+        # If a future contributor accidentally reintroduces the legacy
+        # values ("scope" / singular "group"), this test surfaces it.
+        payload = self._route("/api/scenes/editor-schema", "GET")()
+        self.assertEqual(
+            payload["target_kinds"],
+            ["broadcast", "groups", "device"],
+        )
+        self.assertEqual(
+            payload["container_target_kinds"],
+            ["broadcast", "groups"],
+        )
+        self.assertEqual(
+            payload["offset_group"]["child_target_kinds"],
+            ["broadcast", "groups", "device"],
+        )
+        self.assertTrue(payload["offset_group"]["supports_broadcast_target"])
+
     def test_estimate_for_saved_scene_returns_per_action_and_total(self):
         self._set_body({"label": "Cost", "actions": [
             {"kind": "sync"},
@@ -628,6 +648,62 @@ class WebApiScenesRouteTests(unittest.TestCase):
         self.assertEqual(
             result["per_action"][0]["detail"]["wire_path"],
             "A_broadcast_formula",
+        )
+
+    def test_known_group_ids_from_ctx_reads_repo_directly(self):
+        """Pin the Phase-A bug fix:
+        ``_known_group_ids_from_ctx()`` must read
+        ``ctx.rl_instance.device_repository`` *directly* — not via a
+        non-existent ``rl_instance.controller`` indirection. Earlier
+        code added the indirection, silently returned ``[]``, and
+        closed the optimizer's Strategy-C gate so the estimator
+        under-reported by reaching for Strategy B (per-group EXPLICIT)
+        where the runtime would do Strategy C (broadcast formula +
+        sparse NONE overrides). Reproducer: 7-of-10 sparse linear
+        offset_group with one broadcast child — runtime emits 5
+        packets, estimator (pre-fix) reported 8.
+        """
+        # Inject a device_repository onto the fake rl_instance so the
+        # helper can find 10 known group ids (one device per group).
+        class _Repo:
+            def __init__(self, devices):
+                self._devices = devices
+            def list(self):
+                return self._devices
+
+        class _D:
+            def __init__(self, group_id):
+                self.groupId = group_id
+
+        # Fleet of 10 groups, gids 1..10.
+        self.ctx.rl_instance.device_repository = _Repo(
+            [_D(g) for g in range(1, 11)]
+        )
+
+        # Sparse offset_group — 7 of 10 known groups, mode=linear,
+        # broadcast child. Pre-fix: 7 + 1 = 8 packets (Strategy B).
+        # Post-fix: 1 broadcast formula + 3 NONE-overrides + 1 child
+        # broadcast = 5 packets (Strategy C).
+        self._set_body({
+            "label": "SparseLinear",
+            "actions": [
+                {"kind": "offset_group",
+                 "target": {"kind": "groups", "value": [1, 2, 3, 4, 5, 6, 7]},
+                 "offset": {"mode": "linear", "base_ms": 0, "step_ms": 100},
+                 "actions": [
+                     {"kind": "wled_control",
+                      "target": {"kind": "broadcast"},
+                      "params": {"mode": 5}},
+                 ]},
+            ],
+        })
+        result = self._route("/api/scenes/estimate", "POST")()
+        self.assertTrue(result["ok"])
+        # Strategy C wins on packet count: 1 + 3 + 1 = 5.
+        self.assertEqual(result["total"]["packets"], 5)
+        self.assertEqual(
+            result["per_action"][0]["detail"]["wire_path"],
+            "C_formula_plus_overrides",
         )
 
     # ---- update / delete / duplicate ----------------------------------
