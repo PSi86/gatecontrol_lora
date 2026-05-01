@@ -1,4 +1,28 @@
-"""Startblock-specific payload and dispatch service."""
+"""Startblock-specific payload assembly and dispatch.
+
+Builds the binary startblock-program payload (versioned by
+``_STARTBLOCK_VER``) from the WebUI form, hands it to
+:class:`StreamService` for the per-device fragmentation, and
+records the outcome in the device's specials state.
+
+Public API:
+
+* ``send_startblock(targetDevice=None, targetGroup=None,
+  params=...) -> bool`` — entry-point used by both the WebUI
+  Specials path and the scene runner's ``startblock`` action
+  kind.
+
+Notes:
+
+* The payload includes operator-supplied text fields (driver
+  names) which can carry diacritics — the helper map at the
+  top transliterates the most common German umlauts so the
+  startblock firmware (ASCII-only display) doesn't render
+  garbage.
+* Returns ``False`` if the target device has no STARTBLOCK
+  capability (caps filter introduced in C5 prevents most
+  mis-targets at the editor).
+"""
 
 from __future__ import annotations
 

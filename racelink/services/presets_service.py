@@ -1,13 +1,43 @@
-"""Preset file management for RaceLink operations."""
+"""WLED ``presets.json`` file store + minimal parser.
+
+Manages the on-disk collection of ``presets.json`` files the
+operator can flash to WLED nodes during OTA. Files come from
+two sources: uploaded via the WebUI, or downloaded directly
+from a connected device.
+
+Public API:
+
+* ``list_files()`` / ``current_file()`` / ``set_current(name)`` —
+  state of the file-cache.
+* ``store_uploaded_file(file_obj)`` — accept an upload, hash,
+  store under ``self.presets_dir()``.
+* ``save_payload(payload)`` — same shape but for an in-memory
+  payload (the OTA workflow's WLED-download path uses this).
+* ``apply_options(parsed)`` — push the parsed minimal preset
+  list into the controller's ``uiPresetList`` so the WebUI
+  dropdowns reflect the active preset file.
+* ``parse_wled_presets_minimal(payload)`` — extract just
+  ``(preset_id, name)`` pairs from the typically-large
+  ``presets.json`` (full WLED preset records carry segment
+  config which the host doesn't parse).
+
+Threading: file I/O is best-effort. Failed reads return empty
+lists with a debug-log; the WebUI degrades to "no presets
+available" rather than 500-ing. See B5 / the exception sweep
+for the full logging contract.
+"""
 
 from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple, Union
+
+logger = logging.getLogger(__name__)
 
 
 class PresetsService:
@@ -66,7 +96,13 @@ class PresetsService:
                 stat = os.stat(path)
                 rows.append({"name": name, "size": int(stat.st_size), "saved_ts": float(stat.st_mtime)})
         except Exception:
-            # swallow-ok: best-effort fallback; caller proceeds with safe default
+            # swallow-ok: presets dir missing / unreadable -> empty
+            # list. Debug-log so a config-path regression is
+            # diagnosable; caller (UI) just sees an empty list.
+            logger.debug(
+                "presets list_files failed for dir=%r",
+                self.presets_dir(), exc_info=True,
+            )
             return []
         rows.sort(key=lambda row: row.get("saved_ts", 0), reverse=True)
         return rows
@@ -124,7 +160,13 @@ class PresetsService:
             self.apply_options(parsed)
             return True
         except Exception:
-            # swallow-ok: best-effort fallback; caller proceeds with safe default
+            # swallow-ok: caller checks the bool. Missing file or
+            # malformed JSON returns False; warning-log so a recurring
+            # bad-presets-file error surfaces in the diagnostic log
+            # rather than silently making the UI dropdown empty.
+            logger.warning(
+                "apply_from_path failed for %r", path, exc_info=True,
+            )
             return False
 
     def ensure_loaded(self) -> None:

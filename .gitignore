@@ -17,6 +17,13 @@ tmp*/
 .claude/
 .idea/
 
+# Local AI / agent memory — never committed.
+CLAUDE.md
+CLAUDE.local.md
+
+# Pytest cache
+.pytest_cache/
+
 # Leftover standalone config files produced by tests that fail mid-run
 .standalone-test-*
 .standalone_config-*.tmp

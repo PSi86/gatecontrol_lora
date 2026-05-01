@@ -3,7 +3,19 @@ import unittest
 from racelink.domain import RL_Device
 from racelink.services.gateway_service import GatewayService
 from racelink.state.repository import DeviceRepository, GroupRepository
-from racelink.transport import EV_RX_WINDOW_CLOSED, LP
+from racelink.transport import EV_STATE_CHANGED, GATEWAY_STATE_IDLE, LP
+
+
+# Helper: emulate the gateway closing a Timed RX window. Pre-Batch-B this
+# was an EV_RX_WINDOW_CLOSED event; v4 expresses the same transition as
+# an EV_STATE_CHANGED carrying a state byte that isn't RX_WINDOW (typically
+# IDLE under setDefaultRxContinuous).
+_RX_WINDOW_CLOSED_TRANSITION = {
+    "type": EV_STATE_CHANGED,
+    "state_byte": GATEWAY_STATE_IDLE,
+    "state": "IDLE",
+    "state_metadata_ms": 0,
+}
 
 
 class FakeTransport:
@@ -54,6 +66,41 @@ class FakeController:
         self._group_repository = GroupRepository([object(), object(), object(), object()])
         self.discovery_active = False
 
+    # Mirror the real controller's pending-config helpers (A3). Tests
+    # remain single-threaded so a real lock is not required, but the
+    # method signatures must match so production code under test can
+    # call them without monkey-patching.
+    def stash_pending_config(self, recv3_hex: str, option: int, data0: int) -> None:
+        self._pending_config[recv3_hex] = {
+            "option": int(option) & 0xFF,
+            "data0": int(data0) & 0xFF,
+        }
+
+    def take_pending_config(self, recv3_hex: str):
+        return self._pending_config.pop(recv3_hex, None)
+
+    # A5: same pattern for the unicast pending-expect slot.
+    def set_pending_expect(self, dev, rule, opcode7, sender_last3, ts):
+        self._pending_expect = {
+            "dev": dev,
+            "rule": rule,
+            "opcode7": int(opcode7),
+            "sender_last3": str(sender_last3 or "").upper(),
+            "ts": float(ts),
+        }
+
+    def read_pending_expect(self):
+        return self._pending_expect
+
+    def clear_pending_expect_if(self, expected) -> bool:
+        if self._pending_expect is expected:
+            self._pending_expect = None
+            return True
+        return False
+
+    def clear_pending_expect(self) -> None:
+        self._pending_expect = None
+
     def _to_hex_str(self, value):
         if isinstance(value, (bytes, bytearray)):
             return bytes(value).hex().upper()
@@ -98,7 +145,7 @@ class GatewayServiceTests(unittest.TestCase):
                     "sender3": bytes.fromhex("DDEEFF"),
                 }
             )
-            controller.transport.emit({"type": EV_RX_WINDOW_CLOSED})
+            controller.transport.emit(_RX_WINDOW_CLOSED_TRANSITION)
 
         events, got_closed = service.send_and_wait_for_reply(bytes.fromhex("DDEEFF"), LP.OPC_CONFIG, send_fn)
 
@@ -174,7 +221,7 @@ class GatewayServiceTests(unittest.TestCase):
             "sender_last3": "DDEEFF",
         }
 
-        service.pending_window_closed({"type": EV_RX_WINDOW_CLOSED})
+        service.pending_window_closed(dict(_RX_WINDOW_CLOSED_TRANSITION))
 
         self.assertFalse(controller.dev.link_online)
         self.assertEqual(controller.dev.link_error, "Missing reply (STATUS)")
@@ -193,7 +240,7 @@ class GatewayServiceTests(unittest.TestCase):
                     "sender3": bytes.fromhex("DDEEFF"),
                 }
             )
-            controller.transport.emit({"type": EV_RX_WINDOW_CLOSED})
+            controller.transport.emit(_RX_WINDOW_CLOSED_TRANSITION)
 
         # Plan Phase C (revised): send_stream uses send_and_collect with
         # idle/max timeouts. Wrap send_fn to emit the ACK synchronously.
@@ -530,6 +577,127 @@ class GatewayServiceTests(unittest.TestCase):
 
         self.assertFalse(controller.dev.link_online)
         self.assertEqual(controller.dev.link_error, "Auto-restore SET_GROUP timeout")
+
+
+class SendAndWaitWithRetriesTests(unittest.TestCase):
+    """Coverage for the bounded-retry helper added in the rf-timing batch.
+
+    The helper composes ``send_and_wait_for_reply`` in a loop with a
+    short per-attempt timeout (``rf_timing.UNICAST_ATTEMPT_TIMEOUT_S``)
+    and a bounded retry count (``rf_timing.UNICAST_MAX_ATTEMPTS``).
+    The pre-batch shape was a single 8 s wait with no retries; this
+    helper is what callers (``setNodeGroupId``, ``send_config``) now
+    use to absorb transient packet loss.
+    """
+
+    def test_first_attempt_success_returns_immediately(self):
+        import time
+
+        controller = FakeController()
+        service = GatewayService(controller)
+        recv3 = bytes.fromhex("DDEEFF")
+        attempts = []
+
+        def send_fn():
+            attempts.append(time.monotonic())
+            controller.transport.emit({
+                "opc": LP.OPC_ACK,
+                "ack_of": LP.OPC_SET_GROUP,
+                "ack_status": 0,
+                "sender3": recv3,
+            })
+
+        t0 = time.monotonic()
+        events, ok = service.send_and_wait_with_retries(
+            recv3, LP.OPC_SET_GROUP, send_fn,
+        )
+        elapsed = time.monotonic() - t0
+
+        self.assertTrue(ok)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(len(attempts), 1, "should not retry on success")
+        self.assertLess(elapsed, 1.0, f"first-attempt success took {elapsed:.3f}s")
+
+    def test_retries_until_success(self):
+        import time
+
+        controller = FakeController()
+        service = GatewayService(controller)
+        recv3 = bytes.fromhex("DDEEFF")
+        call_count = [0]
+
+        def send_fn():
+            call_count[0] += 1
+            # Only the second call gets an ACK; first is a silent timeout.
+            if call_count[0] >= 2:
+                controller.transport.emit({
+                    "opc": LP.OPC_ACK,
+                    "ack_of": LP.OPC_SET_GROUP,
+                    "ack_status": 0,
+                    "sender3": recv3,
+                })
+
+        t0 = time.monotonic()
+        events, ok = service.send_and_wait_with_retries(
+            recv3, LP.OPC_SET_GROUP, send_fn,
+            attempts=3,
+            per_attempt_timeout_s=0.2,
+            retry_delay_s=0.05,
+        )
+        elapsed = time.monotonic() - t0
+
+        self.assertTrue(ok)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(call_count[0], 2, "should retry once before success")
+        # First-attempt timeout (~0.2s) + retry_delay (~0.05s) + match.
+        self.assertGreater(elapsed, 0.2)
+        self.assertLess(elapsed, 1.0, f"retry-then-match took {elapsed:.3f}s")
+
+    def test_all_attempts_timeout_returns_false(self):
+        import time
+
+        controller = FakeController()
+        service = GatewayService(controller)
+        recv3 = bytes.fromhex("DDEEFF")
+        call_count = [0]
+
+        def send_fn():
+            call_count[0] += 1
+            # Never emit a matching ACK — every attempt times out.
+
+        t0 = time.monotonic()
+        events, ok = service.send_and_wait_with_retries(
+            recv3, LP.OPC_SET_GROUP, send_fn,
+            attempts=3,
+            per_attempt_timeout_s=0.1,
+            retry_delay_s=0.05,
+        )
+        elapsed = time.monotonic() - t0
+
+        self.assertFalse(ok)
+        self.assertEqual(events, [])
+        self.assertEqual(call_count[0], 3, "should exhaust all attempts")
+        # 3 × 0.1s timeout + 2 × 0.05s delay = ~0.4s. Allow generous slack.
+        self.assertGreater(elapsed, 0.3)
+        self.assertLess(elapsed, 2.0, f"all-timeout took {elapsed:.3f}s")
+
+    def test_attempts_param_overrides_default(self):
+        controller = FakeController()
+        service = GatewayService(controller)
+        recv3 = bytes.fromhex("DDEEFF")
+        call_count = [0]
+
+        def send_fn():
+            call_count[0] += 1
+
+        _, ok = service.send_and_wait_with_retries(
+            recv3, LP.OPC_SET_GROUP, send_fn,
+            attempts=1,
+            per_attempt_timeout_s=0.05,
+        )
+
+        self.assertFalse(ok)
+        self.assertEqual(call_count[0], 1, "attempts=1 means no retries")
 
 
 if __name__ == "__main__":

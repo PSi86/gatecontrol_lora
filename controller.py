@@ -136,10 +136,34 @@ class RaceLink_Host:
         self.groupCfgValid = False
 
         # Transport-level pending expectation (for online/offline determination).
-        self._pending_expect = None  # dict with keys: dev, rule, opcode7, sender_last3, ts
+        # Mutated from two threads:
+        #   * the TX-listener path (``GatewayService.on_transport_tx``)
+        #     stamps a new expectation when an outbound unicast goes
+        #     out — runs on whatever thread called ``_send_m2n``;
+        #   * the RX-reader path (``pending_try_match`` /
+        #     ``pending_window_closed``) reads the expectation and
+        #     clears it on a matching reply or window-closed.
+        # ``_pending_expect_lock`` keeps the read+clear atomic so a TX
+        # thread cannot wedge a new expectation between an RX-thread
+        # snapshot and its clear (lost-update). The clear helpers below
+        # implement compare-and-clear semantics so a stale matcher
+        # cannot wipe a freshly-stamped expectation either.
+        self._pending_expect: Optional[dict] = None
+        self._pending_expect_lock = threading.Lock()
 
         self._transport_hooks_installed = False
-        self._pending_config = {}
+        # ``_pending_config`` is mutated from two threads:
+        # the web request thread (``GatewayService.send_config`` stashes the
+        # outgoing option/data0 keyed by recv3) and the RX reader thread
+        # (``handle_ack_event`` pops the entry on a successful ACK). On
+        # CPython a same-key write+pop race can lose the update silently;
+        # any future iterator over the dict could also raise
+        # ``RuntimeError: dictionary changed size during iteration``.
+        # ``_pending_config_lock`` is held only across the dict mutation
+        # itself — the long-running follow-up (``_apply_config_update``)
+        # runs outside the lock so we never block the RX thread on it.
+        self._pending_config: dict = {}
+        self._pending_config_lock = threading.Lock()
         self._task_manager = None
         self._reconnect_in_progress = False
         self._last_reconnect_ts = 0.0
@@ -172,8 +196,10 @@ class RaceLink_Host:
         self.on_gateway_status_changed = None
         # Plan P1-2: dispose transport cleanly when the host plugin unloads.
         self._shutdown_called: bool = False
+        # WLED preset list (numeric ids -> labels). Pre-rename: ``uiEffectList``
+        # — the entries are preset ids, not WLED effect-mode indices.
         # Basic colors: 1-9; Basic effects: 10-19; Special Effects (WLED only): 20-100
-        self.uiEffectList = [
+        self.uiPresetList = [
             {"value": "01", "label": "Red"},
             {"value": "02", "label": "Green"},
             {"value": "03", "label": "Blue"},
@@ -559,10 +585,20 @@ class RaceLink_Host:
             if origin == "manual":
                 self._notify(self._translate(reason))
         except Exception as ex:
-            # swallow-ok: best-effort fallback; caller proceeds with safe default
-            self._record_gateway_error(reason=str(ex), origin=origin)
+            # swallow-ok: discoverPort surfaces failures via the
+            # gateway-error record (red banner). Include the type so a
+            # rare AttributeError from a renamed method is
+            # distinguishable from the common SerialException path —
+            # historically these all collapsed to ``str(ex)`` and were
+            # indistinguishable in the operator-facing toast.
+            logger.warning(
+                "discoverPort failed: %s", type(ex).__name__, exc_info=True,
+            )
+            self._record_gateway_error(
+                reason=f"{type(ex).__name__}: {ex}", origin=origin,
+            )
             if origin == "manual":
-                self._notify(self._translate("Failed to initialize communicator: {}").format(str(ex)))
+                self._notify(self._translate("Failed to initialize communicator: {}").format(f"{type(ex).__name__}: {ex}"))
 
     def _record_gateway_error(self, *, reason: str, origin: str, code: Optional[str] = None) -> None:
         self.ready = False
@@ -645,6 +681,7 @@ class RaceLink_Host:
 
         timer = threading.Timer(float(delay_s), _fire)
         timer.daemon = True
+        timer.name = "rl-gateway-retry"  # A8: name daemon threads
         self._gateway_retry_timer = timer
         timer.start()
 
@@ -719,6 +756,15 @@ class RaceLink_Host:
             self.save_to_db({}, scopes={state_scope.NONE})
         except Exception:
             logger.exception("RaceLink: error persisting state during shutdown")
+        # A7: release the auto-restore executor so its threads exit.
+        # Best-effort — service may not have been fully wired in some
+        # plugin-loader scenarios.
+        gateway_svc = getattr(self, "gateway_service", None)
+        if gateway_svc is not None:
+            try:
+                gateway_svc.shutdown()
+            except Exception:
+                logger.exception("RaceLink: error shutting down gateway service")
         self.ready = False
 
     def onRaceStart(self, _args) -> None:
@@ -784,9 +830,29 @@ class RaceLink_Host:
             _send()
             return True
 
-        events, _ = self._send_and_wait_for_reply(recv3, LP.OPC_SET_GROUP, _send, timeout_s=8.0)
+        events, _ = self.gateway_service.send_and_wait_with_retries(
+            recv3, LP.OPC_SET_GROUP, _send,
+        )
         if not events:
             logger.warning("No ACK_OK for SET_GROUP to %s (timeout)", targetDevice.addr)
+            # The device didn't ACK within the timeout window — it's
+            # not responding. Reflect that in the online flag so the
+            # WebUI doesn't keep showing a non-responding device as
+            # online. Mirrors the wording used by the auto-restore
+            # path (gateway_service._spawn_auto_reassign_worker) and
+            # the status-window timeout path (status_service).
+            try:
+                targetDevice.mark_offline("Missing reply (SET_GROUP)")
+            except Exception:
+                # swallow-ok: best-effort flag flip; the False return
+                # below is the authoritative failure signal for the
+                # caller. mark_offline only fails on malformed device
+                # records which are already logged elsewhere.
+                logger.debug(
+                    "mark_offline failed after SET_GROUP timeout for %r",
+                    getattr(targetDevice, "addr", "?"),
+                    exc_info=True,
+                )
             return False
 
         ev = events[-1]
@@ -824,28 +890,90 @@ class RaceLink_Host:
         return int(flags) & 0xFF, int(preset_id) & 0xFF, int(brightness) & 0xFF
 
     def _update_group_control_cache(self, group_id: int, flags: int, preset_id: int, brightness: int) -> None:
-        for device in self.device_repository.list():
-            try:
-                if (int(getattr(device, "groupId", 0)) & 0xFF) != group_id:
+        # A6: ``device_repository.list()`` returns the *live* storage.
+        # Iterating it while another thread mutates the device list (a
+        # gateway IDENTIFY can append; a delete can remove) used to risk
+        # ``RuntimeError: list changed size during iteration``. The
+        # ``state_repository.lock`` is a reentrant lock, so any caller
+        # already holding it (e.g. the SSE refresh path) re-acquires
+        # without deadlock.
+        with self.state_repository.lock:
+            for device in self.device_repository.list():
+                try:
+                    if (int(getattr(device, "groupId", 0)) & 0xFF) != group_id:
+                        continue
+                    device.flags = flags
+                    device.presetId = preset_id
+                    device.brightness = brightness
+                except Exception:
+                    # swallow-ok: bulk cache update keeps going on the
+                    # remaining devices. Per-device failure here means
+                    # malformed groupId / non-int field — a data
+                    # quality issue worth diagnosing, so debug-log with
+                    # traceback rather than silently dropping.
+                    logger.debug(
+                        "group-control cache update skipped device %r",
+                        getattr(device, "addr", "?"),
+                        exc_info=True,
+                    )
                     continue
-                device.flags = flags
-                device.presetId = preset_id
-                device.brightness = brightness
-            except Exception:
-                # swallow-ok: best-effort fallback; caller proceeds with safe default
-                continue
 
     def sendRaceLink(self, targetDevice, flags=None, presetId=None, brightness=None):
-        """Compatibility entrypoint forwarding device control to ControlService."""
-        return self.control_service.send_device_control(targetDevice, flags, presetId, brightness)
+        """Compatibility entrypoint forwarding a fixed preset-id send to the
+        control service (OPC_PRESET). Low-level shim kept for legacy callers."""
+        return self.control_service.send_device_preset(targetDevice, flags, presetId, brightness)
 
-    def sendGroupControl(self, gcGroupId, gcFlags, gcPresetId, gcBrightness):
-        """Compatibility entrypoint forwarding group control to ControlService."""
-        return self.control_service.send_group_control(gcGroupId, gcFlags, gcPresetId, gcBrightness)
+    def sendGroupPreset(self, gcGroupId, gcFlags, gcPresetId, gcBrightness):
+        """Broadcast a preset id to a group (OPC_PRESET)."""
+        return self.control_service.send_group_preset(gcGroupId, gcFlags, gcPresetId, gcBrightness)
+
+    def sendWledPreset(self, *, targetDevice=None, targetGroup=None, params=None):
+        """Apply a classical WLED preset (OPC_PRESET). Pre-rename: ``sendWledControl``."""
+        return self.control_service.send_wled_preset(
+            targetDevice=targetDevice, targetGroup=targetGroup, params=params,
+        )
 
     def sendWledControl(self, *, targetDevice=None, targetGroup=None, params=None):
-        """Compatibility entrypoint forwarding WLED actions to ControlService."""
-        return self.control_service.send_wled_control(targetDevice=targetDevice, targetGroup=targetGroup, params=params)
+        """Apply a RaceLink-native preset (OPC_CONTROL) by its stable int id.
+
+        Phase D: this is the Specials/WebUI entry point for the "WLED Control"
+        action. ``params`` carries only ``{presetId, brightness}`` — full
+        14-parameter editing lives in the RL-preset editor, not here. The raw
+        direct-parameter send stays available on ``ControlService`` for
+        internal callers (``send_rl_preset_by_id`` uses it to dispatch
+        OPC_CONTROL with the resolved snapshot).
+        """
+        params = params or {}
+        preset_id = int(params.get("presetId", 0))
+        brightness = params.get("brightness")
+        return self.control_service.send_rl_preset_by_id(
+            preset_id,
+            targetDevice=targetDevice,
+            targetGroup=targetGroup,
+            brightness_override=int(brightness) if brightness is not None else None,
+        )
+
+    def sendRlPresetById(
+        self,
+        preset_id,
+        *,
+        targetDevice=None,
+        targetGroup=None,
+        brightness_override=None,
+    ):
+        """Apply a RL-preset snapshot (stable int id) via ControlService.
+
+        RotorHazard quickset / default group action entry point. The service
+        loads the persisted params through ``rl_presets_service`` and sends
+        ``OPC_CONTROL``. WLED presets keep their own path via
+        :meth:`sendWledPreset`.
+        """
+        return self.control_service.send_rl_preset_by_id(
+            preset_id,
+            targetDevice=targetDevice,
+            targetGroup=targetGroup,
+            brightness_override=brightness_override,
+        )
 
     def sendStartblockConfig(self, *, targetDevice=None, targetGroup=None, params=None):
         """Compatibility entrypoint forwarding startblock config to StartblockService."""
@@ -854,6 +982,23 @@ class RaceLink_Host:
             target_group=targetGroup,
             params=params,
         )
+
+    def runScene(self, scene_key, *, progress_cb=None):
+        """Run a scene by key. Wired by ``RaceLinkApp`` factory; falls back to
+        an explicit error result when the runner is not yet attached so the RH
+        plugin's ``RaceLink Scene`` ActionEffect degrades gracefully on a
+        partially-initialised controller.
+
+        ``progress_cb`` (kwarg-only) forwards to the runner so the WebUI's
+        synchronous ``/api/scenes/<key>/run`` route can broadcast SSE
+        progress events. The RH plugin's ``applyScene`` path doesn't pass
+        the kwarg, so its behaviour is unchanged.
+        """
+        runner = getattr(self, "scene_runner_service", None)
+        if runner is None:
+            from racelink.services.scene_runner_service import SceneRunResult
+            return SceneRunResult(scene_key=str(scene_key), ok=False, error="runner_not_wired")
+        return runner.run(str(scene_key), progress_cb=progress_cb)
 
     def _is_startblock_device(self, dev: RL_Device) -> bool:
         """Compatibility helper kept for legacy callers during controller slimming."""
@@ -887,8 +1032,10 @@ class RaceLink_Host:
         recv3: bytes,
         opcode7: int,
         send_fn,
-        timeout_s: float = 8.0,
+        timeout_s: Optional[float] = None,
     ) -> tuple[list[dict], bool]:
+        if timeout_s is None:
+            return self.gateway_service.send_and_wait_for_reply(recv3, opcode7, send_fn)
         return self.gateway_service.send_and_wait_for_reply(recv3, opcode7, send_fn, timeout_s=timeout_s)
 
     def sendConfig(
@@ -900,7 +1047,7 @@ class RaceLink_Host:
         data3=0,
         recv3=b"\xFF\xFF\xFF",
         wait_for_ack: bool = False,
-        timeout_s: float = 6.0,
+        timeout_s: Optional[float] = None,
     ):
         """Compatibility entrypoint forwarding config writes to ConfigService."""
         return self.config_service.send_config(
@@ -918,9 +1065,94 @@ class RaceLink_Host:
         """Compatibility hook forwarding ACK-side config updates to ConfigService."""
         return self.config_service.apply_config_update(dev, option, data0)
 
-    def sendSync(self, ts24, brightness, recv3=b"\xFF\xFF\xFF"):
-        """Compatibility entrypoint forwarding sync packets to SyncService."""
-        return self.sync_service.send_sync(ts24, brightness, recv3=recv3)
+    def stash_pending_config(self, recv3_hex: str, option: int, data0: int) -> None:
+        """Record the option/data0 of an in-flight ``OPC_CONFIG`` keyed by
+        the receiver's last-3 MAC bytes (uppercase hex).
+
+        Called by ``GatewayService.send_config`` on the web/scene-runner
+        side just before the transport write. The matching pop happens on
+        the RX reader thread inside ``handle_ack_event`` once the gateway
+        ACKs the config. The dedicated ``_pending_config_lock`` keeps the
+        write+pop atomic without touching the broader state-repository
+        lock, so a stalled RX handler cannot delay device-list mutations
+        and vice versa.
+        """
+        with self._pending_config_lock:
+            self._pending_config[recv3_hex] = {
+                "option": int(option) & 0xFF,
+                "data0": int(data0) & 0xFF,
+            }
+
+    def take_pending_config(self, recv3_hex: str) -> Optional[dict]:
+        """Pop and return the recorded config payload for ``recv3_hex``.
+
+        Returns ``None`` when no pending entry exists (e.g. broadcast
+        ACK, duplicate ACK, or an entry that was already consumed).
+        Held under the same lock as ``stash_pending_config``.
+        """
+        with self._pending_config_lock:
+            return self._pending_config.pop(recv3_hex, None)
+
+    def set_pending_expect(self, dev, rule, opcode7: int, sender_last3: str, ts: float) -> None:
+        """Stamp a pending unicast expectation. Called from the TX
+        listener path right after a unicast request is on the wire."""
+        with self._pending_expect_lock:
+            self._pending_expect = {
+                "dev": dev,
+                "rule": rule,
+                "opcode7": int(opcode7),
+                "sender_last3": str(sender_last3 or "").upper(),
+                "ts": float(ts),
+            }
+
+    def read_pending_expect(self) -> Optional[dict]:
+        """Return the current pending-expect dict (the live reference,
+        not a copy). Callers must treat it as read-only and use
+        :meth:`clear_pending_expect_if` for compare-and-clear semantics
+        — clearing without the reference check would let a stale RX
+        matcher wipe a freshly-stamped expectation from the TX thread.
+        """
+        with self._pending_expect_lock:
+            return self._pending_expect
+
+    def clear_pending_expect_if(self, expected: Optional[dict]) -> bool:
+        """Atomic compare-and-clear: clear ``_pending_expect`` only if
+        it is still the same object reference as ``expected``. Returns
+        True on a successful clear, False if the value has changed
+        (i.e. a new TX-side stamp arrived in the meantime).
+
+        This is the safe partner of :meth:`read_pending_expect` for the
+        RX-thread "I matched the reply, drop the expectation" path —
+        prevents the lost-update where the RX thread reads ``p``, the
+        TX thread immediately stamps a new expectation, and the RX
+        thread's clear wipes it.
+        """
+        with self._pending_expect_lock:
+            if self._pending_expect is expected:
+                self._pending_expect = None
+                return True
+            return False
+
+    def clear_pending_expect(self) -> None:
+        """Unconditional clear. Used by paths that own the lifetime of
+        the expectation (e.g. shutdown / reconnect) and are intentionally
+        wiping any in-flight state. Most timeout/match callers should
+        prefer :meth:`clear_pending_expect_if`.
+        """
+        with self._pending_expect_lock:
+            self._pending_expect = None
+
+    def sendSync(self, ts24, brightness, recv3=b"\xFF\xFF\xFF", *, trigger_armed: bool = False):
+        """Compatibility entrypoint forwarding sync packets to SyncService.
+
+        ``trigger_armed`` defaults to ``False`` (clock-tick only); set it to
+        ``True`` when this is a deliberate fire that should materialise
+        pending arm-on-sync state. The scene runner's ``_run_sync`` already
+        passes ``True`` through ``SyncService`` directly; this shim is only
+        kept for any external compatibility callers.
+        """
+        return self.sync_service.send_sync(ts24, brightness, recv3=recv3,
+                                           trigger_armed=trigger_armed)
 
     def sendStream(
         self,

@@ -3,7 +3,14 @@
 from __future__ import annotations
 
 from .core import NullSink, NullSource
-from .services import HostWifiService, OTAService, PresetsService
+from .services import (
+    HostWifiService,
+    OTAService,
+    PresetsService,
+    RLPresetsService,
+    SceneRunnerService,
+    SceneService,
+)
 from .state import get_runtime_state_repository
 
 __all__ = [
@@ -87,6 +94,20 @@ def create_runtime(
         option_setter=host_api.db.option_set,
         apply_options=presets_apply_options,
     )
+    rl_presets_service = RLPresetsService()
+    # Expose the RL-preset store on the controller so the control service can
+    # resolve preset ids in ``send_rl_preset_by_id`` without extra wiring.
+    controller.rl_presets_service = rl_presets_service
+    scenes_service = SceneService()
+    controller.scenes_service = scenes_service
+    scene_runner_service = SceneRunnerService(
+        controller=controller,
+        scenes_service=scenes_service,
+        control_service=controller.control_service,
+        sync_service=controller.sync_service,
+        rl_presets_service=rl_presets_service,
+    )
+    controller.scene_runner_service = scene_runner_service
     host_wifi_service = HostWifiService()
     ota_service = OTAService(host_wifi_service=host_wifi_service, presets_service=presets_service)
 
@@ -98,6 +119,9 @@ def create_runtime(
         "host_wifi": host_wifi_service,
         "ota": ota_service,
         "presets": presets_service,
+        "rl_presets": rl_presets_service,
+        "scenes": scenes_service,
+        "scene_runner": scene_runner_service,
         "startblock": controller.startblock_service,
         "status": controller.status_service,
         "stream": controller.stream_service,

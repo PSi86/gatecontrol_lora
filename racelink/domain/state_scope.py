@@ -17,7 +17,8 @@ DEVICES = "devices"
 DEVICE_MEMBERSHIP = "device_membership"
 DEVICE_SPECIALS = "device_specials"
 GROUPS = "groups"
-EFFECTS = "effects"
+PRESETS = "presets"
+SCENES = "scenes"
 FULL = "full"
 NONE = "none"
 
@@ -27,7 +28,8 @@ ALL = frozenset(
         DEVICE_MEMBERSHIP,
         DEVICE_SPECIALS,
         GROUPS,
-        EFFECTS,
+        PRESETS,
+        SCENES,
         FULL,
         NONE,
     }
@@ -63,6 +65,8 @@ def sse_what_from_scopes(scopes: Iterable[str] | None) -> list[str]:
         what.append("devices")
     if resolved & {GROUPS, DEVICE_MEMBERSHIP}:
         what.append("groups")
-    if EFFECTS in resolved:
-        what.append("effects")
+    if PRESETS in resolved:
+        what.append("presets")
+    if SCENES in resolved:
+        what.append("scenes")
     return what

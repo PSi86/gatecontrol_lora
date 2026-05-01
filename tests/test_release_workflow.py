@@ -13,7 +13,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn('description: "Optional host version override. Leave empty to auto-increment."', source)
         self.assertIn('description: "Branch to release from"', source)
         self.assertIn("python -m build", source)
-        self.assertIn("softprops/action-gh-release@v2", source)
+        self.assertIn("softprops/action-gh-release@v3", source)
         self.assertIn("dist/*.whl", source)
         self.assertIn("dist/*.tar.gz", source)
         self.assertIn("dist/*-sha256.txt", source)

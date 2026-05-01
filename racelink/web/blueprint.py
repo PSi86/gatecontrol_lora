@@ -159,6 +159,42 @@ def create_racelink_web_blueprint(
         ctx.services["host_wifi"] = HostWifiService()
     if "presets" not in ctx.services:
         ctx.services["presets"] = PresetsService()
+    if "rl_presets" not in ctx.services:
+        from ..services import RLPresetsService
+        ctx.services["rl_presets"] = RLPresetsService()
+    # Mirror onto the controller so send_rl_preset_by_id can resolve ids.
+    if not hasattr(ctx.rl_instance, "rl_presets_service"):
+        try:
+            setattr(ctx.rl_instance, "rl_presets_service", ctx.services["rl_presets"])
+        except Exception:
+            # swallow-ok: best-effort fallback; caller proceeds with safe default
+            pass
+    if "scenes" not in ctx.services:
+        from ..services import SceneService
+        ctx.services["scenes"] = SceneService()
+    if not hasattr(ctx.rl_instance, "scenes_service"):
+        try:
+            setattr(ctx.rl_instance, "scenes_service", ctx.services["scenes"])
+        except Exception:
+            # swallow-ok: best-effort attach; mirrors the rl_presets_service
+            # fallback above
+            pass
+    if "scene_runner" not in ctx.services:
+        from ..services import SceneRunnerService
+        ctx.services["scene_runner"] = SceneRunnerService(
+            controller=ctx.rl_instance,
+            scenes_service=ctx.services["scenes"],
+            control_service=getattr(ctx.rl_instance, "control_service", None),
+            sync_service=getattr(ctx.rl_instance, "sync_service", None),
+            rl_presets_service=ctx.services.get("rl_presets"),
+        )
+    if not hasattr(ctx.rl_instance, "scene_runner_service"):
+        try:
+            setattr(ctx.rl_instance, "scene_runner_service", ctx.services["scene_runner"])
+        except Exception:
+            # swallow-ok: best-effort attach; runner stays reachable via
+            # ctx.services["scene_runner"] regardless
+            pass
     if "ota" not in ctx.services:
         ctx.services["ota"] = OTAService(
             host_wifi_service=ctx.services["host_wifi"],
@@ -202,6 +238,21 @@ def create_racelink_web_blueprint(
         sse.ensure_transport_hooked(runtime.rl_instance)
         return templating.render_template(
             "racelink.html",
+            serverInfo=None,
+            getOption=runtime.option,
+            __=runtime.translate,
+            rl_base_path=normalized_prefix or "",
+            rl_static_path=_join_url(normalized_prefix, "/static"),
+        )
+
+    @bp.route("/scenes")
+    def rl_render_scenes():
+        # R5a: Scene Manager moved out of dlgScenes into its own page.
+        # Same render-template helpers as the Devices page so SSE wiring and
+        # base-path math match exactly.
+        sse.ensure_transport_hooked(runtime.rl_instance)
+        return templating.render_template(
+            "scenes.html",
             serverInfo=None,
             getOption=runtime.option,
             __=runtime.translate,

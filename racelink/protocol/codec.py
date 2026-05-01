@@ -7,7 +7,14 @@ import struct
 from . import rules
 
 
-def parse_reply_event(type_byte: int, data: bytes, *, timestamp: float, host_rssi: int, host_snr: int, rx_windows: int) -> dict:
+def parse_reply_event(type_byte: int, data: bytes, *, timestamp: float, host_rssi: int, host_snr: int) -> dict:
+    # Batch B (2026-04-28) dropped the ``rx_windows`` parameter. Pre-Batch-B
+    # the host derived an open/close counter from EV_RX_WINDOW_OPEN/CLOSED
+    # and threaded it through every parsed reply event. The v4 redesign
+    # collapsed those events into EV_STATE_CHANGED (with a state byte),
+    # so the counter no longer exists; consumers that need to know whether
+    # the gateway has a window open should read the gateway-state mirror
+    # (transport.gateway_state_byte / GATEWAY_STATE_RX_WINDOW).
     hdr = data[:7]
     body = data[7:-3]
     sender3 = bytes(hdr[0:3])
@@ -23,7 +30,6 @@ def parse_reply_event(type_byte: int, data: bytes, *, timestamp: float, host_rss
         "host_rssi": host_rssi,
         "host_snr": host_snr,
         "ts": timestamp,
-        "rx_windows": rx_windows,
     }
 
     if opc == 0x01:
@@ -32,14 +38,16 @@ def parse_reply_event(type_byte: int, data: bytes, *, timestamp: float, host_rss
         else:
             ev.update({"reply": "IDENTIFY_REPLY", "body_raw": body})
     elif opc == 0x03:
+        # P_StatusReply byte 2 was renamed presetId -> effectId 2026-04-25
+        # (wire layout unchanged; semantic shift to active segment mode index).
         if len(body) == 8:
-            flags, config_byte, preset_id, brightness, vbat_mV, rssi_node, snr_node = struct.unpack("<BBBBHbb", body)
+            flags, config_byte, effect_id, brightness, vbat_mV, rssi_node, snr_node = struct.unpack("<BBBBHbb", body)
             ev.update(
                 {
                     "reply": "STATUS_REPLY",
                     "flags": flags,
                     "configByte": config_byte,
-                    "presetId": preset_id,
+                    "effectId": effect_id,
                     "brightness": brightness,
                     "vbat_mV": vbat_mV,
                     "node_rssi": rssi_node,
@@ -47,13 +55,13 @@ def parse_reply_event(type_byte: int, data: bytes, *, timestamp: float, host_rss
                 }
             )
         elif len(body) == 7:
-            flags, preset_id, brightness, vbat_mV, rssi_node, snr_node = struct.unpack("<BBBHbb", body)
+            flags, effect_id, brightness, vbat_mV, rssi_node, snr_node = struct.unpack("<BBBHbb", body)
             ev.update(
                 {
                     "reply": "STATUS_REPLY",
                     "flags": flags,
                     "configByte": 0,
-                    "presetId": preset_id,
+                    "effectId": effect_id,
                     "brightness": brightness,
                     "vbat_mV": vbat_mV,
                     "node_rssi": rssi_node,

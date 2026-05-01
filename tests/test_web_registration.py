@@ -46,7 +46,7 @@ class _FakeApp:
 
 class _FakeRuntime:
     def __init__(self):
-        self.rl_instance = type("RL", (), {"uiEffectList": [{"value": "01", "label": "Red"}]})()
+        self.rl_instance = type("RL", (), {"uiPresetList": [{"value": "01", "label": "Red"}]})()
         self.state_repository = None
         self.rl_devicelist = []
         self.rl_grouplist = [RL_DeviceGroup("Group 1")]

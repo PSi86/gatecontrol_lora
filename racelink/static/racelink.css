@@ -12,21 +12,76 @@ body{ margin:0; font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif
 .pill.tx{ color:#e8e7ff; border-color:#36365e; background:#16162a; }
 .pill.rx{ color:#fff3c8; border-color:#6a5630; background:#221f14; }
 .pill.err{ color:#ffd8d8; border-color:#5a2a2a; background:#221314; }
+/* Batch B: UNKNOWN is the boot-time pre-STATE_REPORT sentinel; muted style
+   so the operator sees "we don't know yet" without it shouting like ERR. */
+.pill.unknown{ color:#aab; border-color:#3a3a44; background:#161620; }
+/* Batch B: ↻ refresh button next to the master pill. Sized to stay
+   inside the 24-px-tall masterbar; bare-text style so it doesn't compete
+   with the pill for visual weight. */
+.rl-master-refresh{ background:transparent; color:#aab; border:1px solid #2a2a32;
+                    border-radius:999px; padding:0 6px; line-height:18px; height:20px;
+                    font-size:13px; cursor:pointer; }
+.rl-master-refresh:hover:not(:disabled){ color:#e8e7ff; border-color:#444; }
+.rl-master-refresh:disabled{ opacity:.5; cursor:wait; }
 
 .rl-main{ display:grid; grid-template-columns: 260px 1fr; gap:var(--gap); padding:var(--gap); }
 .rl-sidebar{ background:var(--card); border:1px solid #2a2a32; border-radius:10px; padding:10px; }
 .rl-side-head{ display:flex; align-items:center; justify-content:space-between; margin-bottom:6px; }
 .rl-groups{ list-style:none; padding:0; margin:0; max-height:calc(100vh - 220px); overflow:auto; }
-.rl-groups li{ padding:8px; border-radius:8px; cursor:pointer; display:flex; align-items:center; justify-content:space-between; }
+/* Sidebar layout: name takes available space (truncates with ellipsis
+   when long), count + delete button sit on the right. Pre-2026-04-29
+   the rule used ``justify-content: space-between`` which worked when
+   the row had only two children but stranded the count mid-row once
+   the delete button was added as a third child. */
+.rl-groups li{
+  padding:8px; border-radius:8px; cursor:pointer;
+  display:flex; align-items:center; gap:6px;
+}
+.rl-groups li > span:first-child{
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .rl-groups li:hover{ background:#1f1f26; }
 .rl-groups li.active{ background:#262633; }
-.rl-groups .count{ color:var(--muted); font-size:12px; }
+.rl-groups .count{ color:var(--muted); font-size:12px; flex: 0 0 auto; }
 .rl-content{ background:var(--card); border:1px solid #2a2a32; border-radius:10px; padding:10px; overflow:auto; }
 .rl-toolbar{ display:flex; align-items:center; gap:10px; padding:6px 0 10px; border-bottom:1px dashed #2a2a32; margin-bottom:8px; flex-wrap:wrap; }
 .rl-table{ width:100%; border-collapse:collapse; }
 .rl-table th, .rl-table td{ text-align:left; padding:8px; border-bottom:1px solid #2a2a32; font-size:13px; }
 .rl-table thead th{ position:sticky; top:0; background:#1a1a21; z-index:1; cursor:pointer; }
 .rl-table input[type="checkbox"]{ transform:scale(1.2); }
+
+/* Live row-update flash animation. Triggered by ``renderTable`` when
+   a device's ``last_seen_ts`` advances between renders (typically
+   from a STATUS_REPLY or IDENTIFY_REPLY arriving over SSE). The row
+   briefly brightens, then fades back to its normal background. The
+   animation is short (1.0 s) so a burst of replies during a
+   bulk-status flow feels live without strobing the entire table. */
+@keyframes rl-row-flash {
+  0%   { background-color: rgba(76, 139, 245, 0.32); }
+  60%  { background-color: rgba(76, 139, 245, 0.16); }
+  100% { background-color: transparent; }
+}
+.rl-table tbody tr.rl-row-flash > td {
+  animation: rl-row-flash 1.0s ease-out;
+}
+
+/* Per-group delete affordance in the sidebar. Hidden by default;
+   shown on row hover so the sidebar stays visually quiet at rest. */
+.rl-group-delete-btn{
+  background: transparent; border: none;
+  color: var(--muted); cursor: pointer;
+  font-size: 14px; line-height: 1;
+  padding: 0 4px;
+  border-radius: 4px;
+  visibility: hidden;
+  flex: 0 0 auto;
+}
+.rl-groups li:hover .rl-group-delete-btn{ visibility: visible; }
+.rl-group-delete-btn:hover{ color: var(--err); background: #221314; }
 .mono{ font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace; font-size:12px; }
 .tag{ padding:2px 6px; border-radius:10px; font-size:12px; border:1px solid #2a2a32; }
 .tag.ok{ color:#b6f5cf; border-color:#2d553f; background:#102017; }
@@ -61,6 +116,221 @@ dialog::backdrop{ background:rgba(0,0,0,.4); }
 .rl-special-inputs{ display:flex; flex-wrap:wrap; gap:8px; }
 .rl-special-input{ display:flex; flex-direction:column; gap:4px; min-width:120px; }
 .rl-special-input-label{ font-size:12px; color:var(--muted); }
+
+/* Advanced widgets (WLED_Advanced etc.) */
+.rl-slider-wrap{ display:flex; align-items:center; gap:6px; }
+.rl-slider-wrap input[type=range]{ flex:1 1 auto; accent-color:#5b8cff; }
+.rl-slider-value{ min-width:32px; text-align:right; font-variant-numeric:tabular-nums; color:var(--muted); font-size:12px; }
+.rl-toggle-wrap{ display:inline-flex; align-items:center; gap:6px; height:32px; }
+.rl-toggle-wrap input[type=checkbox]{ width:18px; height:18px; accent-color:#5b8cff; }
+.rl-special-input input[type=color]{ width:100%; height:32px; background:#1a1a23; border:1px solid #2a2a32; border-radius:8px; padding:2px; cursor:pointer; }
+
+/* Phase B: RL-Preset editor dialog
+   Override default ``dialog { width: min(520px, 96vw); }`` from the top of
+   this file — the inner form cannot widen the dialog element itself. */
+#dlgRlPresets{ width: min(960px, 96vw); max-width: none; max-height: 90vh; }
+.rl-presets-form{ width: 100%; }
+.rl-presets-layout{ display:grid; grid-template-columns: minmax(180px, 240px) 1fr; gap:12px; margin:8px 0; }
+.rl-presets-sidebar{ border:1px solid #2a2a32; border-radius:8px; padding:8px; background:#16161d; }
+.rl-presets-toolbar{ display:flex; gap:6px; margin-bottom:8px; flex-wrap:wrap; }
+.rl-presets-list{ list-style:none; padding:0; margin:0; max-height:60vh; overflow-y:auto; }
+.rl-presets-list li{ padding:6px 8px; border-radius:6px; cursor:pointer; font-size:13px; }
+.rl-presets-list li:hover{ background:#1f1f28; }
+.rl-presets-list li.active{ background:#2a2d40; color:#cfe0ff; }
+.rl-presets-list li.muted{ cursor:default; }
+.rl-presets-editor{ border:1px solid #2a2a32; border-radius:8px; padding:10px; background:#16161d; min-height:300px; }
+
+/* Scene Manager — own page (/racelink/scenes) layout. R6: drop the 1200px
+   max-width clamp left over from the dialog era; the page now fills the
+   viewport minus the standard ``.rl-main`` gutter. The inner two-column
+   grid (.rl-presets-layout) absorbs the extra width via ``minmax(180px,
+   240px) 1fr`` — sidebar stays compact, editor body grows. */
+.rl-scenes-main{ grid-template-columns: 1fr; }
+.rl-scenes-page{ width: 100%; }
+.rl-scenes-actions{ display:flex; flex-direction:column; gap:8px; margin-top:8px; }
+.rl-nav-link{
+  display:inline-flex; align-items:center; gap:6px;
+  padding:6px 10px; border-radius:8px; cursor:pointer;
+  background:#232330; border:1px solid #2a2a32; color:var(--text);
+  text-decoration:none; font-size:14px;
+}
+.rl-nav-link:hover{ border-color:#3b3b44; color:#cfe0ff; }
+.rl-scene-action-row{
+  border:1px solid #2a2a32; border-radius:8px; padding:8px;
+  background:#1a1a23; display:grid;
+  grid-template-columns: 28px minmax(140px, 200px) 1fr auto;
+  grid-template-areas:
+    "idx kind body ctrl"
+    "cost cost cost cost";
+  row-gap:6px; column-gap:8px;
+  align-items:start;
+}
+.rl-scene-action-row > .rl-scene-action-index{ grid-area: idx; }
+.rl-scene-action-row > .rl-scene-action-kind{ grid-area: kind; }
+.rl-scene-action-row > .rl-scene-action-body{ grid-area: body; }
+.rl-scene-action-row > .rl-scene-action-controls{ grid-area: ctrl; }
+.rl-scene-action-row > .rl-scene-action-cost{ grid-area: cost; justify-self:end; }
+.rl-scene-action-row.degraded{ border-color:#5a2a2a; background:#221314; }
+.rl-scene-action-row.running{ border-color:var(--accent); }
+.rl-scene-action-row.ok{ border-color:#2d553f; }
+.rl-scene-action-row.error{ border-color:#5a2a2a; }
+.rl-scene-action-index{
+  color:var(--muted); font-variant-numeric:tabular-nums; padding-top:6px;
+  display:flex; flex-direction:column; align-items:center; gap:2px;
+}
+/* Drag handle: SortableJS initiates drags only from this element so the
+   inner controls (selects, inputs, buttons) stay click-/keyboard-only. */
+.rl-scene-action-grip{
+  cursor:grab; user-select:none; line-height:1;
+  font-size:14px; color:var(--muted);
+  padding:2px 4px; border-radius:3px;
+}
+.rl-scene-action-grip:hover{ background:#2a2a32; color:#cfe0ff; }
+.rl-scene-action-grip:active{ cursor:grabbing; }
+.rl-scene-action-index-label{ font-size:12px; }
+/* SortableJS marker classes — the ghost is the placeholder shown in the
+   list while dragging; chosen is the row currently being dragged; drag
+   styles the floating element under the cursor. */
+.rl-scene-action-row-ghost{ opacity:0.35; background:#2a2a32; }
+.rl-scene-action-row-chosen{ background:#1f1f28; }
+.rl-scene-action-row-drag{ box-shadow:0 4px 12px rgba(0,0,0,0.4); }
+.rl-scene-action-kind{ display:flex; flex-direction:column; gap:6px; }
+.rl-scene-action-kind label{ font-size:12px; color:var(--muted); }
+.rl-scene-action-body{ display:flex; flex-direction:column; gap:6px; }
+/* Kind column has a "Kind" label above its dropdown that pushes the
+   dropdown ~22px down. Body content for delay/sync is a single row that
+   would otherwise sit at the row's top edge — visually offset from the
+   dropdown. Pad the body down so it lines up with the dropdown. Other
+   kinds (rl_preset, wled_preset, wled_control, startblock) have a
+   multi-row body that already aligns acceptably; we don't pad them. */
+.rl-scene-action-body[data-kind="delay"],
+.rl-scene-action-body[data-kind="sync"]{ padding-top:22px; }
+.rl-scene-action-controls{ display:flex; flex-direction:column; gap:4px; align-items:stretch; min-width:80px; }
+.rl-scene-action-controls button{ font-size:12px; padding:4px 10px; white-space:nowrap; }
+.rl-scene-target{ display:flex; flex-direction:column; gap:8px; }
+.rl-scene-target-radios{ display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+.rl-scene-target label.inline{ font-size:12px; color:var(--muted); }
+.rl-scene-target-body{ display:flex; flex-direction:column; gap:6px; }
+
+/* offset_group container action ------------------------------------- */
+.rl-offset-group-container{
+  display:flex; flex-direction:column; gap:10px;
+}
+.rl-offset-group-warning{
+  padding:6px 10px; border-radius:4px;
+  background:#3a2a18; border:1px solid #6a4a20; color:#ffd9a8;
+  font-size:12px;
+}
+.rl-offset-group-children{
+  display:flex; flex-direction:column; gap:6px;
+  padding:8px; border:1px dashed #2a2a32; border-radius:6px; background:#101019;
+}
+.rl-offset-group-children-label{ font-size:11px; }
+.rl-offset-group-children-list{ display:flex; flex-direction:column; gap:6px; }
+.rl-offset-group-children-empty{ font-size:12px; padding:6px 4px; }
+.rl-offset-group-child-row{
+  display:grid;
+  grid-template-columns: 28px minmax(140px, 200px) 1fr auto; gap:8px;
+  align-items:start;
+  padding:6px; border:1px solid #1f1f28; border-radius:4px; background:#15151c;
+}
+.rl-offset-group-child-row > .rl-scene-action-index{ grid-column: 1; }
+.rl-offset-group-child-row > .rl-scene-action-kind{ grid-column: 2; }
+.rl-offset-group-child-row > .rl-scene-action-body{ grid-column: 3; }
+.rl-offset-group-child-row > .rl-scene-action-controls{ grid-column: 4; min-width:80px; }
+.rl-offset-group-add-child{
+  display:flex; align-items:center; gap:6px; padding-top:4px;
+  border-top:1px dashed #2a2a32;
+}
+.rl-offset-group-add-child > .muted{ font-size:12px; }
+
+/* per-action cost badge ---------------------------------------------- */
+.rl-scene-action-cost{
+  font-variant-numeric:tabular-nums;
+  font-size:11px;
+  padding:2px 6px; border-radius:4px;
+  background:#15151c; border:1px solid #2a2a32;
+  white-space:nowrap;
+  margin-top:2px;
+}
+.rl-scene-cost-total{
+  font-variant-numeric:tabular-nums;
+  font-size:12px;
+  padding:2px 8px; border-radius:4px;
+  background:#15151c; border:1px solid #2a2a32;
+}
+/* "actual: NNN ms" fragment — appended to the cost badge after a Run.
+   Distinguishes the measured wall-clock duration from the estimated
+   airtime so the operator can tell them apart at a glance. */
+.rl-scene-cost-actual{
+  color:#7ec8e3;
+  font-weight:600;
+}
+
+/* groups_offset formula panel --------------------------------------- */
+.rl-groups-offset{
+  display:flex; flex-direction:column; gap:8px;
+  padding:8px; border:1px solid #2a2a32; border-radius:6px; background:#15151c;
+}
+.rl-groups-offset-all-row{ display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+.rl-groups-offset-all-row > .muted{ font-size:11px; }
+.rl-groups-offset-list-section{ display:flex; flex-direction:column; gap:6px; }
+.rl-groups-offset-quick{ display:flex; gap:6px; flex-wrap:wrap; }
+.rl-groups-offset-quick button{ font-size:12px; padding:3px 8px; }
+.rl-groups-offset-checks{
+  display:flex; flex-wrap:wrap; gap:6px 14px;
+  max-height:140px; overflow-y:auto;
+  padding:6px 8px; border:1px solid #1f1f28; border-radius:4px; background:#101019;
+}
+.rl-groups-offset-mode{ display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+.rl-groups-offset-mode > .muted{ font-size:12px; }
+.rl-groups-offset-params{ display:flex; flex-wrap:wrap; gap:6px 12px; align-items:center; }
+.rl-groups-offset-params span{ font-size:12px; color:var(--muted); }
+.rl-groups-offset-explicit-row{ display:flex; align-items:center; gap:6px; }
+.rl-groups-offset-explicit-row span{ font-size:12px; color:var(--muted); }
+.rl-groups-offset-preview{
+  display:flex; flex-wrap:wrap; gap:4px 8px; align-items:center;
+  font-size:12px;
+}
+.rl-groups-offset-preview-tag{
+  font-variant-numeric:tabular-nums;
+  padding:1px 6px; border-radius:3px;
+  background:#1a1a23; border:1px solid #2a2a32; color:#cfd0e0;
+}
+.rl-scene-vars{ display:flex; flex-wrap:wrap; gap:8px; }
+.rl-scene-flags{ display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+.rl-scene-flags > span.muted{ font-size:12px; }
+.rl-scene-add-row{ display:flex; gap:8px; align-items:center; margin-top:4px; }
+.rl-scene-meta{
+  display:flex; gap:12px; align-items:center; flex-wrap:wrap;
+  margin:8px 0; padding-bottom:8px; border-bottom:1px dashed #2a2a32;
+}
+.rl-scene-meta label{ font-size:12px; color:var(--muted); }
+.rl-scene-progress{
+  display:flex; gap:4px; flex-wrap:wrap; padding:6px 0;
+  font-size:12px; color:var(--muted);
+}
+.rl-scene-progress .pip{
+  width:18px; height:18px; border-radius:4px; border:1px solid #2a2a32;
+  display:inline-flex; align-items:center; justify-content:center;
+  font-size:10px; background:#1a1a23;
+}
+.rl-scene-progress .pip.ok{ background:#102017; border-color:#2d553f; color:#b6f5cf; }
+.rl-scene-progress .pip.error{ background:#221314; border-color:#5a2a2a; color:#ffd8d8; }
+.rl-scene-progress .pip.degraded{ background:#1f1a14; border-color:#5a4a2a; color:#ffe0a8; }
+/* Batch A (2026-04-28): "skipped" pip — actions that didn't run because
+   stop_on_error aborted the sequence earlier. Muted so the eye reads
+   them as "didn't happen" rather than "failed". */
+.rl-scene-progress .pip.skipped{
+  background:#15151c; border-color:#2a2a32; color:var(--muted);
+  opacity:0.55; font-style:italic;
+}
+/* Inline "Stop on error" checkbox in the scene-meta row. */
+.rl-scene-stop-on-error{
+  display:inline-flex; align-items:center; gap:4px;
+  font-size:12px; color:var(--muted);
+  cursor:pointer;
+}
 
 /* Plan P1-1: persistent gateway-down banner */
 .rl-banner{
@@ -97,7 +367,10 @@ dialog::backdrop{ background:rgba(0,0,0,.4); }
 }
 .rl-banner-transient .rl-banner-icon{ color:#ffd88b; }
 
-/* Toast: ephemeral confirmation (e.g. "Connection restored"). */
+/* Toast: ephemeral confirmation (e.g. "Connection restored").
+   Default style is the success/info palette (green); the
+   ``.rl-toast-error`` modifier flips to red for validation errors and
+   server failures (C3 sweep replaces native ``alert()`` with this). */
 .rl-toast{
   position:fixed; left:50%; bottom:24px; transform:translateX(-50%);
   background:#2a4a2a; color:#e8ffe8;
@@ -105,6 +378,54 @@ dialog::backdrop{ background:rgba(0,0,0,.4); }
   padding:8px 16px; font-size:13px; z-index:9999;
   box-shadow:0 2px 8px rgba(0,0,0,0.3);
   transition:opacity 0.3s;
+  max-width:min(90vw, 520px);
+  text-align:center;
 }
 .rl-toast.hidden{ display:none; }
 .rl-toast.rl-toast-fade{ opacity:0; }
+.rl-toast.rl-toast-error{
+  background:#4a1a1a; color:#ffeaea;
+  border-color:#7a2a2a;
+}
+
+/* OTA progress panel inside dlgFwUpdate (C4). Hidden by default; the
+   dialog shows it after "Start Update" succeeds and hides the
+   configuration form. */
+.rl-fw-progress{ display:flex; flex-direction:column; gap:10px; }
+.rl-fw-progress.hidden{ display:none; }
+.rl-fw-progress-stage{
+  font-variant-numeric:tabular-nums;
+  padding:6px 10px; border-radius:6px;
+  background:#15151c; border:1px solid #2a2a32;
+  font-size:13px;
+}
+.rl-fw-progress-bar-outer{
+  height:8px; border-radius:4px;
+  background:#1a1a23; border:1px solid #2a2a32;
+  overflow:hidden;
+}
+.rl-fw-progress-bar-inner{
+  height:100%; background:#4c8bf5;
+  width:0%;
+  transition:width 0.2s ease-out;
+}
+.rl-fw-progress-bar-inner.done{ background:#1faa59; }
+.rl-fw-progress-bar-inner.error{ background:#e84545; }
+.rl-fw-progress-message{
+  font-size:12px; color:var(--muted); min-height:1em;
+}
+.rl-fw-progress-summary{
+  display:flex; flex-direction:column; gap:4px;
+  padding:8px 10px; border-radius:6px;
+  background:#15151c; border:1px solid #2a2a32;
+  font-size:12px;
+  max-height:200px; overflow-y:auto;
+}
+.rl-fw-progress-summary-row{ display:flex; gap:10px; }
+.rl-fw-progress-summary-row .mac{
+  font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;
+  color:#cfd0e0;
+}
+.rl-fw-progress-summary-row.ok .status{ color:#b6f5cf; }
+.rl-fw-progress-summary-row.error .status{ color:#ffd8d8; }
+.rl-fw-progress-summary-row.running .status{ color:#cfe0ff; }

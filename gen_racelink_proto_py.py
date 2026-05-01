@@ -8,7 +8,7 @@ Why this exists:
 This generator extracts:
 - PROTO_VER_* constants
 - DIR_* constants + helpers (make_type, type_dir, type_base, flip_dir)
-- Enums: Opcode7, RespPolicy, AckStatus
+- Enums: Opcode7, RespPolicy, AckStatus, OffsetMode
 - Sizes of packed structs (by summing field sizes)
 - PacketRule registry (RULES[]), plus RULES_BY_OPCODE7 and find_rule()
 
@@ -305,10 +305,19 @@ def generate(header_path: pathlib.Path, out_path: pathlib.Path) -> None:
     # DIR_* constants
     constants.update(_extract_static_u8_prefix(h, "DIR_"))
 
+    # USB framing event types + reason codes + host->gateway commands
+    # (Batch B). These don't travel on the LoRa wire but the host transport
+    # mirrors them; keep them in lockstep with the C++ header.
+    constants.update(_extract_static_u8_prefix(h, "EV_"))
+    constants.update(_extract_static_u8_prefix(h, "TX_REJECT_"))
+    constants.update(_extract_static_u8_prefix(h, "GW_CMD_"))
+
     # enums
     constants.update(_extract_enum(h, "Opcode7"))
     constants.update(_extract_enum(h, "RespPolicy"))
     constants.update(_extract_enum(h, "AckStatus"))
+    constants.update(_extract_enum(h, "OffsetMode"))
+    constants.update(_extract_enum(h, "GatewayState"))
 
     # packed struct layouts + sizes
     struct_defs = _extract_packed_struct_defs(h)

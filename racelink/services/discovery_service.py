@@ -1,10 +1,30 @@
-"""Discovery service for device identification via the gateway."""
+"""Discovery service for device identification via the gateway.
+
+Coordinates an OPC_DEVICES broadcast, collects ``IDENTIFY_REPLY``
+events from any node that responds within the gateway's RX
+window, and reconciles the replies into the device repository
+(creating new ``RL_Device`` records, updating existing ones,
+preserving operator-set name/groupId for already-known macs).
+
+Public API:
+
+* ``discover_devices(target_group_id, new_group_name=None,
+  task_meta_callback=None) -> dict`` — fires the broadcast,
+  drains the reply window, returns ``{"found": N, ...}``.
+
+Threading: typically driven by the task manager from a worker
+thread (the operator clicks "Discover" → web route → task →
+this service). The reply-collection path uses
+:meth:`GatewayService.send_and_collect`, which installs a
+listener on the transport for the duration of the window.
+"""
 
 from __future__ import annotations
 
 import logging
 
 from ..transport import LP, mac_last3_from_hex
+from . import rf_timing
 
 logger = logging.getLogger(__name__)
 
@@ -70,8 +90,8 @@ class DiscoveryService:
         self.gateway_service.send_and_collect(
             lambda: transport.send_get_devices(recv3=recv3, group_id=group_id, flags=0),
             _collect,
-            idle_timeout_s=0.6,
-            max_timeout_s=5.0,
+            idle_timeout_s=rf_timing.COLLECT_IDLE_TIMEOUT_S,
+            max_timeout_s=rf_timing.COLLECT_MAX_CEILING_S,
         )
 
         assigned_group = None

@@ -6,7 +6,7 @@ from racelink.services.specials_service import SpecialsService
 
 class SpecialsServiceTests(unittest.TestCase):
     def setUp(self):
-        rl_instance = type("RL", (), {"uiEffectList": [{"value": "01", "label": "Red"}]})()
+        rl_instance = type("RL", (), {"uiPresetList": [{"value": "01", "label": "Red"}]})()
         self.service = SpecialsService(rl_instance=rl_instance)
         self.startblock = RL_Device(
             "AABBCCDDEEFF",

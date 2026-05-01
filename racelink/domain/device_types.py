@@ -1,10 +1,18 @@
-"""Device type constants and shared flag definitions for RaceLink."""
+"""Device type constants for RaceLink.
 
-RL_FLAG_POWER_ON = 0x01
-RL_FLAG_ARM_ON_SYNC = 0x02
-RL_FLAG_HAS_BRI = 0x04
-RL_FLAG_FORCE_TT0 = 0x08
-RL_FLAG_FORCE_REAPPLY = 0x10
+The ``RL_FLAG_*`` constants are re-exported from :mod:`.flags` for
+backwards compatibility with existing imports; new code should prefer
+``from .flags import ...`` directly.
+"""
+
+from .flags import (
+    RL_FLAG_ARM_ON_SYNC,
+    RL_FLAG_FORCE_REAPPLY,
+    RL_FLAG_FORCE_TT0,
+    RL_FLAG_HAS_BRI,
+    RL_FLAG_OFFSET_MODE,
+    RL_FLAG_POWER_ON,
+)
 
 
 class RL_Dev_Type:

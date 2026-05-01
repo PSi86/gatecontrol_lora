@@ -1,135 +1,88 @@
 # RaceLink Host
 
-Host software for the **RaceLink** wireless control system.
+Python host runtime for the [RaceLink](https://github.com/PSi86/RaceLink_Docs)
+wireless LED-control system.
 
-`RaceLink_Host` is an installable Python package. The distribution can be installed as `racelink-host`, and the package is imported as `racelink`.
+`RaceLink_Host` provides:
 
-The canonical runtime version is exposed as `racelink.__version__` and `racelink.get_version()`. For shell and CI usage, the package also exposes `racelink-host-version`.
+* the host-side runtime (services, state, transport, protocol);
+* the shared RaceLink WebUI;
+* a standalone Flask host (`racelink-standalone`) for use without
+  RotorHazard.
 
-This repository now contains the host-side core runtime, the shared RaceLink WebUI, and the standalone Flask host mode. The RotorHazard adapter is no longer part of this repository and belongs in the separate `RaceLink_RH-plugin` repository.
+The package is published as `racelink-host`; imported as
+`racelink`.
 
-## What stays in this repository
+## Documentation
 
-- RaceLink core runtime and services
-- Gateway communication and protocol handling
-- Shared RaceLink WebUI assets in `racelink/pages/` and `racelink/static/`
-- Shared web registration in `racelink/web/`
-- Standalone Flask hosting in `racelink/integrations/standalone/`
+📚 **Full documentation lives at
+[RaceLink_Docs](https://github.com/PSi86/RaceLink_Docs)**:
 
-`racelink/pages/` and `racelink/static/` remain RaceLink-owned UI assets in the host repository. They are not plugin-only files.
+* **Operator guide** — install + run a race
+* **Developer guide** — package layout, threading, "I want to add X" checklists
+* **Wire protocol reference** — opcode tables, body layouts, gateway state machine
+* **Architecture** — service layer, locking rules
 
-## Hosting modes
+This README only covers what's specific to *this repository* —
+build, test, install. For everything else, follow the link above.
 
-The same RaceLink WebUI is used in different hosting modes:
-
-- **Standalone mode** mounts the shared UI inside the standalone Flask app.
-- **RotorHazard plugin mode** is expected to mount the same shared UI from the separate `RaceLink_RH-plugin` adapter repository.
-
-The host-owned integration edge for outer adapters is intentionally small:
-
-- `racelink.app.create_runtime(...)`
-- `racelink.web.register_racelink_web(...)`
-
-## Standalone mode
-
-Standalone mode runs RaceLink as its own Flask application with the shared RaceLink WebUI mounted at `/racelink`.
-
-- Start it with the packaged `racelink-standalone` command after installing `racelink-host`
-- Normal standalone operation expects a connected RaceLink Gateway
-- Default bind address: `127.0.0.1:5077`
-- Default UI URL: `http://127.0.0.1:5077/racelink`
-
-For full Windows and Linux installation, configuration, and usage instructions, see [docs/standalone.md](/C:/Users/psima/Dev/RaceLink_Host/docs/standalone.md).
-
-## Local checks
-
-Run the test suite with:
+## Install
 
 ```bash
-py -3 -m unittest discover -s tests -v
+pip install racelink-host
+racelink-standalone                 # default UI: http://127.0.0.1:5077/racelink
 ```
 
-Check local package installation with:
+For the full Windows / Linux setup, including `nmcli` polkit
+configuration on Linux, see
+[Standalone install](https://psi86.github.io/RaceLink_Docs/RaceLink_Host/standalone-install/).
+
+## Build / test
 
 ```bash
+# Test suite
+py -3 -m unittest discover -s tests -v
+
+# Local install for development
 py -3 -m pip install --no-deps --no-build-isolation .
 ```
 
-## Release artifacts
+For the full smoke-test set (no German strings, exception
+hygiene, proto-header drift) see
+[Contributing](https://psi86.github.io/RaceLink_Docs/contributing/).
 
-Run the GitHub Actions release workflow in `.github/workflows/release.yml` from the Actions UI.
+## Release
 
-The workflow accepts:
+GitHub Actions: run `.github/workflows/release.yml` from the
+Actions UI. Required input: `target_branch`. Optional input:
+`version` (auto-increments otherwise).
 
-- an optional `version` override
-- a required `target_branch` input
+For the full release flow and wheel naming convention see
+[Versioning](https://psi86.github.io/RaceLink_Docs/versioning/).
 
-If `version` is left empty, the workflow auto-increments the current host patch version using the canonical `racelink/_version.py` value.
+## Repository structure
 
-The workflow builds and publishes these stable filenames:
-
-- `racelink_host-<version>-py3-none-any.whl`
-- `racelink-host-<version>.tar.gz`
-- `racelink-host-<version>-sha256.txt`
-
-For example, a release for `v0.1.0` publishes:
-
-- `racelink_host-0.1.0-py3-none-any.whl`
-- `racelink-host-0.1.0.tar.gz`
-- `racelink-host-0.1.0-sha256.txt`
-
-The workflow validates that the computed release version matches `racelink.__version__`, commits the release metadata, creates the `v<version>` tag, pushes the selected branch with the tag, and then publishes the GitHub release.
-
-## Consuming `racelink-host` from other repositories
-
-Other repositories should consume `RaceLink_Host` as an installable package, not by importing from a sibling source checkout.
-
-### Build and release flow
-
-- Open GitHub Actions and run `.github/workflows/release.yml`.
-- Set `target_branch` to the branch you want to release from.
-- Optionally set `version`. If left empty, the workflow increments the current patch version automatically.
-- GitHub Actions updates `racelink/_version.py`, validates the computed `v<version>` tag, builds the release artifacts, commits the version bump, creates the tag, pushes the branch and tag, and publishes the release.
-- The release publishes these stable filenames:
-- `racelink_host-<version>-py3-none-any.whl`
-- `racelink-host-<version>.tar.gz`
-- `racelink-host-<version>-sha256.txt`
-
-### Install from a GitHub release artifact
-
-Online installation from a downloaded release wheel:
-
-```bash
-python -m pip install ./racelink_host-0.1.0-py3-none-any.whl
+```text
+RaceLink_Host/
+├── racelink/           Python package
+│   ├── app.py
+│   ├── controller.py
+│   ├── core/, domain/, protocol/, transport/, state/, services/
+│   ├── web/            Flask blueprint, SSE, API, request helpers
+│   ├── integrations/standalone/
+│   ├── pages/          shared WebUI HTML
+│   └── static/         shared WebUI JS / CSS
+├── racelink_proto.h    canonical wire-format header (mirrored to Gateway + WLED)
+├── tests/
+├── pyproject.toml
+├── README.md
+├── LICENSE
+└── .github/workflows/
 ```
 
-Offline installation from a bundled wheel:
+For a full architectural tour see
+[Architecture](https://psi86.github.io/RaceLink_Docs/RaceLink_Host/architecture/).
 
-```bash
-python -m pip install --no-index ./racelink_host-0.1.0-py3-none-any.whl
-```
+## Licence
 
-The wheel is the preferred runtime artifact. The sdist is published for source distribution and verification workflows, but consumers should not depend on unpacking a source tree at runtime.
-
-### Expected integration for `RaceLink_RH-plugin`
-
-`RaceLink_RH-plugin` should declare and consume `racelink-host` as a package dependency and use the host-owned public integration surface:
-
-- `racelink.__version__` or `racelink.get_version()` to log the loaded host version
-- `racelink.app.create_runtime(...)` to construct the host runtime
-- `racelink.web.register_racelink_web(...)` to mount the shared RaceLink WebUI
-
-The plugin should not depend on repo-relative paths, copied `pages/` or `static/` folders, or imports from a local `RaceLink_Host` checkout.
-
-### Offline bundle guidance
-
-Offline bundles should be populated from the published wheel, not from a source checkout snapshot.
-
-That means the offline bundle should carry `racelink_host-<version>-py3-none-any.whl` as the canonical host payload, install that wheel locally, and then import `racelink` from the installed package.
-
-## Related repositories
-
-- RaceLink Host: `https://github.com/PSi86/RaceLink_Host`
-- RaceLink RotorHazard plugin: separate adapter repository
-- RaceLink Gateway: `https://github.com/PSi86/RaceLink_Gateway`
-- RaceLink WLED nodes: `https://github.com/PSi86/RaceLink_WLED`
+See [`LICENSE`](LICENSE).

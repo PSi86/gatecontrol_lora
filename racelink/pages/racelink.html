@@ -15,13 +15,18 @@
       <button id="btnStatusAll">Get Status (All)</button>
       <button id="btnFwUpdate">Firmware Update</button>
       <button id="btnWledPresets">WLED Presets</button>
-      <button id="btnForce">Set all Groups</button>
+      <button id="btnRlPresets">RL Presets</button>
+      <a href="{{ rl_base_path }}/scenes" class="rl-nav-link">Scenes</a>
+      <button id="btnForce" title="Re-broadcast each device's stored groupId to the network. Use after group reassignments so the radio state matches the host's view.">Re-sync group config</button>
       <button id="btnSave">Save</button>
       <button id="btnReload">Reload</button>
     </div>
 
     <div class="rl-masterbar">
       <span id="masterPill" class="pill idle">IDLE</span>
+      <button id="masterRefresh" type="button" class="rl-master-refresh"
+              title="Query gateway for current state (sends GW_CMD_STATE_REQUEST)"
+              aria-label="Refresh gateway state">↻</button>
       <span id="masterDetail" class="muted"></span>
       <span id="taskDetail" class="muted rl-taskdetail"></span>
     </div>
@@ -57,9 +62,14 @@
 
     <section class="rl-content">
       <div class="rl-toolbar">
-        <label>Bulk set Group:</label>
+        <!-- C9: was "Bulk set Group" / "Apply" — collision with the
+             header's "Set all Groups". Renamed to make the difference
+             explicit: this control moves *selected* devices to the
+             chosen group, while the header button re-syncs the entire
+             fleet's stored config. -->
+        <label>Move selected to group:</label>
         <select id="bulkGroup"></select>
-        <button id="btnBulkSetGroup">Apply</button>
+        <button id="btnBulkSetGroup" title="Send a SET_GROUP packet to each selected device, reassigning them to the chosen group.">Move</button>
       </div>
 
 <div class="rl-toolbar">
@@ -79,7 +89,7 @@
 </div>
 
 <div class="rl-toolbar">
-  <label>Config Anzeige:</label>
+  <label>Config display:</label>
   <div id="configDisplayOptions" class="rl-config-options"></div>
 </div>
 
@@ -132,9 +142,42 @@
   </dialog>
 
 
+  <dialog id="dlgResyncGroups">
+    <form method="dialog">
+      <h3>Re-sync group config</h3>
+      <p class="muted">
+        Re-broadcasts every device's stored groupId to the network so the
+        radio state matches the host's view. Online devices ACK in
+        ~300&nbsp;ms; offline devices time out at ~4.7&nbsp;s per node
+        unless skipped.
+      </p>
+      <div class="row">
+        <label>
+          <input type="checkbox" id="resyncSkipOffline">
+          Skip offline devices
+        </label>
+      </div>
+      <p class="muted">
+        Skipped devices auto-resync on their next IDENTIFY/STATUS reply
+        when they come back online. Leave unchecked to push to every known
+        device now.
+      </p>
+      <menu>
+        <button value="cancel">Cancel</button>
+        <button id="btnResyncStart" value="default">Re-sync</button>
+      </menu>
+    </form>
+  </dialog>
+
+
   <dialog id="dlgFwUpdate">
     <form method="dialog" class="rl-form">
       <h3>Firmware Update</h3>
+      <!-- C4: the dialog has two states. ``#fwConfig`` carries the
+           configuration form; ``#fwProgress`` is shown after Start so
+           the operator sees stage / device / message live updates
+           instead of a closed dialog with no feedback. -->
+      <div id="fwConfig">
       <p class="muted">
         Activates the AP for each node sequentially via RaceLink, connects to the node AP using <code>nmcli</code> (NetworkManager), and checks the full MAC via <code>/json/info</code> before performing the OTA update.
       </p>
@@ -155,11 +198,16 @@
 
       
       <div class="row">
-        <label>Host WiFi (nmcli profile):</label>
-        <input id="fwWifiConnName" value="racelink-wled-ap" style="width: 190px;" />
+        <label>WLED AP (SSID, iface, password):</label>
+        <input id="fwWifiSsid" value="WLED_RaceLink_AP, WLED-AP" style="width: 260px;" placeholder="comma-separated SSID list" />
         <select id="fwWifiIface" style="width: 140px;"></select>
-        <input id="fwWifiSsid" value="WLED-AP" style="width: 160px;" />
-        <span class="muted">Activate a pre-created NetworkManager connection profile</span>
+        <input id="fwWifiPassword" value="wled1234" style="width: 140px;" />
+        <span class="muted">Host scans for any of the SSIDs and connects with this password (WLED's default is "wled1234")</span>
+      </div>
+      <div class="row">
+        <label>WLED OTA password:</label>
+        <input id="fwWifiOtaPassword" value="wledota" style="width: 140px;" />
+        <span class="muted">Used to auto-unlock /update on HTTP 401 (default "wledota"). Override only if your fleet's otaPass differs.</span>
       </div>
       <div class="row">
         <label></label>
@@ -167,10 +215,15 @@
         <label class="inline"><input id="fwHostWifiEnable" type="checkbox" checked /> Enable host WiFi during update</label>
         <label class="inline"><input id="fwHostWifiRestore" type="checkbox" checked /> Restore previous host WiFi state after update</label>
       </div>
+      <div class="row">
+        <label></label>
+        <label class="inline"><input id="fwSkipValidation" type="checkbox" /> Skip firmware-name validation</label>
+        <span class="muted">Tick only for cross-fork migrations (e.g. stock WLED → RaceLink fork). Bypasses WLED's <code>WLED_RELEASE_NAME</code> check that otherwise produces HTTP 500 "Firmware release name mismatch".</span>
+      </div>
 
       <div class="row">
         <label>WiFi timeout (s):</label>
-        <input id="fwWifiTimeoutS" type="number" min="5" max="120" value="35" style="width: 90px;" />
+        <input id="fwWifiTimeoutS" type="number" min="5" max="120" value="20" style="width: 90px;" />
         <span class="muted">How long the host scans/connects to the node AP</span>
       </div>
 
@@ -207,6 +260,21 @@
       </div>
 
       <p id="fwHint" class="muted"></p>
+      </div><!-- /#fwConfig -->
+
+      <!-- C4: progress panel; populated by ``updateTask`` while the
+           ``fwupdate`` task runs. Hidden until Start succeeds. -->
+      <div id="fwProgress" class="rl-fw-progress hidden">
+        <div id="fwProgressStage" class="rl-fw-progress-stage">Starting…</div>
+        <div class="rl-fw-progress-bar-outer">
+          <div id="fwProgressBar" class="rl-fw-progress-bar-inner"></div>
+        </div>
+        <div id="fwProgressMessage" class="rl-fw-progress-message"></div>
+        <div id="fwProgressSummary" class="rl-fw-progress-summary"></div>
+        <div class="rl-dialog-actions">
+          <button id="btnFwClose" type="button" value="cancel">Close</button>
+        </div>
+      </div>
     </form>
   </dialog>
 
@@ -229,10 +297,15 @@
       </div>
 
       <div class="row">
-        <label>Host WiFi (nmcli profile):</label>
-        <input id="presetsWifiConnName" value="racelink-wled-ap" style="width: 190px;" />
+        <label>WLED AP (SSID, iface, password):</label>
+        <input id="presetsWifiSsid" value="WLED_RaceLink_AP, WLED-AP" style="width: 260px;" placeholder="comma-separated SSID list" />
         <select id="presetsWifiIface" style="width: 140px;"></select>
-        <input id="presetsWifiSsid" value="WLED-AP" style="width: 160px;" />
+        <input id="presetsWifiPassword" value="wled1234" style="width: 140px;" />
+      </div>
+      <div class="row">
+        <label>WLED OTA password:</label>
+        <input id="presetsWifiOtaPassword" value="wledota" style="width: 140px;" />
+        <span class="muted">Used to auto-unlock OTA on HTTP 401 (default "wledota").</span>
       </div>
 
       <div class="row">
@@ -243,7 +316,7 @@
 
       <div class="row">
         <label>WiFi timeout (s):</label>
-        <input id="presetsWifiTimeoutS" type="number" min="5" max="120" value="35" style="width: 90px;" />
+        <input id="presetsWifiTimeoutS" type="number" min="5" max="120" value="20" style="width: 90px;" />
         <span class="muted">How long the host scans/connects to the node AP</span>
       </div>
 
@@ -280,6 +353,35 @@
       </div>
 
       <p id="specialHint" class="muted"></p>
+    </form>
+  </dialog>
+
+  <!-- Scene Manager moved out of this page to /racelink/scenes (R5). The
+       header "Scenes" link above navigates there. -->
+
+  <!-- RaceLink preset editor (persistent OPC_CONTROL_ADV snapshots). -->
+  <dialog id="dlgRlPresets">
+    <form method="dialog" class="rl-form rl-presets-form">
+      <h3>RaceLink Presets</h3>
+      <p class="muted">Persisted effect snapshots. RotorHazard applies them by preset id and dispatches via <code>OPC_CONTROL_ADV</code>.</p>
+
+      <div class="rl-presets-layout">
+        <aside class="rl-presets-sidebar">
+          <div class="rl-presets-toolbar">
+            <button id="btnRlPresetNew" type="button">+ New</button>
+          </div>
+          <ul id="rlPresetList" class="rl-presets-list"></ul>
+        </aside>
+        <section id="rlPresetEditor" class="rl-presets-editor">
+          <p class="muted">Pick a preset on the left, or create a new one.</p>
+        </section>
+      </div>
+
+      <div class="rl-dialog-actions">
+        <button value="cancel">Close</button>
+      </div>
+
+      <p id="rlPresetsHint" class="muted"></p>
     </form>
   </dialog>
 

@@ -9,10 +9,11 @@ from racelink.domain.state_scope import (
     DEVICE_MEMBERSHIP,
     DEVICE_SPECIALS,
     DEVICES,
-    EFFECTS,
     FULL,
     GROUPS,
     NONE,
+    PRESETS,
+    SCENES,
     normalize_scopes,
     sse_what_from_scopes,
 )
@@ -64,8 +65,14 @@ class SseTopicMappingTests(unittest.TestCase):
             ["devices"],
         )
 
-    def test_effects_emits_effects_topic(self):
-        self.assertEqual(sse_what_from_scopes([EFFECTS]), ["effects"])
+    def test_presets_emits_presets_topic(self):
+        self.assertEqual(sse_what_from_scopes([PRESETS]), ["presets"])
+
+    def test_scenes_emits_scenes_topic(self):
+        self.assertEqual(sse_what_from_scopes([SCENES]), ["scenes"])
+
+    def test_presets_and_scenes_emit_both_topics(self):
+        self.assertEqual(sse_what_from_scopes([PRESETS, SCENES]), ["presets", "scenes"])
 
     def test_combined_scopes_preserve_order_devices_then_groups(self):
         self.assertEqual(

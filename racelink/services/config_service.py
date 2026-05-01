@@ -1,6 +1,30 @@
-"""Configuration command service for RaceLink devices."""
+"""Configuration command service for RaceLink devices.
+
+Owns the *post-ACK* application of configuration changes: when a
+unicast ``OPC_CONFIG`` send is acknowledged, the matching
+``apply_config_update(dev, option, data0)`` call lands here. The
+service mutates the device's local state (configByte / specials)
+to reflect what the firmware just confirmed, then triggers an
+SSE refresh so the WebUI picks up the change.
+
+Public API:
+
+* ``apply_config_update(dev, option, data0)`` — invoked from
+  :meth:`GatewayService.handle_ack_event` via the controller's
+  ``_apply_config_update`` shim; pre-A3 this read the pending-
+  config dict directly, post-A3 it goes through
+  ``controller.take_pending_config``.
+
+Threading: the apply call lands on the RX reader thread (via the
+ACK handler). Mutations to the device state happen under the
+state-repository lock if the controller exposes one.
+"""
 
 from __future__ import annotations
+
+from typing import Optional
+
+from . import rf_timing
 
 
 class ConfigService:
@@ -17,8 +41,10 @@ class ConfigService:
         data3=0,
         recv3=b"\xFF\xFF\xFF",
         wait_for_ack: bool = False,
-        timeout_s: float = 6.0,
+        timeout_s: Optional[float] = None,
     ):
+        if timeout_s is None:
+            timeout_s = rf_timing.UNICAST_ATTEMPT_TIMEOUT_S
         return self.gateway_service.send_config(
             option,
             data0=data0,

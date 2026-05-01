@@ -1,10 +1,28 @@
-"""Status polling service for current device state via the gateway."""
+"""Status polling service for current device state via the gateway.
+
+Sends OPC_STATUS (broadcast or to a specific group) and updates
+each device's ``last_seen_ts``, RSSI/SNR, online flag, and
+voltage from the resulting ``STATUS_REPLY`` events. Devices
+that don't respond within the RX window are marked offline
+("Missing reply (STATUS)").
+
+Public API:
+
+* ``get_status(group_filter=255, target_device=None) -> dict`` —
+  fires the broadcast (or unicast for a single device), collects
+  replies, returns ``{"updated": N, "responders": set, ...}``.
+
+Threading: same shape as :class:`DiscoveryService`. Typically
+runs in a task-manager worker thread (operator clicks
+"Get Status").
+"""
 
 from __future__ import annotations
 
 import logging
 
 from ..transport import LP, mac_last3_from_hex
+from . import rf_timing
 
 logger = logging.getLogger(__name__)
 
@@ -84,14 +102,14 @@ class StatusService:
             )
 
         max_timeout_s = self.gateway_service.compute_collect_max_timeout(
-            expected_count, ceiling_s=5.0
+            expected_count, ceiling_s=rf_timing.COLLECT_MAX_CEILING_S
         )
 
         self.gateway_service.send_and_collect(
             lambda: transport.send_get_status(recv3=recv3, group_id=group_id, flags=0),
             _collect,
             expected=expected_count if expected_count > 0 else None,
-            idle_timeout_s=0.6,
+            idle_timeout_s=rf_timing.COLLECT_IDLE_TIMEOUT_S,
             max_timeout_s=max_timeout_s,
         )
 
@@ -104,8 +122,15 @@ class StatusService:
                 try:
                     target_device.mark_offline("Missing reply (STATUS)")
                 except Exception:
-                    # swallow-ok: best-effort fallback; caller proceeds with safe default
-                    pass
+                    # swallow-ok: mark_offline is observability-side
+                    # bookkeeping; the device's actual transport state
+                    # is unaffected. Debug-log so a recurring failure
+                    # is diagnosable.
+                    logger.debug(
+                        "mark_offline failed for %r",
+                        getattr(target_device, "addr", "?"),
+                        exc_info=True,
+                    )
         else:
             if group_filter == 255:
                 targets = list(self.controller.device_repository.list())
@@ -123,7 +148,13 @@ class StatusService:
                     if mac not in responders and mac[-6:] not in responders:
                         dev.mark_offline("Missing reply (STATUS)")
                 except Exception:
-                    # swallow-ok: best-effort fallback; caller proceeds with safe default
-                    pass
+                    # swallow-ok: per-device mark_offline. Same
+                    # rationale as the singleton case above; debug-log
+                    # so a malformed device record is diagnosable.
+                    logger.debug(
+                        "mark_offline failed for %r",
+                        getattr(dev, "addr", "?"),
+                        exc_info=True,
+                    )
 
         return {"updated": updated, "responders": responders, "got_closed": True}

@@ -28,6 +28,12 @@ class BootstrapContractTests(unittest.TestCase):
         self.assertIn("ota_workflows.run_firmware_update", source)
         self.assertIn("specials_service.resolve_option", source)
         self.assertIn("specials_service.resolve_action", source)
+        # ``host_wifi_service.connect_ap`` lives in ota_workflow_service —
+        # the web layer must keep delegating long-running WiFi work to
+        # services, not call nmcli helpers directly. Pre-rename
+        # ``connect_profile`` is also still asserted-out so a partial
+        # revert that re-introduces the old API is caught.
+        self.assertNotIn("host_wifi_service.connect_ap(", source)
         self.assertNotIn("host_wifi_service.connect_profile(", source)
         self.assertNotIn("ota_service.wait_for_expected_node(", source)
 

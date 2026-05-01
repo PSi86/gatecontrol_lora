@@ -26,8 +26,8 @@ class ProtocolGeneratorTests(unittest.TestCase):
             if out_path.exists():
                 out_path.unlink()
 
-        self.assertEqual(generated.PROTO_VER_MAJOR, 1)
-        self.assertEqual(generated.PROTO_VER_MINOR, 4)
+        self.assertEqual(generated.PROTO_VER_MAJOR, 2)
+        self.assertEqual(generated.PROTO_VER_MINOR, 0)
         self.assertEqual(generated.SZ_P_IdentifyReply, 9)
         self.assertEqual(generated.SZ_P_StatusReply, 8)
         self.assertEqual(generated.SZ_P_Ack, 3)

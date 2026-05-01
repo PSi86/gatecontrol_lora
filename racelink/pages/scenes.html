@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>RaceLink — Scenes</title>
+  <link rel="stylesheet" href="{{ rl_static_path }}/racelink.css">
+</head>
+<body data-rl-base-path="{{ rl_base_path }}" data-rl-page="scenes">
+  <header class="rl-header">
+    <h1>RaceLink — Scenes</h1>
+    <div class="rl-actions">
+      <a href="{{ rl_base_path }}/" class="rl-nav-link">← Devices</a>
+      <button id="btnRlPresets">RL Presets</button>
+    </div>
+
+    <div class="rl-masterbar">
+      <span id="masterPill" class="pill idle">IDLE</span>
+      <span id="masterDetail" class="muted"></span>
+      <span id="taskDetail" class="muted rl-taskdetail"></span>
+    </div>
+  </header>
+
+  <!-- Banners + toast: identical wiring to the Devices page so the SSE-based
+       reconnect/gateway indicators keep working unchanged on /scenes. -->
+  <div id="transientBanner" class="rl-banner rl-banner-transient hidden" role="status">
+    <span class="rl-banner-icon" aria-hidden="true">&#8635;</span>
+    <span id="transientBannerMessage">Reconnecting…</span>
+  </div>
+  <div id="gatewayBanner" class="rl-banner rl-gateway-banner hidden" role="alert">
+    <span class="rl-banner-icon rl-gateway-banner-icon" aria-hidden="true">&#9888;</span>
+    <span id="gatewayBannerMessage">RaceLink Gateway is not available.</span>
+    <button type="button" id="btnGatewayRetry" class="rl-gateway-banner-retry">Retry connection</button>
+  </div>
+  <div id="rlToast" class="rl-toast hidden" role="status" aria-live="polite"></div>
+
+  <main class="rl-main rl-scenes-main">
+    <section class="rl-content rl-scenes-page">
+      <div class="rl-presets-layout">
+        <aside class="rl-presets-sidebar">
+          <div class="rl-presets-toolbar">
+            <button id="btnSceneNew" type="button">+ New</button>
+            <button id="btnSceneOpenRlPresets" type="button" title="Open the RL Presets editor in its own dialog">Manage RL Presets…</button>
+          </div>
+          <ul id="sceneList" class="rl-presets-list"></ul>
+        </aside>
+        <section id="sceneEditor" class="rl-presets-editor">
+          <p class="muted">Select a scene on the left, or create a new one.</p>
+        </section>
+      </div>
+      <p id="scenesHint" class="muted"></p>
+    </section>
+  </main>
+
+  <!-- RaceLink preset editor — kept on this page so the "Manage RL Presets…"
+       button can open it as a modal overlay without leaving /scenes. -->
+  <dialog id="dlgRlPresets">
+    <form method="dialog" class="rl-form rl-presets-form">
+      <h3>RaceLink Presets</h3>
+      <p class="muted">Persisted effect snapshots. RotorHazard applies them by preset id and dispatches via <code>OPC_CONTROL_ADV</code>.</p>
+
+      <div class="rl-presets-layout">
+        <aside class="rl-presets-sidebar">
+          <div class="rl-presets-toolbar">
+            <button id="btnRlPresetNew" type="button">+ New</button>
+          </div>
+          <ul id="rlPresetList" class="rl-presets-list"></ul>
+        </aside>
+        <section id="rlPresetEditor" class="rl-presets-editor">
+          <p class="muted">Pick a preset on the left, or create a new one.</p>
+        </section>
+      </div>
+
+      <div class="rl-dialog-actions">
+        <button value="cancel">Close</button>
+      </div>
+
+      <p id="rlPresetsHint" class="muted"></p>
+    </form>
+  </dialog>
+
+  <!-- SortableJS: vendored at static/vendor/Sortable.min.js for offline
+       operation. Used by scenes.js to drag-reorder action rows. The script
+       loads before scenes.js so window.Sortable is available at boot. -->
+  <script src="{{ rl_static_path }}/vendor/Sortable.min.js"></script>
+
+  <!-- racelink.js owns the shared helpers (apiGet, state, SSE, banners) and
+       exposes them via window.RL for scenes.js. It also still hosts the RL
+       Preset modal (dlgRlPresets) wiring so the "Manage RL Presets…" button
+       works identically on both pages. -->
+  <script src="{{ rl_static_path }}/racelink.js"></script>
+  <script src="{{ rl_static_path }}/scenes.js"></script>
+</body>
+</html>

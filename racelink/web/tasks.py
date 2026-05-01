@@ -62,25 +62,27 @@ class TaskManager:
 
         def runner():
             try:
-                self._master_state.set(
-                    state="TX",
-                    tx_pending=True,
-                    last_event=f"TASK_{name.upper()}_START",
-                )
+                # Diagnostic only — gateway-driven state mirror updates via
+                # EV_STATE_CHANGED (Batch B). last_event flags the task
+                # boundary in the master detail line; ``state`` itself is
+                # owned by MasterState.apply_gateway_state.
+                self._master_state.set(last_event=f"TASK_{name.upper()}_START")
                 result = target_fn()
                 self.update(state="done", ended_ts=time.time(), result=result)
-                self._master_state.set(
-                    state="IDLE" if not self._master_state.snapshot().get("rx_window_open") else "RX",
-                    last_event=f"TASK_{name.upper()}_DONE",
-                )
+                self._master_state.set(last_event=f"TASK_{name.upper()}_DONE")
                 self._broadcast("refresh", {"what": ["groups", "devices"]})
             except Exception as ex:
-                # swallow-ok: best-effort fallback; caller proceeds with safe default
-                self.update(state="error", ended_ts=time.time(), last_error=str(ex))
+                # swallow-ok: surfaces via task state + master pill +
+                # logger.exception. Include exception type so the
+                # operator-visible error text distinguishes a logic
+                # bug (AttributeError) from a transport/IO error.
+                err_text = f"{type(ex).__name__}: {ex}"
+                self.update(state="error", ended_ts=time.time(), last_error=err_text)
+                # last_error remains a host-side concern (task framework
+                # bookkeeping); state stays gateway-driven.
                 self._master_state.set(
-                    state="ERROR",
                     last_event=f"TASK_{name.upper()}_ERROR",
-                    last_error=str(ex),
+                    last_error=err_text,
                 )
                 if self._logger:
                     try:
@@ -89,6 +91,11 @@ class TaskManager:
                         # swallow-ok: logger itself failed - we already captured the error above
                         pass
 
-        thread = threading.Thread(target=runner, daemon=True)
+        # A8: include the task name so concurrent task threads (e.g.
+        # ``rl-task-discover`` vs ``rl-task-fwupdate``) are
+        # distinguishable in any thread dump.
+        thread = threading.Thread(
+            target=runner, daemon=True, name=f"rl-task-{name}",
+        )
         thread.start()
         return self.snapshot()

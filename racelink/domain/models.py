@@ -24,6 +24,7 @@ class RL_Device:
         presetId: int = 1,
         brightness: int = 70,
         configByte: int = 0,
+        effectId: int = 0,
     ):
         self.addr: str = addr
         self.dev_type: int = int(dev_type)
@@ -32,8 +33,13 @@ class RL_Device:
         self.caps: int = int(caps)
         self.groupId: int = int(groupId)
 
+        # presetId: last preset we asked the device to load (set by send paths).
+        # effectId: device's currently active segment mode (set by STATUS_REPLY;
+        #          was carried in the same wire byte as presetId before the
+        #          2026-04-25 rename, but the semantics differ).
         self.flags: int = int(flags) & 0xFF
         self.presetId: int = int(presetId) & 0xFF
+        self.effectId: int = int(effectId) & 0xFF
         self.brightness: int = int(brightness) & 0xFF
         self.configByte: int = int(configByte) & 0xFF
         self.specials: dict[str, int] = {}
@@ -73,10 +79,14 @@ class RL_Device:
             # swallow-ok: best-effort fallback; caller proceeds with safe default
             pass
 
-    def update_from_status(self, flags, configByte, presetId, brightness, vbat_mV, node_rssi, node_snr, host_rssi=None, host_snr=None):
+    def update_from_status(self, flags, configByte, effectId, brightness, vbat_mV, node_rssi, node_snr, host_rssi=None, host_snr=None):
+        # P_StatusReply byte 2 was renamed presetId -> effectId 2026-04-25
+        # (semantics shift to active segment mode index). presetId is no
+        # longer touched by status; it remains the host-tracked "what preset
+        # have I told this device to load".
         self.flags = int(flags) & 0xFF if flags is not None else self.flags
         self.configByte = int(configByte) & 0xFF if configByte is not None else self.configByte
-        self.presetId = int(presetId) & 0xFF if presetId is not None else self.presetId
+        self.effectId = int(effectId) & 0xFF if effectId is not None else self.effectId
         self.brightness = int(brightness) & 0xFF if brightness is not None else self.brightness
 
         self.voltage_mV = int(vbat_mV) if vbat_mV is not None else self.voltage_mV
