@@ -131,10 +131,42 @@
     }
   }
 
+  // Persisted selection: which group is active in the sidebar. Read at
+  // bootstrap and validated against the freshly-fetched group list — if
+  // the stored id no longer exists (group deleted, e.g. on another tab),
+  // the caller falls back to whatever default it had before.
+  function loadStoredSelGroupId(){
+    try{
+      const raw = localStorage.getItem("rlSelGroupId");
+      if(raw === null || raw === "") return null;
+      const n = Number(raw);
+      return Number.isFinite(n) ? n : null;
+    }catch{
+      return null;
+    }
+  }
+
+  function storeSelGroupId(id){
+    try{
+      if(id === null || id === undefined){
+        localStorage.removeItem("rlSelGroupId");
+      }else{
+        localStorage.setItem("rlSelGroupId", String(id));
+      }
+    }catch{
+      // ignore storage errors (private mode etc.)
+    }
+  }
+
   let state = {
     groups: [],
     devices: [],
-    selGroupId: null,
+    // Seed the active-group filter synchronously from localStorage so
+    // ``renderTable`` already filters correctly when /api/devices wins
+    // the parallel-load race against /api/groups. ``loadGroups`` later
+    // validates this id against the fresh group list and falls back if
+    // the stored group has since been deleted.
+    selGroupId: loadStoredSelGroupId(),
     sortKey: null,
     sortDir: 1,
     selected: new Set(),
@@ -155,6 +187,49 @@
     specialDevice: null,
     specialTab: null,
   };
+
+  // ---- generic resource-refresh registry --------------------------------
+  // One rule across the WebUI: when a first-class element is created,
+  // deleted, or renamed (regardless of resource type), every view that
+  // consumes that data is re-fetched and re-rendered. The registry below
+  // is the single entry point for both same-tab mutations and SSE-driven
+  // cross-tab updates — they go through ``refreshResource`` so subscribers
+  // never need to care which side triggered the change.
+  //
+  // Loaders are registered later in this file (and from scenes.js for the
+  // scenes resource). Each subscriber is a re-render hook owned by the
+  // view it updates; views null-guard themselves so a hook registered on
+  // /racelink/ is harmless when scenes.js isn't loaded and vice versa.
+  const _refreshSubs = {
+    groups: [],
+    devices: [],
+    scenes: [],
+    rl_presets: [],
+    specials: [],
+  };
+  const _resourceLoaders = {};
+
+  function registerLoader(resource, fn){
+    _resourceLoaders[resource] = fn;
+  }
+
+  function subscribeRefresh(resource, fn){
+    if(!_refreshSubs[resource]) _refreshSubs[resource] = [];
+    _refreshSubs[resource].push(fn);
+  }
+
+  async function refreshResource(resource){
+    const loader = _resourceLoaders[resource];
+    if(typeof loader === "function"){
+      try{ await loader(); }
+      catch(e){ console.warn(`[refresh] loader for ${resource} failed`, e); }
+    }
+    const subs = _refreshSubs[resource] || [];
+    for(const fn of subs){
+      try{ await fn(); }
+      catch(e){ console.warn(`[refresh] subscriber for ${resource} failed`, e); }
+    }
+  }
 
   async function apiGet(url){
     const res = await fetch(withBasePath(url), {credentials:"same-origin"});
@@ -714,9 +789,32 @@ async function openSpecialsDialog(mac){
   async function loadGroups(){
     const g = await apiGet("/racelink/api/groups");
     state.groups = (g.groups||[]);
-    if(state.selGroupId===null && state.groups.length>0){ state.selGroupId = state.groups[0].id; }
+    // Reconcile ``state.selGroupId`` with the freshly-loaded list. Three
+    // cases to handle:
+    //   1. selGroupId was seeded synchronously from localStorage at module
+    //      init, but the stored id no longer exists in the fleet → reset.
+    //   2. nothing was stored / selGroupId is still null → pick the first
+    //      group as the historical default.
+    //   3. the stored id is still valid → keep it.
+    // Doing this here (rather than only when ``selGroupId === null``)
+    // avoids a stale highlight when a group is deleted on another tab.
+    const idValid = (id) => state.groups.some(gr => gr.id === id);
+    if(state.selGroupId !== null && !idValid(state.selGroupId)){
+      state.selGroupId = null;
+      storeSelGroupId(null);
+    }
+    if(state.selGroupId === null && state.groups.length > 0){
+      state.selGroupId = state.groups[0].id;
+    }
     renderGroups();
     renderBulkGroup();
+    // ``renderTable`` filters by ``selGroupId`` — re-render it here so the
+    // device list matches the sidebar selection regardless of whether
+    // loadGroups or loadDevices won the parallel-load race. Pre-2026-05-02
+    // only loadDevices called renderTable, which meant a fast /api/devices
+    // response paired with a slow /api/groups left the table unfiltered
+    // ("all devices" while the sidebar showed Unconfigured).
+    renderTable();
   }
 
   async function loadDevices(){
@@ -742,6 +840,11 @@ async function openSpecialsDialog(mac){
 
   function renderGroups(){
     const ul = $("#rlGroups");
+    // ``renderGroups`` is shared between loadGroups (sidebar) and the SSE
+    // refresh path. The Scenes page doesn't have ``#rlGroups`` in its
+    // template, so a refresh fired there would throw — null-guard it so
+    // the loader stays cross-page-safe.
+    if(!ul) return;
     ul.innerHTML = "";
 
     // Snapshot the freshest ``last_seen_ts`` per group from the device
@@ -797,14 +900,16 @@ async function openSpecialsDialog(mac){
       li.appendChild(countSpan);
       // Per-group delete button. Hidden by default, revealed on
       // hover via CSS. Static groups (e.g. "All WLED Nodes") and the
-      // synthetic Unconfigured (id=0) cannot be deleted — skip the
-      // button entirely on those rows.
+      // synthetic Unconfigured (id=0) cannot be deleted; for those
+      // rows we still emit the button as a placeholder so the count
+      // column lines up with deletable rows — the placeholder class
+      // keeps it permanently invisible and non-interactive.
       const deletable = !gr.static && Number(gr.id) !== 0;
+      const delBtn = document.createElement("button");
+      delBtn.type = "button";
+      delBtn.className = "rl-group-delete-btn";
+      delBtn.textContent = "✕";
       if(deletable){
-        const delBtn = document.createElement("button");
-        delBtn.type = "button";
-        delBtn.className = "rl-group-delete-btn";
-        delBtn.textContent = "✕";
         delBtn.title = `Delete group "${gr.name}"`;
         delBtn.addEventListener("click", async (e) => {
           // Stop the click from also selecting the group (the row's
@@ -812,10 +917,16 @@ async function openSpecialsDialog(mac){
           e.stopPropagation();
           await handleGroupDelete(gr);
         });
-        li.appendChild(delBtn);
+      }else{
+        delBtn.classList.add("rl-group-delete-btn--placeholder");
+        delBtn.tabIndex = -1;
+        delBtn.setAttribute("aria-hidden", "true");
+        delBtn.disabled = true;
       }
+      li.appendChild(delBtn);
       li.addEventListener("click", () => {
         state.selGroupId = gr.id;
+        storeSelGroupId(gr.id);
         renderGroups();
         renderTable();
       });
@@ -873,15 +984,23 @@ async function openSpecialsDialog(mac){
     );
     // If the deleted group was the active filter, drop the filter
     // so the table doesn't show an empty view.
-    if(state.selGroupId === group.id) state.selGroupId = null;
+    if(state.selGroupId === group.id){
+      state.selGroupId = null;
+      storeSelGroupId(null);
+    }
     // SSE refresh will fire from the server too; this just makes
-    // the response feel instant.
-    await loadGroups();
-    await loadDevices();
+    // the response feel instant. Routing through ``refreshResource``
+    // also notifies any subscriber registered on /scenes (target
+    // picker etc.) without scenes.js having to listen separately.
+    await refreshResource("groups");
+    await refreshResource("devices");
   }
 
   function renderBulkGroup(){
     const sel = $("#bulkGroup"), sel2 = $("#discoverGroup");
+    // Devices-page-only widgets; null-guard so cross-page refreshes
+    // don't throw on /scenes.
+    if(!sel || !sel2) return;
     sel.innerHTML = ""; sel2.innerHTML = "";
     const selectableGroups = state.groups.filter(gr => !gr.static && Number(gr.id) !== 255);
     selectableGroups.forEach(gr => {
@@ -928,6 +1047,9 @@ async function openSpecialsDialog(mac){
 
   function renderTable(){
     const body = $("#rlBody");
+    // Devices-page-only widget; null-guard so a refresh on /scenes
+    // (which has no device table) is a safe no-op.
+    if(!body) return;
     body.innerHTML = "";
 
     // Apply current filters first
@@ -2002,6 +2124,28 @@ async function openSpecialsDialog(mac){
     });
   }
 
+  // Close the EventSource synchronously when the page is being unloaded.
+  // Without this, Chrome lets a navigation-triggered SSE close drift through
+  // its "graceful FIN" path and parks the underlying TCP socket in a
+  // half-finished state inside its HTTP/1.1 connection pool. After ~5
+  // page-switches between /racelink/ and /racelink/scenes that pool fills up
+  // (limit 6 per origin) and the next set of API requests hangs for tens of
+  // seconds. ``pagehide`` runs *before* unload while JS is still alive and
+  // forces an explicit close, which makes the browser release the socket
+  // slot deterministically. Persisted-page-cache-bound tabs (event.persisted)
+  // would survive a reconnect anyway — close them too because the new page
+  // load opens its own fresh EventSource.
+  window.addEventListener("pagehide", () => {
+    if(_esReconnectTimer){
+      clearTimeout(_esReconnectTimer);
+      _esReconnectTimer = null;
+    }
+    if(_es){
+      try{ _es.close(); }catch{}
+      _es = null;
+    }
+  });
+
   function connectEvents(){
     try{
       if(_es){
@@ -2041,10 +2185,13 @@ async function openSpecialsDialog(mac){
         try{
           const p = JSON.parse(e.data);
           const what = (p && p.what) ? p.what : ["groups","devices"];
-          if(what.includes("groups")) await loadGroups();
-          if(what.includes("devices")) await loadDevices();
-          if(what.includes("scenes") && typeof window.__rlScenesRefresh === "function"){
-            window.__rlScenesRefresh();
+          // Route every server-broadcast refresh through the registry so
+          // SSE-driven and local mutations share the exact same code path
+          // (loader + every subscriber). Topics without a loader and no
+          // subscribers are no-ops, which keeps forward-compat with new
+          // server-side topics that the client doesn't know about yet.
+          for(const topic of what){
+            await refreshResource(topic);
           }
         }catch{
           await loadAll();
@@ -2679,8 +2826,7 @@ $("#btnNodeCfgSend").addEventListener("click", async ()=>{
           $("#rlPresetsHint").textContent = r.error || "Duplicate failed.";
           return;
         }
-        await loadRlPresets();
-        renderRlPresetList();
+        await refreshResource("rl_presets");
         selectRlPreset(r.preset.key);
       });
       actions.appendChild(dupBtn);
@@ -2694,9 +2840,8 @@ $("#btnNodeCfgSend").addEventListener("click", async ()=>{
           $("#rlPresetsHint").textContent = r.error || "Delete failed.";
           return;
         }
-        await loadRlPresets();
         state.rlPresets.selectedKey = null;
-        renderRlPresetList();
+        await refreshResource("rl_presets");
         renderRlPresetEditor(null);
       });
       actions.appendChild(delBtn);
@@ -2751,9 +2896,8 @@ $("#btnNodeCfgSend").addEventListener("click", async ()=>{
         return;
       }
       $("#rlPresetsHint").textContent = `Saved "${r.preset.label}"`;
-      await loadRlPresets();
       state.rlPresets.selectedKey = r.preset.key;
-      renderRlPresetList();
+      await refreshResource("rl_presets");
       renderRlPresetEditor(r.preset);
     });
   }
@@ -2820,6 +2964,38 @@ $("#btnNodeCfgSend").addEventListener("click", async ()=>{
     $("#rlPresetsHint").textContent = "New preset — enter label and Create.";
   });
 
+  // ---- resource refresh: register loaders + subscribers -----------------
+  // Each loader fetches a resource from the server. Each subscriber is a
+  // re-render hook that depends on that resource. Subscribers run after
+  // the loader has refreshed ``state``. Cross-resource cascades (e.g.
+  // RL-preset changes invalidate the device-options dropdown which is
+  // a derived view inside ``state.specials``) are explicit
+  // ``refreshResource`` calls inside subscribers.
+  registerLoader("groups",     loadGroups);
+  registerLoader("devices",    loadDevices);
+  registerLoader("specials",   loadSpecials);
+  registerLoader("rl_presets", loadRlPresets);
+
+  // Devices-page renderers are already invoked from within the load
+  // helpers, but registering them as subscribers means SSE-driven and
+  // local mutations follow the exact same path no matter who fired it.
+  // The renderers null-guard their DOM lookups so calls on the Scenes
+  // page (no device table, no group sidebar) are no-ops.
+  subscribeRefresh("rl_presets", async () => {
+    // RL-preset list changes invalidate the WLED Control dropdown in the
+    // Device Options dialog, whose options are server-resolved into
+    // ``state.specials``. Re-fetch and re-render that dialog too.
+    await refreshResource("specials");
+    if(document.getElementById("rlPresetList")){
+      renderRlPresetList();
+    }
+  });
+  subscribeRefresh("specials", () => {
+    if(state.specialDevice){
+      renderSpecialTabs();
+    }
+  });
+
   // R5c: expose the shared helpers to scenes.js (loaded on /racelink/scenes).
   // Scenes pages reuse apiGet/apiPost/apiPut/apiDelete and read from the
   // same ``state`` object. The Devices page uses these directly via the IIFE
@@ -2837,6 +3013,9 @@ $("#btnNodeCfgSend").addEventListener("click", async ()=>{
     // safe — only the elements that exist on the current page get
     // disabled.
     setBusy,
+    // Resource-refresh registry: scenes.js registers its own loader
+    // (``scenes``) and subscribers (target picker, schema cache).
+    registerLoader, subscribeRefresh, refreshResource,
   };
 
   // =====================================================================

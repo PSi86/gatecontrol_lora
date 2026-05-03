@@ -349,7 +349,15 @@ class SSEBridge:
 
                         now = time.time()
                         if item is None:
-                            if now - last_ping >= 15.0:
+                            # 2-second ping cadence (was 15 s) so the only
+                            # ``yield`` in a quiet stream fires often enough
+                            # that ``BrokenPipeError`` is observed quickly
+                            # after a client disconnect. Without this, dead
+                            # SSE generators linger up to 15 s, occupy
+                            # Chrome's per-origin HTTP/1.1 slot pool (limit 6)
+                            # and stall navigations between /racelink/ and
+                            # /racelink/scenes after ~6 quick page switches.
+                            if now - last_ping >= 2.0:
                                 last_ping = now
                                 yield ": ping\n\n"
                             continue
@@ -366,7 +374,13 @@ class SSEBridge:
 
             headers = {
                 "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
+                # ``close`` (was ``keep-alive``) so Chrome doesn't retain the
+                # SSE socket in its per-origin HTTP/1.1 keep-alive pool after
+                # the EventSource ends — text/event-stream never terminates
+                # cleanly, and Chrome was holding "half-finished" sockets
+                # against its 6-slot limit, which stalled navigations between
+                # /racelink/ and /racelink/scenes after ~6 quick switches.
+                "Connection": "close",
                 "X-Accel-Buffering": "no",
             }
             return Response(gen(), mimetype="text/event-stream", headers=headers)
