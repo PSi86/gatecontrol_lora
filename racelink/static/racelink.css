@@ -34,7 +34,11 @@ body{ margin:0; font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif
    the row had only two children but stranded the count mid-row once
    the delete button was added as a third child. */
 .rl-groups li{
-  padding:8px; border-radius:8px; cursor:pointer;
+  /* Unified sidebar list-item style — mirrors ``.rl-presets-list li`` so
+     /racelink/ and /racelink/scenes feel like the same UI. Pre-2026-05-02
+     the two sidebars drifted (different padding, radius, hover and active
+     shades); they are now derived from the same set of visual tokens. */
+  padding:8px 10px; border-radius:8px; cursor:pointer; font-size:13px;
   display:flex; align-items:center; gap:6px;
 }
 .rl-groups li > span:first-child{
@@ -44,8 +48,11 @@ body{ margin:0; font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.rl-groups li:hover{ background:#1f1f26; }
-.rl-groups li.active{ background:#262633; }
+.rl-groups li:hover{ background:#1f1f28; }
+.rl-groups li.active{
+  background:#2a2d40; color:#cfe0ff;
+  box-shadow: inset 2px 0 0 var(--accent);
+}
 .rl-groups .count{ color:var(--muted); font-size:12px; flex: 0 0 auto; }
 .rl-content{ background:var(--card); border:1px solid #2a2a32; border-radius:10px; padding:10px; overflow:auto; }
 .rl-toolbar{ display:flex; align-items:center; gap:10px; padding:6px 0 10px; border-bottom:1px dashed #2a2a32; margin-bottom:8px; flex-wrap:wrap; }
@@ -91,6 +98,14 @@ body{ margin:0; font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif
 }
 .rl-groups li:hover .rl-group-delete-btn{ visibility: visible; }
 .rl-group-delete-btn:hover{ color: var(--err); background: #221314; }
+/* Placeholder variant for non-deletable groups (Unconfigured, static
+   groups). Reserves the button slot so the count column lines up
+   across all rows; never becomes visible, even on row hover. */
+.rl-group-delete-btn--placeholder,
+.rl-groups li:hover .rl-group-delete-btn--placeholder{
+  visibility: hidden;
+  pointer-events: none;
+}
 .mono{ font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace; font-size:12px; }
 .tag{ padding:2px 6px; border-radius:10px; font-size:12px; border:1px solid #2a2a32; }
 .tag.ok{ color:#b6f5cf; border-color:#2d553f; background:#102017; }
@@ -140,14 +155,17 @@ dialog::backdrop{ background:rgba(0,0,0,.4); }
 #dlgRlPresets{ width: min(960px, 96vw); max-width: none; max-height: 90vh; }
 .rl-presets-form{ width: 100%; }
 .rl-presets-layout{ display:grid; grid-template-columns: minmax(180px, 240px) 1fr; gap:12px; margin:8px 0; }
-.rl-presets-sidebar{ border:1px solid #2a2a32; border-radius:8px; padding:8px; background:#16161d; }
+.rl-presets-sidebar{ border:1px solid #2a2a32; border-radius:8px; padding:8px; background:var(--card); }
 .rl-presets-toolbar{ display:flex; gap:6px; margin-bottom:8px; flex-wrap:wrap; }
 .rl-presets-list{ list-style:none; padding:0; margin:0; max-height:60vh; overflow-y:auto; }
-.rl-presets-list li{ padding:6px 8px; border-radius:6px; cursor:pointer; font-size:13px; }
+.rl-presets-list li{ padding:8px 10px; border-radius:8px; cursor:pointer; font-size:13px; }
 .rl-presets-list li:hover{ background:#1f1f28; }
-.rl-presets-list li.active{ background:#2a2d40; color:#cfe0ff; }
-.rl-presets-list li.muted{ cursor:default; }
-.rl-presets-editor{ border:1px solid #2a2a32; border-radius:8px; padding:10px; background:#16161d; min-height:300px; }
+.rl-presets-list li.active{
+  background:#2a2d40; color:#cfe0ff;
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.rl-presets-list li.muted{ cursor:default; padding:12px 10px; text-align:center; }
+.rl-presets-editor{ border:1px solid #2a2a32; border-radius:8px; padding:10px; background:var(--card); min-height:300px; }
 
 /* Scene Manager — own page (/racelink/scenes) layout. R6: drop the 1200px
    max-width clamp left over from the dialog era; the page now fills the

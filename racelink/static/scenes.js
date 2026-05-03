@@ -16,7 +16,10 @@
     console.error("[scenes] window.RL not available — racelink.js must load before scenes.js");
     return;
   }
-  const { apiGet, apiPost, apiPut, apiDelete, state } = RL;
+  const {
+    apiGet, apiPost, apiPut, apiDelete, state,
+    refreshResource, subscribeRefresh, registerLoader,
+  } = RL;
   const $ = (sel, ctx=document) => ctx.querySelector(sel);
 
   const SCENE_KIND_LABELS = {
@@ -40,6 +43,30 @@
   function setScenesHint(text){
     const el = $("#scenesHint");
     if(el) el.textContent = text || "";
+  }
+
+  // Persisted scene selection — mirrors the racelink.js group-selection
+  // pattern. Read at bootstrap, written whenever the user picks a scene
+  // or finishes a save, cleared when the active scene is gone.
+  function loadStoredSceneKey(){
+    try{
+      const raw = localStorage.getItem("rlSelectedSceneKey");
+      return raw === null || raw === "" ? null : String(raw);
+    }catch{
+      return null;
+    }
+  }
+
+  function storeSceneKey(key){
+    try{
+      if(key === null || key === undefined){
+        localStorage.removeItem("rlSelectedSceneKey");
+      }else{
+        localStorage.setItem("rlSelectedSceneKey", String(key));
+      }
+    }catch{
+      // ignore storage errors (private mode etc.)
+    }
   }
 
   async function loadScenes(){
@@ -520,22 +547,6 @@
     }
   }
 
-  async function loadGroupsAndDevicesForTargetPicker(){
-    // The scenes page doesn't render the device table, but the action target
-    // picker still needs current group/device lists. Fetch them once on
-    // editor open; SSE refreshes update them when groups/devices change.
-    try{
-      const [g, d] = await Promise.all([
-        apiGet("/racelink/api/groups"),
-        apiGet("/racelink/api/devices"),
-      ]);
-      if(g && g.ok) state.groups = g.groups || [];
-      if(d && d.ok) state.devices = d.devices || [];
-    }catch(e){
-      console.error("[scenes] failed to fetch groups/devices for target picker", e);
-    }
-  }
-
   function findKindMeta(kind){
     if(!state.scenes.schema) return null;
     return state.scenes.schema.kinds.find(k => k.kind === kind) || null;
@@ -649,6 +660,7 @@
   function selectScene(key){
     if(!_confirmDiscardIfDirty()) return;
     state.scenes.selectedKey = key;
+    storeSceneKey(key);
     state.scenes.lastRunResult = null;
     const scene = state.scenes.items.find(s => s.key === key) || null;
     state.scenes.draft = scene ? cloneAction(scene) : null;
@@ -660,6 +672,7 @@
   function newSceneDraft(){
     if(!_confirmDiscardIfDirty()) return;
     state.scenes.selectedKey = null;
+    storeSceneKey(null);
     state.scenes.lastRunResult = null;
     state.scenes.draft = { id: null, key: null, label: "", actions: [] };
     _markPristine();
@@ -849,8 +862,7 @@
         if(!newLabel) return;
         const r = await apiPost(`/racelink/api/scenes/${draft.key}/duplicate`, {label: newLabel});
         if(!r.ok){ setScenesHint(r.error || "Duplicate failed."); return; }
-        await loadScenes();
-        renderSceneList();
+        await refreshResource("scenes");
         selectScene(r.scene.key);
       });
       actionBar.appendChild(dupBtn);
@@ -862,11 +874,11 @@
         if(!confirm(`Delete scene "${draft.label}"?`)) return;
         const r = await apiDelete(`/racelink/api/scenes/${draft.key}`);
         if(!r.ok){ setScenesHint(r.error || "Delete failed."); return; }
-        await loadScenes();
         state.scenes.selectedKey = null;
+        storeSceneKey(null);
         state.scenes.draft = null;
         state.scenes.lastRunResult = null;
-        renderSceneList();
+        await refreshResource("scenes");
         renderSceneEditor();
       });
       actionBar.appendChild(delBtn);
@@ -2296,13 +2308,17 @@
     }
     if(!r.ok){ setScenesHint(r.error || "Save failed."); return; }
     setScenesHint(`Saved "${r.scene.label}".`);
-    await loadScenes();
     state.scenes.selectedKey = r.scene.key;
+    storeSceneKey(r.scene.key);
     state.scenes.draft = cloneAction(r.scene);
     // C11: a successful save makes the current draft pristine — the
     // beforeunload listener won't prompt until the next edit.
     _markPristine();
-    renderSceneList();
+    // Single refresh entry point: re-fetch the scenes list and run all
+    // scenes-subscribers (renderSceneList + draft sync). The editor is
+    // re-rendered explicitly afterwards because the subscriber's logic
+    // only re-renders the editor on a draft-matching SSE refresh.
+    await refreshResource("scenes");
     renderSceneEditor();
   }
 
@@ -2383,44 +2399,97 @@
     }
   };
 
-  // Exposed for racelink.js's SSE refresh handler — fires when the SCENES
-  // topic arrives (CRUD on another tab / RH plugin etc.).
-  window.__rlScenesRefresh = async () => {
-    await loadScenes();
+  // ---- resource refresh hooks -----------------------------------------
+  // The single registry in racelink.js drives both SSE-driven and
+  // local-mutation refreshes. Below we register the scenes loader
+  // (so refreshResource("scenes") works) and subscribers for every
+  // resource the scene editor consumes.
+
+  registerLoader("scenes", loadScenes);
+
+  // Subscriber for the scenes resource itself. Replaces the legacy
+  // ``window.__rlScenesRefresh`` hook — same draft-sync logic, just
+  // wired through the registry so cross-tab refreshes and local saves
+  // share one path.
+  subscribeRefresh("scenes", () => {
     renderSceneList();
-    if(state.scenes.selectedKey){
-      const fresh = state.scenes.items.find(s => s.key === state.scenes.selectedKey);
-      if(fresh && state.scenes.draft && state.scenes.draft.key === state.scenes.selectedKey){
-        try{
-          const sameAsDraft = JSON.stringify(fresh.actions) === JSON.stringify(state.scenes.draft.actions || [])
-                            && fresh.label === state.scenes.draft.label;
-          if(sameAsDraft){
-            state.scenes.draft = cloneAction(fresh);
-            // C11: SSE refresh accepted — the on-disk version
-            // matches the draft, so the new draft is pristine.
-            _markPristine();
-            renderSceneEditor();
-          }
-        }catch{
-          // ignore
+    if(!state.scenes.selectedKey) return;
+    const fresh = state.scenes.items.find(s => s.key === state.scenes.selectedKey);
+    if(fresh && state.scenes.draft && state.scenes.draft.key === state.scenes.selectedKey){
+      try{
+        const sameAsDraft = JSON.stringify(fresh.actions) === JSON.stringify(state.scenes.draft.actions || [])
+                          && fresh.label === state.scenes.draft.label;
+        if(sameAsDraft){
+          state.scenes.draft = cloneAction(fresh);
+          // C11: SSE refresh accepted — the on-disk version matches
+          // the draft, so the new draft is pristine.
+          _markPristine();
+          renderSceneEditor();
         }
-      }else if(!fresh){
-        state.scenes.selectedKey = null;
-        state.scenes.draft = null;
-        // C11: nothing to be dirty about now.
-        _markPristine();
-        renderSceneEditor();
+      }catch{
+        // ignore
       }
+    }else if(!fresh){
+      state.scenes.selectedKey = null;
+      storeSceneKey(null);
+      state.scenes.draft = null;
+      _markPristine();
+      renderSceneEditor();
     }
-  };
+  });
+
+  // Schema cache invalidation: the editor schema embeds RL-preset and
+  // WLED-preset option lists which are server-resolved at request time.
+  // We only subscribe to ``specials`` here — the rl_presets subscriber
+  // in racelink.js already cascades a specials refresh, so this single
+  // hook covers both rl_presets and wled_presets changes without firing
+  // the schema reload twice.
+  async function reloadScenesSchemaAndRerender(){
+    state.scenes.schema = null;
+    await ensureScenesSchema();
+    if(document.getElementById("sceneEditor")){
+      renderSceneEditor();
+    }
+  }
+  subscribeRefresh("specials", reloadScenesSchemaAndRerender);
+
+  // Target picker (group / device pickers in the per-action target
+  // sub-form) reads from ``state.groups`` / ``state.devices`` which the
+  // groups/devices loaders already keep current. The subscriber's only
+  // job is to re-render the editor when the underlying data changes.
+  function rerenderEditorIfMounted(){
+    if(document.getElementById("sceneEditor")){
+      renderSceneEditor();
+    }
+  }
+  subscribeRefresh("groups",  rerenderEditorIfMounted);
+  subscribeRefresh("devices", rerenderEditorIfMounted);
 
   // ---- bootstrap (page-load) ------------------------------------------
 
   async function init(){
     setScenesHint("");
-    await Promise.all([ensureScenesSchema(), loadScenes(), loadGroupsAndDevicesForTargetPicker()]);
+    // Bootstrap via the resource registry so state.groups / state.devices /
+    // state.scenes are populated by the same path SSE refreshes use.
+    // ensureScenesSchema is page-local and runs in parallel.
+    await Promise.all([
+      ensureScenesSchema(),
+      refreshResource("scenes"),
+      refreshResource("groups"),
+      refreshResource("devices"),
+    ]);
+    // Restore the last-active scene from localStorage on cold load. If
+    // the stored key is gone (scene deleted on another tab), fall back
+    // to the first scene as before. The non-null branch is left intact
+    // so cross-page navigation (e.g. SSE pre-set the key) still wins.
     if(!state.scenes.selectedKey && state.scenes.items.length){
-      state.scenes.selectedKey = state.scenes.items[0].key;
+      const stored = loadStoredSceneKey();
+      if(stored && state.scenes.items.some(s => s.key === stored)){
+        state.scenes.selectedKey = stored;
+      }else{
+        state.scenes.selectedKey = state.scenes.items[0].key;
+        if(stored) storeSceneKey(state.scenes.selectedKey);
+      }
     }
     const sel = state.scenes.items.find(s => s.key === state.scenes.selectedKey) || null;
     state.scenes.draft = sel ? cloneAction(sel) : null;
